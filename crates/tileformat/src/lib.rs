@@ -1,10 +1,10 @@
-//! Formato do mapa salvo em disco. Compartilhado entre o bake e o leitor do jogo.
+//! On-disk map format. Shared between the bake and the game reader.
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Conteúdo de `cache/<id>/meta.json`.
+/// Contents of `cache/<id>/meta.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapMeta {
     pub id: String,
@@ -17,17 +17,17 @@ pub struct MapMeta {
     pub complete: bool,
 }
 
-/// Conteúdo de `cache/<id>/tiles/x_y.json`: um tile da grade do mapa.
+/// Contents of `cache/<id>/tiles/x_y.json`: one tile of the map grid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tile {
-    /// Índice do tile na grade (x, y).
+    /// Tile index in the grid (x, y).
     pub x: i32,
     pub y: i32,
-    /// Alturas em grade (DSM já suavizado), linha-major: `values[row * cols + col]`.
+    /// Grid heights (DSM, already smoothed), row-major: `values[row * cols + col]`.
     pub height: HeightGrid,
-    /// Polilinhas de vias.
+    /// Road polylines.
     pub roads: Vec<Polyline>,
-    /// Polígonos de prédios.
+    /// Building polygons.
     pub buildings: Vec<Polygon>,
 }
 
@@ -40,19 +40,19 @@ pub struct HeightGrid {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Polyline {
-    /// Valor da tag `highway` do OSM (ex.: "residential").
+    /// Value of the OSM `highway` tag (e.g. "residential").
     pub highway: String,
-    /// Pontos `[x, y]` no sistema definido pelo bake.
+    /// Points `[x, y]` in the system defined by the bake.
     pub points: Vec<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Polygon {
-    /// Anel externo `[x, y]` no sistema definido pelo bake.
+    /// Outer ring `[x, y]` in the system defined by the bake.
     pub points: Vec<[f64; 2]>,
 }
 
-/// Caminho de `cache/<id>/tiles/x_y.json` a partir da raiz do cache (`cache/`).
+/// Path of `cache/<id>/tiles/x_y.json` from the cache root (`cache/`).
 pub fn tile_path(cache_root: &Path, id: &str, x: i32, y: i32) -> PathBuf {
     cache_root
         .join(id)
@@ -60,8 +60,8 @@ pub fn tile_path(cache_root: &Path, id: &str, x: i32, y: i32) -> PathBuf {
         .join(format!("{x}_{y}.json"))
 }
 
-/// Grava o tile em `cache/<id>/tiles/x_y.json` (cria as pastas se faltarem).
-/// Retorna o caminho gravado.
+/// Writes the tile to `cache/<id>/tiles/x_y.json` (creates the folders if missing).
+/// Returns the path written.
 pub fn write_tile(cache_root: &Path, id: &str, tile: &Tile) -> io::Result<PathBuf> {
     let path = tile_path(cache_root, id, tile.x, tile.y);
     if let Some(dir) = path.parent() {
@@ -73,7 +73,7 @@ pub fn write_tile(cache_root: &Path, id: &str, tile: &Tile) -> io::Result<PathBu
     Ok(path)
 }
 
-/// Lê um tile de `cache/<id>/tiles/x_y.json`.
+/// Reads a tile from `cache/<id>/tiles/x_y.json`.
 pub fn read_tile(path: &Path) -> io::Result<Tile> {
     let file = fs::File::open(path)?;
     serde_json::from_reader(io::BufReader::new(file))
@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_identico() {
+    fn round_trip_is_identical() {
         let root = temp_cache_root("rt");
         let tile = sample_tile();
         let path = write_tile(&root, "casa", &tile).unwrap();
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn caminho_do_tile() {
+    fn tile_path_layout() {
         let p = tile_path(Path::new("cache"), "casa", 1, -2);
         assert_eq!(p, Path::new("cache/casa/tiles/1_-2.json"));
     }

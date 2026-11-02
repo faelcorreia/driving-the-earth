@@ -1,10 +1,10 @@
-//! DEM Copernicus GLO-30 (DSM) -> alturas da grade de cada tile.
+//! Copernicus GLO-30 DEM (DSM) -> height grid of each tile.
 //!
-//! Grade do tile: plano local em metros, origem no centro do `meta.json`
-//! (x = leste, y = norte). O tile `(x, y)` cobre `[x*tile, (x+1)*tile]` x
-//! `[y*tile, (y+1)*tile]`. A grade tem amostras nos cantos, com passo `CELULA_M`:
-//! `cols = rows = tile/CELULA_M + 1`, `values[row * cols + col]` com `row` ao norte
-//! e `col` ao leste. Tiles vizinhos compartilham a borda.
+//! Tile grid: local plane in meters, origin at the center of `meta.json`
+//! (x = east, y = north). Tile `(x, y)` covers `[x*tile, (x+1)*tile]` x
+//! `[y*tile, (y+1)*tile]`. The grid has samples at the corners, with step `CELL_M`:
+//! `cols = rows = tile/CELL_M + 1`, `values[row * cols + col]` with `row` to the north
+//! and `col` to the east. Neighboring tiles share their edge.
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,69 +16,69 @@ use tileformat::{HeightGrid, MapMeta};
 
 const USER_AGENT: &str = "driving-the-earth/0.1 (tilebake; projeto pessoal)";
 const COPERNICUS_BASE: &str = "https://copernicus-dem-30m.s3.amazonaws.com";
-/// Passo da grade do tile, em metros.
-pub const CELULA_M: f64 = 10.0;
-/// Raio médio da Terra, para o plano local.
-const RAIO_TERRA_M: f64 = 6_371_000.0;
-/// Valores abaixo disso (e não finitos) são "sem dado".
-const NODATA_LIMITE: f32 = -9000.0;
-/// Tags GeoTIFF: ModelPixelScale e ModelTiepoint.
+/// Step of the tile grid, in meters.
+pub const CELL_M: f64 = 10.0;
+/// Mean Earth radius, for the local plane.
+const EARTH_RADIUS_M: f64 = 6_371_000.0;
+/// Values below this (and non-finite ones) mean "no data".
+const NODATA_LIMIT: f32 = -9000.0;
+/// GeoTIFF tags: ModelPixelScale and ModelTiepoint.
 const TAG_PIXEL_SCALE: u16 = 33550;
 const TAG_TIEPOINT: u16 = 33922;
 
-/// Relevo lido do GeoTIFF, já suavizado. Pixel (c, r) tem centro em
-/// `lon0 + (c + 0.5) * passo_lon` e `lat0 - (r + 0.5) * passo_lat`.
+/// Terrain read from the GeoTIFF, already smoothed. Pixel (c, r) is centered at
+/// `lon0 + (c + 0.5) * step_lon` and `lat0 - (r + 0.5) * step_lat`.
 #[derive(Debug, Clone)]
 pub struct Raster {
-    pub largura: usize,
-    pub altura: usize,
-    /// Canto superior esquerdo do raster, em graus.
+    pub width: usize,
+    pub height: usize,
+    /// Upper-left corner of the raster, in degrees.
     pub lon0: f64,
     pub lat0: f64,
-    /// Tamanho do pixel em graus (positivos).
-    pub passo_lon: f64,
-    pub passo_lat: f64,
-    /// Alturas linha-major; `NaN` onde não há dado.
-    pub valores: Vec<f32>,
+    /// Pixel size in degrees (positive).
+    pub step_lon: f64,
+    pub step_lat: f64,
+    /// Heights, row-major; `NaN` where there is no data.
+    pub values: Vec<f32>,
 }
 
-/// Grade do mapa: converte coordenadas do tile em lat/lon e define o tile.
+/// Map grid: converts tile coordinates to lat/lon and defines the tile.
 #[derive(Debug, Clone, Copy)]
-pub struct Grade {
+pub struct MapGrid {
     pub lat0: f64,
     pub lon0: f64,
     pub tile_m: f64,
-    pub celula_m: f64,
+    pub cell_m: f64,
 }
 
-impl Grade {
-    pub fn de_meta(meta: &MapMeta) -> Self {
-        Grade {
+impl MapGrid {
+    pub fn from_meta(meta: &MapMeta) -> Self {
+        MapGrid {
             lat0: meta.center_lat,
             lon0: meta.center_lon,
             tile_m: meta.tile_size_m,
-            celula_m: CELULA_M,
+            cell_m: CELL_M,
         }
     }
 
-    /// (lat, lon) do ponto `(x_m, y_m)` do plano local (leste, norte).
+    /// (lat, lon) of the point `(x_m, y_m)` on the local plane (east, north).
     pub fn latlon(&self, x_m: f64, y_m: f64) -> (f64, f64) {
-        let m_lat = RAIO_TERRA_M.to_radians();
+        let m_lat = EARTH_RADIUS_M.to_radians();
         let m_lon = m_lat * self.lat0.to_radians().cos();
         (self.lat0 + y_m / m_lat, self.lon0 + x_m / m_lon)
     }
 }
 
-fn io_err<E: Display>(e: E) -> io::Error {
+fn other_err<E: Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e.to_string())
 }
 
-fn dado_invalido<E: Display>(e: E) -> io::Error {
+fn invalid_data<E: Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
-/// Nome do tile Copernicus que cobre `(lat, lon)`, pelo canto SW (ex.: S20_00_W044_00).
-pub fn nome_tile(lat: f64, lon: f64) -> String {
+/// Name of the Copernicus tile that covers `(lat, lon)`, by its SW corner (e.g. S20_00_W044_00).
+pub fn tile_name(lat: f64, lon: f64) -> String {
     let la = lat.floor() as i32;
     let lo = lon.floor() as i32;
     let ns = if la >= 0 { 'N' } else { 'S' };
@@ -86,95 +86,95 @@ pub fn nome_tile(lat: f64, lon: f64) -> String {
     format!("Copernicus_DSM_COG_10_{ns}{:02}_00_{ew}{:03}_00_DEM", la.abs(), lo.abs())
 }
 
-/// Baixa o tile que cobre `(lat, lon)` para `cache_root/<id>/raw/copernicus/`.
-/// Devolve (caminho, veio_do_cache). Se já existe, não baixa de novo.
-pub fn baixar_dem(cache_root: &Path, id: &str, lat: f64, lon: f64) -> io::Result<(PathBuf, bool)> {
-    let nome = nome_tile(lat, lon);
+/// Downloads the tile that covers `(lat, lon)` to `cache_root/<id>/raw/copernicus/`.
+/// Returns (path, came_from_cache). If it already exists, it is not downloaded again.
+pub fn download_dem(cache_root: &Path, id: &str, lat: f64, lon: f64) -> io::Result<(PathBuf, bool)> {
+    let name = tile_name(lat, lon);
     let dir = cache_root.join(id).join("raw").join("copernicus");
     fs::create_dir_all(&dir)?;
-    let destino = dir.join(format!("{nome}.tif"));
-    if destino.exists() {
-        return Ok((destino, true));
+    let dest = dir.join(format!("{name}.tif"));
+    if dest.exists() {
+        return Ok((dest, true));
     }
-    let url = format!("{COPERNICUS_BASE}/{nome}/{nome}.tif");
+    let url = format!("{COPERNICUS_BASE}/{name}/{name}.tif");
     let resp = ureq::get(&url)
         .set("User-Agent", USER_AGENT)
         .call()
-        .map_err(io_err)?;
-    let parte = dir.join(format!("{nome}.tif.part"));
+        .map_err(other_err)?;
+    let part = dir.join(format!("{name}.tif.part"));
     {
-        let mut corpo = resp.into_reader();
-        let mut arq = fs::File::create(&parte)?;
-        io::copy(&mut corpo, &mut arq)?;
-        arq.sync_all()?;
+        let mut body = resp.into_reader();
+        let mut file = fs::File::create(&part)?;
+        io::copy(&mut body, &mut file)?;
+        file.sync_all()?;
     }
-    fs::rename(&parte, &destino)?;
-    Ok((destino, false))
+    fs::rename(&part, &dest)?;
+    Ok((dest, false))
 }
 
-/// Lê o GeoTIFF (primeiro IFD, float32) e aplica suavização gaussiana (sigma 1 px,
-/// raio 2 px), para tirar picos de copas e telhados do DSM.
-pub fn ler_dem_suavizado(path: &Path) -> io::Result<Raster> {
-    let arq = fs::File::open(path)?;
-    let mut dec = Decoder::new(io::BufReader::new(arq)).map_err(dado_invalido)?;
-    let (w, h) = dec.dimensions().map_err(dado_invalido)?;
-    let escala = dec
+/// Reads the GeoTIFF (first IFD, float32) and applies Gaussian smoothing (sigma 1 px,
+/// radius 2 px), to remove canopy and roof spikes from the DSM.
+pub fn read_smoothed_dem(path: &Path) -> io::Result<Raster> {
+    let file = fs::File::open(path)?;
+    let mut dec = Decoder::new(io::BufReader::new(file)).map_err(invalid_data)?;
+    let (w, h) = dec.dimensions().map_err(invalid_data)?;
+    let scale = dec
         .get_tag_f64_vec(Tag::Unknown(TAG_PIXEL_SCALE))
-        .map_err(dado_invalido)?;
-    let tie = dec
+        .map_err(invalid_data)?;
+    let tiepoint = dec
         .get_tag_f64_vec(Tag::Unknown(TAG_TIEPOINT))
-        .map_err(dado_invalido)?;
-    if escala.len() < 2 || tie.len() < 6 || tie[0] != 0.0 || tie[1] != 0.0 {
-        return Err(dado_invalido("GeoTIFF sem georreferência simples (ModelPixelScale/Tiepoint)"));
+        .map_err(invalid_data)?;
+    if scale.len() < 2 || tiepoint.len() < 6 || tiepoint[0] != 0.0 || tiepoint[1] != 0.0 {
+        return Err(invalid_data("GeoTIFF without simple georeferencing (ModelPixelScale/Tiepoint)"));
     }
-    let bruto = match dec.read_image().map_err(dado_invalido)? {
+    let raw = match dec.read_image().map_err(invalid_data)? {
         DecodingResult::F32(v) => v,
-        _ => return Err(dado_invalido("DEM esperado em float32")),
+        _ => return Err(invalid_data("expected float32 DEM")),
     };
     let (w, h) = (w as usize, h as usize);
-    if bruto.len() != w * h {
-        return Err(dado_invalido("tamanho do DEM não bate com as dimensões"));
+    if raw.len() != w * h {
+        return Err(invalid_data("DEM size does not match dimensions"));
     }
-    let limpo: Vec<f32> = bruto
+    let clean: Vec<f32> = raw
         .into_iter()
-        .map(|v| if v.is_finite() && v > NODATA_LIMITE { v } else { f32::NAN })
+        .map(|v| if v.is_finite() && v > NODATA_LIMIT { v } else { f32::NAN })
         .collect();
-    let valores = suavizar(&limpo, w, h);
+    let values = smooth(&clean, w, h);
     Ok(Raster {
-        largura: w,
-        altura: h,
-        lon0: tie[3],
-        lat0: tie[4],
-        passo_lon: escala[0],
-        passo_lat: escala[1],
-        valores,
+        width: w,
+        height: h,
+        lon0: tiepoint[3],
+        lat0: tiepoint[4],
+        step_lon: scale[0],
+        step_lat: scale[1],
+        values,
     })
 }
 
-/// Gaussiana separável 5 taps (sigma 1), ignorando NaN e normalizando pelos pesos válidos.
-fn suavizar(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+/// Separable 5-tap Gaussian (sigma 1), ignoring NaN and normalizing by the valid weights.
+fn smooth(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     let sigma: f32 = 1.0;
-    let nucleo: [f32; 5] = {
+    let kernel: [f32; 5] = {
         let mut k = [0.0f32; 5];
         for (i, v) in k.iter_mut().enumerate() {
             let d = i as f32 - 2.0;
             *v = (-(d * d) / (2.0 * sigma * sigma)).exp();
         }
-        let soma: f32 = k.iter().sum();
-        k.map(|v| v / soma)
+        let sum: f32 = k.iter().sum();
+        k.map(|v| v / sum)
     };
-    let horiz = passa(src, w, h, 1, 0, &nucleo);
-    passa(&horiz, w, h, 0, 1, &nucleo)
+    let horizontal = pass_1d(src, w, h, 1, 0, &kernel);
+    pass_1d(&horizontal, w, h, 0, 1, &kernel)
 }
 
-fn passa(src: &[f32], w: usize, h: usize, dx: isize, dy: isize, k: &[f32; 5]) -> Vec<f32> {
+fn pass_1d(src: &[f32], w: usize, h: usize, dx: isize, dy: isize, k: &[f32; 5]) -> Vec<f32> {
     let mut out = vec![f32::NAN; w * h];
     for r in 0..h {
         for c in 0..w {
             if src[r * w + c].is_nan() {
                 continue;
             }
-            let (mut acc, mut peso) = (0.0f32, 0.0f32);
+            let (mut acc, mut weight) = (0.0f32, 0.0f32);
             for (i, &kw) in k.iter().enumerate() {
                 let d = i as isize - 2;
                 let rr = r as isize + dy * d;
@@ -185,27 +185,27 @@ fn passa(src: &[f32], w: usize, h: usize, dx: isize, dy: isize, k: &[f32; 5]) ->
                 let v = src[rr as usize * w + cc as usize];
                 if !v.is_nan() {
                     acc += kw * v;
-                    peso += kw;
+                    weight += kw;
                 }
             }
-            if peso > 0.0 {
-                out[r * w + c] = acc / peso;
+            if weight > 0.0 {
+                out[r * w + c] = acc / weight;
             }
         }
     }
     out
 }
 
-/// Interpolação bilinear da altura em `(lat, lon)`. `None` fora do raster ou sem dado.
-pub fn altura_em(r: &Raster, lat: f64, lon: f64) -> Option<f32> {
-    let fc = (lon - r.lon0) / r.passo_lon - 0.5;
-    let fr = (r.lat0 - lat) / r.passo_lat - 0.5;
+/// Bilinear interpolation of the height at `(lat, lon)`. `None` outside the raster or without data.
+pub fn height_at(r: &Raster, lat: f64, lon: f64) -> Option<f32> {
+    let fc = (lon - r.lon0) / r.step_lon - 0.5;
+    let fr = (r.lat0 - lat) / r.step_lat - 0.5;
     let c0 = fc.floor();
     let r0 = fr.floor();
     let tx = (fc - c0) as f32;
     let ty = (fr - r0) as f32;
     let (c0, r0) = (c0 as isize, r0 as isize);
-    let (mut acc, mut peso) = (0.0f32, 0.0f32);
+    let (mut acc, mut weight) = (0.0f32, 0.0f32);
     for (dr, dc, pw) in [
         (0, 0, (1.0 - tx) * (1.0 - ty)),
         (0, 1, tx * (1.0 - ty)),
@@ -214,38 +214,38 @@ pub fn altura_em(r: &Raster, lat: f64, lon: f64) -> Option<f32> {
     ] {
         let rr = r0 + dr;
         let cc = c0 + dc;
-        if rr < 0 || cc < 0 || rr >= r.altura as isize || cc >= r.largura as isize {
+        if rr < 0 || cc < 0 || rr >= r.height as isize || cc >= r.width as isize {
             continue;
         }
-        let v = r.valores[rr as usize * r.largura + cc as usize];
+        let v = r.values[rr as usize * r.width + cc as usize];
         if !v.is_nan() && pw > 0.0 {
             acc += pw * v;
-            peso += pw;
+            weight += pw;
         }
     }
-    if peso > 0.0 {
-        Some(acc / peso)
+    if weight > 0.0 {
+        Some(acc / weight)
     } else {
         None
     }
 }
 
-/// Amostra a grade de alturas do tile `(x, y)` (ver doc do módulo).
-pub fn alturas_do_tile(r: &Raster, grade: &Grade, x: i32, y: i32) -> io::Result<HeightGrid> {
-    let n = (grade.tile_m / grade.celula_m).round() as u32;
+/// Samples the height grid of tile `(x, y)` (see the module doc).
+pub fn tile_heights(r: &Raster, grid: &MapGrid, x: i32, y: i32) -> io::Result<HeightGrid> {
+    let n = (grid.tile_m / grid.cell_m).round() as u32;
     let cols = n + 1;
-    let x0 = x as f64 * grade.tile_m;
-    let y0 = y as f64 * grade.tile_m;
+    let x0 = x as f64 * grid.tile_m;
+    let y0 = y as f64 * grid.tile_m;
     let mut values = Vec::with_capacity((cols * cols) as usize);
     for i in 0..cols {
         for j in 0..cols {
-            let x_m = x0 + j as f64 * grade.celula_m;
-            let y_m = y0 + i as f64 * grade.celula_m;
-            let (lat, lon) = grade.latlon(x_m, y_m);
-            let h = altura_em(r, lat, lon).ok_or_else(|| {
+            let x_m = x0 + j as f64 * grid.cell_m;
+            let y_m = y0 + i as f64 * grid.cell_m;
+            let (lat, lon) = grid.latlon(x_m, y_m);
+            let h = height_at(r, lat, lon).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("sem dado de relevo em tile ({x},{y}) ponto ({x_m:.1},{y_m:.1})"),
+                    format!("no terrain data at tile ({x},{y}) point ({x_m:.1},{y_m:.1})"),
                 )
             })?;
             values.push(h);
@@ -263,67 +263,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nome_do_tile_da_casa() {
-        let n = nome_tile(-19.9006792, -43.9174041);
+    fn home_tile_name() {
+        let n = tile_name(-19.9006792, -43.9174041);
         assert_eq!(n, "Copernicus_DSM_COG_10_S20_00_W044_00_DEM");
     }
 
     #[test]
-    fn nome_do_tile_norte_leste() {
+    fn north_east_tile_name() {
         assert_eq!(
-            nome_tile(10.5, 5.2),
+            tile_name(10.5, 5.2),
             "Copernicus_DSM_COG_10_N10_00_E005_00_DEM"
         );
     }
 
-    /// Raster 4x4 com `valor = col * 1 + row * 10`, pixels de 0.01 grau.
-    fn rampa() -> Raster {
+    /// 4x4 raster with `value = col * 1 + row * 10`, pixels of 0.01 degree.
+    fn ramp() -> Raster {
         let (w, h) = (4usize, 4usize);
-        let valores = (0..h)
+        let values = (0..h)
             .flat_map(|r| (0..w).map(move |c| c as f32 + 10.0 * r as f32))
             .collect();
         Raster {
-            largura: w,
-            altura: h,
+            width: w,
+            height: h,
             lon0: 0.0,
             lat0: 0.0,
-            passo_lon: 0.01,
-            passo_lat: 0.01,
-            valores,
+            step_lon: 0.01,
+            step_lat: 0.01,
+            values,
         }
     }
 
     #[test]
-    fn bilinear_em_centro_de_pixel_e_no_meio() {
-        let r = rampa();
-        // centro do pixel (c=1, r=2): lon=0.015, lat=-0.025 -> valor 1 + 20 = 21
-        let v = altura_em(&r, -0.025, 0.015).unwrap();
+    fn bilinear_at_pixel_center_and_midpoint() {
+        let r = ramp();
+        // pixel center (c=1, r=2): lon=0.015, lat=-0.025 -> value 1 + 20 = 21
+        let v = height_at(&r, -0.025, 0.015).unwrap();
         assert!((v - 21.0).abs() < 1e-4, "{v}");
-        // meio entre (1,2) e (2,2): 21.5
-        let v = altura_em(&r, -0.025, 0.02).unwrap();
+        // midpoint between (1,2) and (2,2): 21.5
+        let v = height_at(&r, -0.025, 0.02).unwrap();
         assert!((v - 21.5).abs() < 1e-4, "{v}");
-        // fora do raster
-        assert!(altura_em(&r, 1.0, 1.0).is_none());
+        // outside the raster
+        assert!(height_at(&r, 1.0, 1.0).is_none());
     }
 
     #[test]
-    fn tile_com_min_max_esperados() {
-        // DEM plano inclinado: h(lon, lat) = 1000 + 2*(lon/passo) + 3*(-lat/passo),
-        // em coordenadas de pixel. Bilinear reproduz plano exatamente.
-        // Tile 20 m com grade de 10 m: 3x3 amostras, cantos em x,y in {0,10,20} m.
-        let grade = Grade {
+    fn tile_min_max_expected() {
+        // Tilted flat DEM: h(lon, lat) = 1000 + 2*(lon/step) + 3*(-lat/step),
+        // in pixel coordinates. Bilinear reproduces a plane exactly.
+        // 20 m tile with a 10 m grid: 3x3 samples, corners at x,y in {0,10,20} m.
+        let grid = MapGrid {
             lat0: 0.0,
             lon0: 0.0,
             tile_m: 20.0,
-            celula_m: 10.0,
+            cell_m: 10.0,
         };
         let (w, h) = (400usize, 400usize);
-        let passo = 0.0001;
-        let (lon0, lat0) = (-0.01, 0.01); // raster cobre o ponto (0,0) com folga
-        let valores: Vec<f32> = (0..h)
+        let step = 0.0001;
+        let (lon0, lat0) = (-0.01, 0.01); // raster covers the point (0,0) with margin
+        let values: Vec<f32> = (0..h)
             .flat_map(|r| {
                 (0..w).map(move |c| {
-                    // centro do pixel: (lon - lon0)/passo = c+0.5, (lat0 - lat)/passo = r+0.5
+                    // pixel center: (lon - lon0)/step = c+0.5, (lat0 - lat)/step = r+0.5
                     let x = c as f64 + 0.5;
                     let y = r as f64 + 0.5;
                     (1000.0 + 2.0 * x + 3.0 * y) as f32
@@ -331,48 +331,48 @@ mod tests {
             })
             .collect();
         let r = Raster {
-            largura: w,
-            altura: h,
+            width: w,
+            height: h,
             lon0,
             lat0,
-            passo_lon: passo,
-            passo_lat: passo,
-            valores,
+            step_lon: step,
+            step_lat: step,
+            values,
         };
-        let g = alturas_do_tile(&r, &grade, 0, 0).unwrap();
+        let g = tile_heights(&r, &grid, 0, 0).unwrap();
         assert_eq!((g.cols, g.rows), (3, 3));
-        // Esperado: mínimo em (x=0, y=+20 m) e máximo em (x=+20 m, y=0).
-        let d = (20.0 / RAIO_TERRA_M.to_radians()) / passo; // 20 m em passos de pixel
-        let min_esperado = 1000.0 + 2.0 * 100.0 + 3.0 * (100.0 - d);
-        let max_esperado = 1000.0 + 2.0 * (100.0 + d) + 3.0 * 100.0;
+        // Expected: minimum at (x=0, y=+20 m) and maximum at (x=+20 m, y=0).
+        let d = (20.0 / EARTH_RADIUS_M.to_radians()) / step; // 20 m in pixel steps
+        let min_expected = 1000.0 + 2.0 * 100.0 + 3.0 * (100.0 - d);
+        let max_expected = 1000.0 + 2.0 * (100.0 + d) + 3.0 * 100.0;
         let min = g.values.iter().cloned().fold(f32::INFINITY, f32::min) as f64;
         let max = g.values.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
-        assert!((min - min_esperado).abs() < 0.01, "min {min} vs {min_esperado}");
-        assert!((max - max_esperado).abs() < 0.01, "max {max} vs {max_esperado}");
-        // Norte fica em row maior: valor do canto (row=2, col=0) = mínimo.
-        assert!((g.values[2 * 3] as f64 - min_esperado).abs() < 0.01);
+        assert!((min - min_expected).abs() < 0.01, "min {min} vs {min_expected}");
+        assert!((max - max_expected).abs() < 0.01, "max {max} vs {max_expected}");
+        // North is at a larger row: the value at corner (row=2, col=0) is the minimum.
+        assert!((g.values[2 * 3] as f64 - min_expected).abs() < 0.01);
     }
 
     #[test]
-    fn suavizacao_reduz_pico_e_preserva_soma() {
+    fn smoothing_reduces_peak_and_preserves_sum() {
         let (w, h) = (9usize, 9usize);
         let mut src = vec![0.0f32; w * h];
         src[4 * w + 4] = 100.0;
-        let out = suavizar(&src, w, h);
-        let pico = out[4 * w + 4];
-        // pico = (w0 * w0) * 100, com w0 = e^0 / soma(1 + 2e^-0.5 + 2e^-2)
-        let soma = 1.0 + 2.0 * (-0.5f32).exp() + 2.0 * (-2.0f32).exp();
-        let esperado = (1.0 / soma) * (1.0 / soma) * 100.0;
-        assert!((pico - esperado).abs() < 1e-3, "{pico} vs {esperado}");
+        let out = smooth(&src, w, h);
+        let peak = out[4 * w + 4];
+        // peak = (w0 * w0) * 100, with w0 = e^0 / sum(1 + 2e^-0.5 + 2e^-2)
+        let sum = 1.0 + 2.0 * (-0.5f32).exp() + 2.0 * (-2.0f32).exp();
+        let expected = (1.0 / sum) * (1.0 / sum) * 100.0;
+        assert!((peak - expected).abs() < 1e-3, "{peak} vs {expected}");
         let total: f32 = out.iter().sum();
         assert!((total - 100.0).abs() < 1e-2, "{total}");
     }
 
     #[test]
-    fn nodata_nao_contamina_vizinhos() {
+    fn nodata_does_not_contaminate_neighbors() {
         let (w, h) = (5usize, 1usize);
         let src = vec![10.0, f32::NAN, 10.0, 10.0, 10.0];
-        let out = suavizar(&src, w, h);
+        let out = smooth(&src, w, h);
         assert!(out[0].is_finite());
         assert!((out[0] - 10.0).abs() < 1e-4);
         assert!((out[2] - 10.0).abs() < 1e-4);

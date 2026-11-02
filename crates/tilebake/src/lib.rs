@@ -1,4 +1,4 @@
-//! Pipeline OSM + DEM -> tiles. Chamado pelo GDExtension numa thread própria.
+//! OSM + DEM -> tiles pipeline. Called by the GDExtension on its own thread.
 use serde_json::Value;
 use std::fs;
 use std::io;
@@ -12,72 +12,72 @@ const USER_AGENT: &str = "driving-the-earth/0.1 (tilebake; projeto pessoal)";
 const NOMINATIM_URL: &str = "https://nominatim.openstreetmap.org/search";
 const OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
 
-/// Raio de coleta ao redor da casa, em metros.
-pub const RAIO_PADRAO_M: f64 = 1000.0;
-/// Lado do tile da grade, em metros.
-pub const TILE_PADRAO_M: f64 = 250.0;
+/// Collection radius around the home, in meters.
+pub const DEFAULT_RADIUS_M: f64 = 1000.0;
+/// Side of a grid tile, in meters.
+pub const DEFAULT_TILE_M: f64 = 250.0;
 
-/// Resultado de `baixar_osm`: metadados e contagens do bruto.
+/// Result of `download_osm`: metadata and raw counts.
 #[derive(Debug)]
-pub struct Resumo {
+pub struct Summary {
     pub meta: MapMeta,
-    /// Ways com tag `highway`.
-    pub vias: usize,
-    /// Ways com tag `building`.
-    pub predios: usize,
-    /// Geocodificação veio de `meta.json` já existente.
-    pub geocodificacao_em_cache: bool,
-    /// Bruto do Overpass veio de `raw/overpass.json` já existente.
-    pub osm_em_cache: bool,
+    /// Ways with a `highway` tag.
+    pub roads: usize,
+    /// Ways with a `building` tag.
+    pub buildings: usize,
+    /// Geocoding came from an existing `meta.json`.
+    pub geocoding_cached: bool,
+    /// Raw Overpass data came from an existing `raw/overpass.json`.
+    pub osm_cached: bool,
 }
 
-fn erro<E: std::fmt::Display>(e: E) -> io::Error {
+fn other_err<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e.to_string())
 }
 
-/// Geocodifica o endereço (Nominatim) e devolve (lat, lon, resposta bruta).
-fn geocodificar(endereco: &str) -> io::Result<(f64, f64, String)> {
-    let texto = ureq::get(NOMINATIM_URL)
+/// Geocodes the address (Nominatim) and returns (lat, lon, raw response).
+fn geocode(address: &str) -> io::Result<(f64, f64, String)> {
+    let text = ureq::get(NOMINATIM_URL)
         .set("User-Agent", USER_AGENT)
-        .query("q", endereco)
+        .query("q", address)
         .query("format", "json")
         .query("limit", "1")
         .call()
-        .map_err(erro)?
+        .map_err(other_err)?
         .into_string()?;
-    let v: Value = serde_json::from_str(&texto).map_err(erro)?;
-    let primeiro = v
+    let v: Value = serde_json::from_str(&text).map_err(other_err)?;
+    let first = v
         .get(0)
-        .ok_or_else(|| erro("Nominatim não encontrou o endereço"))?;
-    let lat: f64 = primeiro["lat"]
+        .ok_or_else(|| other_err("Nominatim found no match for the address"))?;
+    let lat: f64 = first["lat"]
         .as_str()
-        .ok_or_else(|| erro("Nominatim sem 'lat'"))?
+        .ok_or_else(|| other_err("Nominatim response has no 'lat'"))?
         .parse()
-        .map_err(erro)?;
-    let lon: f64 = primeiro["lon"]
+        .map_err(other_err)?;
+    let lon: f64 = first["lon"]
         .as_str()
-        .ok_or_else(|| erro("Nominatim sem 'lon'"))?
+        .ok_or_else(|| other_err("Nominatim response has no 'lon'"))?
         .parse()
-        .map_err(erro)?;
-    Ok((lat, lon, texto))
+        .map_err(other_err)?;
+    Ok((lat, lon, text))
 }
 
-/// Conta (vias, prédios) numa resposta bruta do Overpass.
-fn contar(overpass_json: &str) -> io::Result<(usize, usize)> {
-    let v: Value = serde_json::from_str(overpass_json).map_err(erro)?;
-    let elementos = v["elements"]
+/// Counts (roads, buildings) in a raw Overpass response.
+fn count_ways(overpass_json: &str) -> io::Result<(usize, usize)> {
+    let v: Value = serde_json::from_str(overpass_json).map_err(other_err)?;
+    let elements = v["elements"]
         .as_array()
-        .ok_or_else(|| erro("resposta do Overpass sem 'elements'"))?;
-    let vias = elementos.iter().filter(|e| e["tags"]["highway"].is_string()).count();
-    let predios = elementos.iter().filter(|e| e["tags"]["building"].is_string()).count();
-    Ok((vias, predios))
+        .ok_or_else(|| other_err("Overpass response has no 'elements'"))?;
+    let roads = elements.iter().filter(|e| e["tags"]["highway"].is_string()).count();
+    let buildings = elements.iter().filter(|e| e["tags"]["building"].is_string()).count();
+    Ok((roads, buildings))
 }
 
-/// Baixa o OSM do raio ao redor do endereço e grava o bruto em `cache_root/<id>/raw/`.
+/// Downloads the OSM data around the address and writes the raw data to `cache_root/<id>/raw/`.
 ///
-/// Reaproveita o cache: se `meta.json` existe, não geocodifica de novo; se
-/// `raw/overpass.json` existe, não consulta o Overpass de novo.
-pub fn baixar_osm(cache_root: &Path, id: &str, nome: &str, endereco: &str) -> io::Result<Resumo> {
+/// Reuses the cache: if `meta.json` exists, it does not geocode again; if
+/// `raw/overpass.json` exists, it does not query Overpass again.
+pub fn download_osm(cache_root: &Path, id: &str, name: &str, address: &str) -> io::Result<Summary> {
     let dir = cache_root.join(id);
     let raw = dir.join("raw");
     fs::create_dir_all(&raw)?;
@@ -85,32 +85,32 @@ pub fn baixar_osm(cache_root: &Path, id: &str, nome: &str, endereco: &str) -> io
     let nominatim_path = raw.join("nominatim.json");
     let overpass_path = raw.join("overpass.json");
 
-    let (meta, geocodificacao_em_cache) = if meta_path.exists() {
+    let (meta, geocoding_cached) = if meta_path.exists() {
         let file = fs::File::open(&meta_path)?;
-        let meta: MapMeta = serde_json::from_reader(io::BufReader::new(file)).map_err(erro)?;
+        let meta: MapMeta = serde_json::from_reader(io::BufReader::new(file)).map_err(other_err)?;
         (meta, true)
     } else {
-        let (lat, lon, bruto) = geocodificar(endereco)?;
-        fs::write(&nominatim_path, bruto)?;
+        let (lat, lon, raw_body) = geocode(address)?;
+        fs::write(&nominatim_path, raw_body)?;
         let created_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(erro)?
+            .map_err(other_err)?
             .as_secs();
         let meta = MapMeta {
             id: id.to_string(),
-            name: nome.to_string(),
+            name: name.to_string(),
             center_lat: lat,
             center_lon: lon,
-            radius_m: RAIO_PADRAO_M,
-            tile_size_m: TILE_PADRAO_M,
+            radius_m: DEFAULT_RADIUS_M,
+            tile_size_m: DEFAULT_TILE_M,
             created_unix,
             complete: false,
         };
-        fs::write(&meta_path, serde_json::to_string_pretty(&meta).map_err(erro)?)?;
+        fs::write(&meta_path, serde_json::to_string_pretty(&meta).map_err(other_err)?)?;
         (meta, false)
     };
 
-    let (osm_json, osm_em_cache) = if overpass_path.exists() {
+    let (osm_json, osm_cached) = if overpass_path.exists() {
         (fs::read_to_string(&overpass_path)?, true)
     } else {
         let query = format!(
@@ -119,22 +119,22 @@ pub fn baixar_osm(cache_root: &Path, id: &str, nome: &str, endereco: &str) -> io
             lat = meta.center_lat,
             lon = meta.center_lon,
         );
-        let corpo = ureq::post(OVERPASS_URL)
+        let body = ureq::post(OVERPASS_URL)
             .set("User-Agent", USER_AGENT)
             .send_form(&[("data", query.as_str())])
-            .map_err(erro)?
+            .map_err(other_err)?
             .into_string()?;
-        contar(&corpo)?; // valida antes de gravar
-        fs::write(&overpass_path, &corpo)?;
-        (corpo, false)
+        count_ways(&body)?; // validate before writing
+        fs::write(&overpass_path, &body)?;
+        (body, false)
     };
 
-    let (vias, predios) = contar(&osm_json)?;
-    Ok(Resumo {
+    let (roads, buildings) = count_ways(&osm_json)?;
+    Ok(Summary {
         meta,
-        vias,
-        predios,
-        geocodificacao_em_cache,
-        osm_em_cache,
+        roads,
+        buildings,
+        geocoding_cached,
+        osm_cached,
     })
 }

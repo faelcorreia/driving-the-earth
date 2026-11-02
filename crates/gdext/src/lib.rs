@@ -5,7 +5,7 @@ struct DriveEarthExt;
 #[gdextension]
 unsafe impl ExtensionLibrary for DriveEarthExt {}
 
-/// Nó de teste: confirma que a extensão Rust carregou no Godot.
+/// Test node: confirms that the Rust extension loaded in Godot.
 #[derive(GodotClass)]
 #[class(base = Node, init)]
 struct EarthRoot {
@@ -15,6 +15,6 @@ struct EarthRoot {
 #[godot_api]
 impl INode for EarthRoot {
     fn ready(&mut self) {
-        godot_print!("driving_the_earth_ext carregada");
+        godot_print!("driving_the_earth_ext loaded");
     }
 }
