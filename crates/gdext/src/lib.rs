@@ -1,5 +1,8 @@
 use godot::prelude::*;
 
+mod earth_world;
+mod map;
+
 struct DriveEarthExt;
 
 #[gdextension]

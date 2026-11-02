@@ -1,3 +1,8 @@
 [gd_scene format=3]
 
 [node name="Main" type="EarthRoot"]
+
+[node name="World" type="EarthWorld" parent="."]
+
+[node name="Sun" type="DirectionalLight3D" parent="World"]
+transform = Transform3D(1, 0, 0, 0, 0.5, 0.866, 0, -0.866, 0.5, 0, 10, 0)
