@@ -26,7 +26,72 @@ extends VehicleBody3D
 ## Altura extra, em metros, ao endireitar o carro com drive_reset.
 @export var reset_lift_m := 1.0
 
+## Cabine (teto, para-brisa e vidro traseiro) como prisma convexo extrudado em X.
+## Perfil em (z, y) do carro, com frente em -Z. Convexo, para a colisão ser um ConvexPolygonShape3D.
+var _cabin_profile := PackedVector2Array([
+	Vector2(-0.85, 0.31),  # base do para-brisa, sobre o capô
+	Vector2(-0.35, 0.94),  # topo do para-brisa
+	Vector2(1.55, 0.94),  # topo do teto, início do vidro traseiro
+	Vector2(1.85, 0.55),  # fim do vidro traseiro, traseira curta
+	Vector2(1.85, 0.31),  # traseira, base da cabine
+])
+const CABIN_HALF_WIDTH := 0.725
+
 var _reset_requested := false
+
+
+func _ready() -> void:
+	var points := PackedVector3Array()
+	for p in _cabin_profile:
+		points.append(Vector3(-CABIN_HALF_WIDTH, p.y, p.x))
+		points.append(Vector3(CABIN_HALF_WIDTH, p.y, p.x))
+	var shape := ConvexPolygonShape3D.new()
+	shape.points = points
+	$CabinShape.shape = shape
+	$CabinMesh.mesh = _prism_mesh(_cabin_profile, CABIN_HALF_WIDTH)
+
+
+## Malha de um prisma convexo: perfil (x = z do carro, y = altura) extrudado de -w a +w em X.
+## Cada triângulo sai com a normal para fora e ordem horária vista de fora (frente no Godot).
+func _prism_mesh(profile: PackedVector2Array, half_width: float) -> ArrayMesh:
+	var centroid := Vector3.ZERO
+	for p in profile:
+		centroid += Vector3(0.0, p.y, p.x)
+	centroid /= profile.size()
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var n := profile.size()
+	for i in n:
+		var a := profile[i]
+		var b := profile[(i + 1) % n]
+		var la := Vector3(-half_width, a.y, a.x)
+		var lb := Vector3(-half_width, b.y, b.x)
+		var ra := Vector3(half_width, a.y, a.x)
+		var rb := Vector3(half_width, b.y, b.x)
+		_add_face(st, centroid, la, lb, rb)
+		_add_face(st, centroid, la, rb, ra)
+	for i in range(1, n - 1):
+		var p0 := profile[0]
+		var p1 := profile[i]
+		var p2 := profile[i + 1]
+		_add_face(st, centroid, Vector3(-half_width, p0.y, p0.x), Vector3(-half_width, p1.y, p1.x), Vector3(-half_width, p2.y, p2.x))
+		_add_face(st, centroid, Vector3(half_width, p0.y, p0.x), Vector3(half_width, p2.y, p2.x), Vector3(half_width, p1.y, p1.x))
+	return st.commit()
+
+
+func _add_face(st: SurfaceTool, centroid: Vector3, a: Vector3, b: Vector3, c: Vector3) -> void:
+	var normal := (b - a).cross(c - a).normalized()
+	if normal.dot((a + b + c) / 3.0 - centroid) < 0.0:
+		normal = -normal
+	# Godot considera de frente o triângulo horário visto de fora, ou seja, cross(b-a, c-a) aponta para dentro.
+	if (b - a).cross(c - a).dot(normal) > 0.0:
+		var tmp := b
+		b = c
+		c = tmp
+	for v in [a, b, c]:
+		st.set_normal(normal)
+		st.add_vertex(v)
 
 
 func _unhandled_input(event: InputEvent) -> void:
