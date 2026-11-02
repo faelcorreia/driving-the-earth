@@ -57,10 +57,11 @@ impl INode3D for EarthWorld {
         let tile_m = map.meta.tile_size_m;
         for tile in &map.tiles {
             let geometry = tile_geometry(tile, tile_m);
-            let body = terrain_body(&geometry.terrain, &terrain_mat);
+            let body = solid_body(&geometry.terrain, &terrain_mat);
             self.base_mut().add_child(&body);
             if !geometry.roads.is_empty() {
-                let roads = mesh_instance(&geometry.roads, &road_mat);
+                // Roads are solid too, so the wheels rest on them instead of on the terrain below.
+                let roads = solid_body(&geometry.roads, &road_mat);
                 self.base_mut().add_child(&roads);
             }
         }
@@ -103,7 +104,7 @@ fn spawn_car(position: Vector3, yaw: f32) -> Option<Gd<Node3D>> {
     Some(car)
 }
 
-/// Visible mesh only (roads).
+/// Visible mesh only.
 fn mesh_instance(data: &MeshData, mat: &Gd<StandardMaterial3D>) -> Gd<MeshInstance3D> {
     let mut instance = MeshInstance3D::new_alloc();
     instance.set_mesh(&array_mesh(data));
@@ -111,8 +112,8 @@ fn mesh_instance(data: &MeshData, mat: &Gd<StandardMaterial3D>) -> Gd<MeshInstan
     instance
 }
 
-/// Terrain tile: a static body with the visible mesh and a concave collision shape.
-fn terrain_body(data: &MeshData, mat: &Gd<StandardMaterial3D>) -> Gd<StaticBody3D> {
+/// Static body with the visible mesh and a concave collision shape (terrain or roads of a tile).
+fn solid_body(data: &MeshData, mat: &Gd<StandardMaterial3D>) -> Gd<StaticBody3D> {
     let mut body = StaticBody3D::new_alloc();
     body.add_child(&mesh_instance(data, mat));
 
