@@ -9,10 +9,17 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use tileformat::{read_tile, MapMeta, Tile};
+use tileformat::{read_tile, MapMeta, Polyline, Tile};
 
 /// Height of the road ribbons above the terrain, in meters (avoids z-fighting).
 const ROAD_LIFT_M: f32 = 0.1;
+/// Extra lift per road index (modulo 8), so overlapping ribbons do not z-fight.
+const ROAD_ORDER_LIFT_M: f32 = 0.002;
+/// How far from another road's band an end still counts as a junction, in meters.
+const JUNCTION_TOL_M: f64 = 1.0;
+/// How far a road end on a tile border runs past it, in meters, so the ribbons of the two
+/// tiles overlap and no hairline of terrain shows through the seam.
+const BORDER_OVERLAP_M: f64 = 0.25;
 
 /// A baked map: its metadata and every tile found in `cache/<id>/tiles/`.
 pub struct Map {
@@ -60,6 +67,14 @@ impl Map {
         let key = ((x / size).floor() as i32, (y / size).floor() as i32);
         let tile = &self.tiles[*self.index.get(&key)?];
         Some(sample_height(tile, size, x, y))
+    }
+
+    /// Like `tile_geometry`, but roads sit on the terrain of whichever tile owns each point.
+    /// A ribbon that crosses a tile border (half its width, or its overlap) then follows the
+    /// neighbor's real surface instead of an extension of this tile's edge plane.
+    pub fn tile_geometry(&self, tile: &Tile) -> TileGeometry {
+        let size = self.meta.tile_size_m;
+        tile_geometry_with(tile, size, &|x, y| self.height_at(x, y).unwrap_or_else(|| sample_height(tile, size, x, y)))
     }
 }
 
@@ -132,6 +147,11 @@ pub fn road_width_m(highway: &str) -> f64 {
 
 /// Builds the terrain grid and the road ribbons of one tile.
 pub fn tile_geometry(tile: &Tile, tile_m: f64) -> TileGeometry {
+    tile_geometry_with(tile, tile_m, &|x, y| sample_height(tile, tile_m, x, y))
+}
+
+/// `tile_geometry` with the terrain height under the roads given by `ground(x, y)`.
+pub fn tile_geometry_with(tile: &Tile, tile_m: f64, ground: &dyn Fn(f64, f64) -> f32) -> TileGeometry {
     let n = tile.height.cols as usize;
     let cell = tile_m / (n - 1) as f64;
     let (x0, y0) = (tile.x as f64 * tile_m, tile.y as f64 * tile_m);
@@ -166,9 +186,11 @@ pub fn tile_geometry(tile: &Tile, tile_m: f64) -> TileGeometry {
     let mut roads = MeshData::default();
     // Stations every quarter of a grid cell: the ribbon follows the terrain between nodes.
     let step = cell / ROAD_STATIONS_PER_CELL;
-    for road in &tile.roads {
+    let ends = extend_junction_ends(&tile.roads, tile_m);
+    for (idx, road) in tile.roads.iter().enumerate() {
         let half = road_width_m(&road.highway) / 2.0;
-        push_road(&mut roads, tile, tile_m, &road.points, half, step);
+        let lift = ROAD_LIFT_M + (idx % 8) as f32 * ROAD_ORDER_LIFT_M;
+        push_road(&mut roads, ground, &ends[idx], half, step, lift);
     }
 
     TileGeometry { terrain, roads }
@@ -184,7 +206,7 @@ const MITER_LIMIT: f64 = 2.0;
 /// `step` meters in between, so each vertex is sampled on the terrain and the strip
 /// does not cut under a crest between two nodes. At each node the two segment normals
 /// are joined (miter), so bends have no gaps or overlaps.
-fn push_road(mesh: &mut MeshData, tile: &Tile, tile_m: f64, points: &[[f64; 2]], half: f64, step: f64) {
+fn push_road(mesh: &mut MeshData, ground: &dyn Fn(f64, f64) -> f32, points: &[[f64; 2]], half: f64, step: f64, lift: f32) {
     // Drop repeated points: they have no direction.
     let mut pts: Vec<[f64; 2]> = Vec::with_capacity(points.len());
     for &p in points {
@@ -219,7 +241,7 @@ fn push_road(mesh: &mut MeshData, tile: &Tile, tile_m: f64, points: &[[f64; 2]],
     let base = mesh.vertices.len() as u32;
     for &(c, o) in &stations {
         for [x, y] in [[c[0] + o[0], c[1] + o[1]], c, [c[0] - o[0], c[1] - o[1]]] {
-            let height = sample_height(tile, tile_m, x, y) + ROAD_LIFT_M;
+            let height = ground(x, y) + lift;
             mesh.vertices.push(world(x, y, height));
             mesh.normals.push([0.0, 1.0, 0.0]);
         }
@@ -233,6 +255,120 @@ fn push_road(mesh: &mut MeshData, tile: &Tile, tile_m: f64, points: &[[f64; 2]],
         push_up_facing(mesh, l0 + 1, l0 + 2, l1 + 2);
         push_up_facing(mesh, l0 + 1, l1 + 2, l1 + 1);
     }
+}
+
+/// Points of every road of a tile, with each end that meets another road extended so that
+/// its cut lies past the near edge of the crossed road. Ends on a tile border run a
+/// little past it (overlap with the next tile); ends with no other road close by
+/// (cul-de-sacs) are kept as they are.
+fn extend_junction_ends(roads: &[Polyline], tile_m: f64) -> Vec<Vec<[f64; 2]>> {
+    roads
+        .iter()
+        .enumerate()
+        .map(|(i, road)| {
+            let half = road_width_m(&road.highway) / 2.0;
+            let mut pts = road.points.clone();
+            if pts.len() < 2 {
+                return pts;
+            }
+            let head = extend_end(&pts, half, roads, i, tile_m);
+            extend_tail(&mut pts, head);
+            pts.reverse();
+            let tail = extend_end(&pts, half, roads, i, tile_m);
+            extend_tail(&mut pts, tail);
+            pts.reverse();
+            pts
+        })
+        .collect()
+}
+
+/// Moves the last point of `pts` by `ext` meters along its direction (adds a point).
+fn extend_tail(pts: &mut Vec<[f64; 2]>, ext: f64) {
+    if ext <= 0.0 {
+        return;
+    }
+    let end = pts[pts.len() - 1];
+    let d = unit(last_distinct(pts, end), end);
+    pts.push([end[0] + d[0] * ext, end[1] + d[1] * ext]);
+}
+
+/// True when `p` lies on a tile border (multiples of `tile_m`, in map meters).
+fn on_tile_border(p: [f64; 2], tile_m: f64) -> bool {
+    let on = |v: f64| {
+        let r = v.rem_euclid(tile_m);
+        r < 0.01 || tile_m - r < 0.01
+    };
+    on(p[0]) || on(p[1])
+}
+
+/// Distance the last point of `pts` must move along its direction for the corners of its
+/// band to clear the near edge of every other road it meets. Zero when it meets none.
+fn extend_end(pts: &[[f64; 2]], half: f64, roads: &[Polyline], own: usize, tile_m: f64) -> f64 {
+    let end = pts[pts.len() - 1];
+    let prev = last_distinct(pts, end);
+    if dist(prev, end) <= 1e-9 {
+        return 0.0;
+    }
+    if on_tile_border(end, tile_m) {
+        return BORDER_OVERLAP_M;
+    }
+    let d = unit(prev, end);
+    let nrm = [-d[1], d[0]];
+    let mut ext: f64 = 0.0;
+    for (j, other) in roads.iter().enumerate() {
+        if j == own || other.points.len() < 2 {
+            continue;
+        }
+        let half_b = road_width_m(&other.highway) / 2.0;
+        // Closest segment of the other road to the end.
+        let mut best: Option<(f64, [f64; 2], [f64; 2])> = None;
+        for w in other.points.windows(2) {
+            let dd = dist_to_segment(end, w[0], w[1]);
+            if best.map_or(true, |(b, _, _)| dd < b) {
+                best = Some((dd, w[0], w[1]));
+            }
+        }
+        let Some((dd, c0, c1)) = best else { continue };
+        if dd > half_b + JUNCTION_TOL_M || dist(c0, c1) <= 1e-9 {
+            continue;
+        }
+        let nb = unit_normal(c0, c1);
+        // Rate at which moving along d changes the offset from the other road's axis.
+        let u = d[0] * nb[0] + d[1] * nb[1];
+        if u.abs() < 1e-3 {
+            continue;
+        }
+        // Target: the near edge of the other road, on the side this road comes from.
+        let target = -u.signum() * half_b;
+        let mut need: f64 = 0.0;
+        for sign in [-1.0, 1.0] {
+            let corner = [end[0] + sign * half * nrm[0], end[1] + sign * half * nrm[1]];
+            let g = (corner[0] - c0[0]) * nb[0] + (corner[1] - c0[1]) * nb[1];
+            need = need.max((target - g) / u);
+        }
+        let cap = 2.0 * (half + half_b);
+        ext = ext.max((need + 0.3).min(cap));
+    }
+    ext
+}
+
+/// The last point before `end` in `pts` that differs from it (or `end` if none).
+fn last_distinct(pts: &[[f64; 2]], end: [f64; 2]) -> [f64; 2] {
+    pts.iter().rev().copied().find(|&p| dist(p, end) > 1e-9).unwrap_or(end)
+}
+
+/// Unit vector from `p` to `q`. Caller ensures `p != q`.
+fn unit(p: [f64; 2], q: [f64; 2]) -> [f64; 2] {
+    let len = dist(p, q);
+    [(q[0] - p[0]) / len, (q[1] - p[1]) / len]
+}
+
+/// Distance from `p` to the segment `a -> b`.
+fn dist_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let l2 = dx * dx + dy * dy;
+    let t = if l2 > 0.0 { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    dist(p, [a[0] + t * dx, a[1] + t * dy])
 }
 
 fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -509,9 +645,12 @@ mod tests {
         };
         let t = tile(0, 0, grid(3, |_, _| 50.0), vec![road]);
         let g = tile_geometry(&t, 20.0);
-        // 20 m at a station every 2.5 m: 9 stations x 3 vertices, 8 x 4 triangles.
-        assert_eq!(g.roads.vertices.len(), 27);
-        assert_eq!(g.roads.indices.len(), 8 * 4 * 3);
+        // Both ends lie on tile borders, so the ribbon runs BORDER_OVERLAP_M past each.
+        let xs: Vec<f32> = g.roads.vertices.iter().map(|v| v[0]).collect();
+        let (lo, hi) = (BORDER_OVERLAP_M as f32, 20.0 + BORDER_OVERLAP_M as f32);
+        assert!(xs.iter().any(|x| (x + lo).abs() < 1e-4));
+        assert!(xs.iter().any(|x| (x - hi).abs() < 1e-4));
+        assert_eq!(g.roads.indices.len() / 3, (g.roads.vertices.len() / 3 - 1) * 4);
         for v in &g.roads.vertices {
             assert!((v[1] - (50.0 + ROAD_LIFT_M)).abs() < 1e-4);
         }
@@ -524,6 +663,40 @@ mod tests {
             let cross_y = (p[1][2] - p[0][2]) * (p[2][0] - p[0][0]) - (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]);
             assert!(cross_y < 0.0);
         }
+    }
+
+    /// A 12 m primary road ends on the centerline of a 6 m residential road, at 45 degrees.
+    /// Its cut is perpendicular to it, so the corner on the near side pokes out of the
+    /// crossed road and leaves a wedge uncovered between the cut and the crossed road's
+    /// edge. Points of A's band beyond its end, outside the crossed road on A's side, must
+    /// be covered.
+    #[test]
+    fn road_end_on_crossed_road_leaves_no_wedge() {
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let end = [125.0, 125.0];
+        let a = Polyline { highway: "primary".into(), points: vec![[end[0] - 80.0 * s, end[1] - 80.0 * s], end] };
+        let b = Polyline { highway: "residential".into(), points: vec![[0.0, 125.0], [250.0, 125.0]] };
+        let t = tile(0, 0, grid(26, |_, _| 50.0), vec![a, b]);
+        let g = tile_geometry(&t, 250.0);
+        let (half_a, half_b) = (6.0, 3.0);
+        let mut missing = Vec::new();
+        for ia in 0..=24 {
+            for ib in 0..=24 {
+                // Along the road (a from the end, up to half_b past it) and across it.
+                let along = half_b * ia as f64 / 24.0;
+                let across = (half_a - 0.2) * (2.0 * ib as f64 / 24.0 - 1.0);
+                let x = end[0] + along * s - across * s;
+                let y = end[1] + along * s + across * s;
+                // Near side of the crossed road only (its far side may be overshot).
+                if y > end[1] - half_b {
+                    continue;
+                }
+                if ribbon_height(&g.roads, x, y).is_none() {
+                    missing.push((x, y));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "{} uncovered points, e.g. {:?}", missing.len(), missing.first());
     }
 
     #[test]
@@ -562,5 +735,80 @@ mod tests {
         fs::write(dir.join("meta.json"), serde_json::to_string(&meta(false)).unwrap()).unwrap();
         assert!(load_map(&root, "t").is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Diagnostic on the real baked map (run with `--ignored --nocapture`): along every tile
+    /// edge, compares whether the road ribbon covers the point on each side, and its height.
+    #[test]
+    #[ignore]
+    fn real_map_road_seams() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let t0 = std::time::Instant::now();
+        let map = load_map(&root, "casa").expect("baked map 'casa'");
+        println!("load_map_ms={}", t0.elapsed().as_millis());
+        let m = map.meta.tile_size_m;
+        let t0 = std::time::Instant::now();
+        let geo: Vec<_> = map.tiles.iter().map(|t| (t.x, t.y, tile_geometry(t, m))).collect();
+        println!("tile_geometry_ms={} tiles={}", t0.elapsed().as_millis(), geo.len());
+        let road_tris: usize = geo.iter().map(|g| g.2.roads.indices.len() / 3).sum();
+        println!("road_triangles={road_tris}");
+        let find = |x: i32, y: i32| geo.iter().find(|g| g.0 == x && g.1 == y).map(|g| &g.2);
+        let roads: Vec<(f64, &Polyline)> = map.tiles.iter().flat_map(|t| t.roads.iter()).map(|r| (road_width_m(&r.highway) / 2.0, r)).collect();
+        let truth = |x: f64, y: f64| {
+            roads.iter().any(|(half, r)| {
+                r.points.windows(2).any(|w| {
+                    let (dx, dy) = (w[1][0] - w[0][0], w[1][1] - w[0][1]);
+                    let l2 = dx * dx + dy * dy;
+                    let t = if l2 > 0.0 { (((x - w[0][0]) * dx + (y - w[0][1]) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                    ((x - w[0][0] - t * dx).hypot(y - w[0][1] - t * dy)) < *half - 0.1
+                })
+            })
+        };
+        let (mut gaps, mut height_diff, mut checked) = (0, 0, 0);
+        for (tx, ty, a) in &geo {
+            for (dx, dy) in [(1, 0), (0, 1)] {
+                let Some(b) = find(tx + dx, ty + dy) else { continue };
+                let n = (m / 0.25) as usize;
+                for k in 0..=n {
+                    let s = k as f64 * 0.25;
+                    // Near a tile corner the diagonal tile may draw the road; not checked here.
+                    let corner = s < 4.0 || s > m - 4.0;
+                    let (ex, ey) = if dx == 1 { ((*tx + 1) as f64 * m, *ty as f64 * m + s) } else { (*tx as f64 * m + s, (*ty + 1) as f64 * m) };
+                    let (ax, ay, bx, by) = if dx == 1 { (ex - 1e-4, ey, ex + 1e-4, ey) } else { (ex, ey - 1e-4, ex, ey + 1e-4) };
+                    let (ha, hb) = (ribbon_height(&a.roads, ax, ay), ribbon_height(&b.roads, bx, by));
+                    checked += 1;
+                    let any_tile = |x: f64, y: f64| geo.iter().any(|g| ribbon_height(&g.2.roads, x, y).is_some());
+                    let covered = if corner { any_tile(ex - 1e-4, ey - 1e-4) || any_tile(ex + 1e-4, ey + 1e-4) || any_tile(ex - 1e-4, ey + 1e-4) || any_tile(ex + 1e-4, ey - 1e-4) } else { ha.is_some() || hb.is_some() };
+                    if truth(ex, ey) && !covered {
+                        gaps += 1;
+                        if gaps <= 20 {
+                            println!("GAP: road covers edge point ({ex:.2}, {ey:.2}) but neither tile draws it");
+                        }
+                    }
+                    if let (Some(u), Some(v)) = (ha, hb) {
+                        if (u - v).abs() > 0.02 {
+                            height_diff += 1;
+                            if height_diff <= 10 {
+                                println!("height differs at ({ex:.2}, {ey:.2}): {u:.3} vs {v:.3}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("checked={checked} gaps={gaps} height_diff={height_diff}");
+    }
+
+    #[test]
+    fn road_over_a_tile_border_follows_the_neighbor_terrain() {
+        // Tile (0,0) is flat at 10 m; tile (1,0) is flat at 20 m. A road along y = 10 ends
+        // at x = 20 + 3 (it crosses the border), so its tail lies over the neighbor.
+        let road = Polyline { highway: "residential".into(), points: vec![[10.0, 10.0], [23.0, 10.0]] };
+        let a = tile(0, 0, grid(3, |_, _| 10.0), vec![road]);
+        let b = tile(1, 0, grid(3, |_, _| 20.0), Vec::new());
+        let map = Map::new(meta(true), vec![a.clone(), b]);
+        let g = map.tile_geometry(&a);
+        let h = ribbon_height(&g.roads, 22.0, 10.0).unwrap();
+        assert!((h - (20.0 + ROAD_LIFT_M as f64)).abs() < 0.05, "h = {h}");
     }
 }

@@ -11,7 +11,7 @@ use godot::classes::{
 use godot::prelude::*;
 use godot::tools::try_load;
 
-use crate::map::{load_map, tile_geometry, MeshData};
+use crate::map::{load_map, MeshData};
 use crate::spawn::road_spawn;
 
 /// Height of the car above the terrain when spawned, in meters.
@@ -54,9 +54,8 @@ impl INode3D for EarthWorld {
 
         let terrain_mat = material(TERRAIN_COLOR);
         let road_mat = material(ROAD_COLOR);
-        let tile_m = map.meta.tile_size_m;
         for tile in &map.tiles {
-            let geometry = tile_geometry(tile, tile_m);
+            let geometry = map.tile_geometry(tile);
             let body = solid_body(&geometry.terrain, &terrain_mat);
             self.base_mut().add_child(&body);
             if !geometry.roads.is_empty() {
