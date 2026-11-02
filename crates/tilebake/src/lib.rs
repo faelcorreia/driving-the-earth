@@ -115,11 +115,15 @@ pub fn download_osm(cache_root: &Path, id: &str, name: &str, address: &str) -> i
     let (osm_json, osm_cached) = if overpass_path.exists() {
         (fs::read_to_string(&overpass_path)?, true)
     } else {
+        // Bounding box of the baked tiles, not the circle: ways cut at the circle
+        // edge would end inside the baked area.
+        let (south, west, north, east) = tiles::covering_bbox(&meta);
         let query = format!(
-            "[out:json][timeout:90];(way[\"highway\"](around:{r},{lat},{lon});way[\"building\"](around:{r},{lat},{lon}););out body geom;",
-            r = meta.radius_m,
-            lat = meta.center_lat,
-            lon = meta.center_lon,
+            "[out:json][timeout:90];(way[\"highway\"]({s},{w},{n},{e});way[\"building\"]({s},{w},{n},{e}););out body geom;",
+            s = south,
+            w = west,
+            n = north,
+            e = east,
         );
         let body = ureq::post(OVERPASS_URL)
             .set("User-Agent", USER_AGENT)

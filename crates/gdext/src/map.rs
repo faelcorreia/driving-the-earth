@@ -91,22 +91,32 @@ pub fn load_map(cache_root: &Path, id: &str) -> io::Result<Map> {
     Ok(Map::new(meta, tiles))
 }
 
-/// Bilinear height of `tile` at local `(x, y)`. Points outside the tile are clamped to its edge.
-/// The grid has `cols` samples per side spread over `tile_m` meters, edges included.
+/// Terrain height at local `(x, y)`, on the same triangles that `tile_geometry` draws
+/// (each grid cell is split along the diagonal from its north-east to its south-west corner).
+/// Sampling the bilinear surface instead would differ from the drawn mesh on slopes, so
+/// anything placed "on" the terrain could end up under it.
+/// Points outside the tile extrapolate the plane of the nearest edge cell, which matches the
+/// neighbor tile along the shared edge. The grid has `cols` samples per side over `tile_m`
+/// meters, edges included.
 pub fn sample_height(tile: &Tile, tile_m: f64, x: f64, y: f64) -> f32 {
     let grid = &tile.height;
     let n = grid.cols as usize;
-    let last = (n - 1) as f64;
-    let cell = tile_m / last;
-    let u = ((x - tile.x as f64 * tile_m) / cell).clamp(0.0, last);
-    let v = ((y - tile.y as f64 * tile_m) / cell).clamp(0.0, last);
-    let (j0, i0) = (u.floor() as usize, v.floor() as usize);
-    let (j1, i1) = ((j0 + 1).min(n - 1), (i0 + 1).min(n - 1));
+    let cell = tile_m / (n - 1) as f64;
+    let u = (x - tile.x as f64 * tile_m) / cell;
+    let v = (y - tile.y as f64 * tile_m) / cell;
+    let j0 = (u.floor().max(0.0) as usize).min(n - 2);
+    let i0 = (v.floor().max(0.0) as usize).min(n - 2);
     let (fu, fv) = (u - j0 as f64, v - i0 as f64);
     let at = |i: usize, j: usize| grid.values[i * n + j] as f64;
-    let top = at(i0, j0) + (at(i0, j1) - at(i0, j0)) * fu;
-    let bottom = at(i1, j0) + (at(i1, j1) - at(i1, j0)) * fu;
-    (top + (bottom - top) * fv) as f32
+    let (a, b, c, d) = (at(i0, j0), at(i0, j0 + 1), at(i0 + 1, j0), at(i0 + 1, j0 + 1));
+    let h = if fu + fv <= 1.0 {
+        // Triangle a, b, c.
+        a + (b - a) * fu + (c - a) * fv
+    } else {
+        // Triangle b, c, d.
+        d + (c - d) * (1.0 - fu) + (b - d) * (1.0 - fv)
+    };
+    h as f32
 }
 
 /// Road width in meters by OSM `highway` class.
@@ -154,34 +164,103 @@ pub fn tile_geometry(tile: &Tile, tile_m: f64) -> TileGeometry {
     }
 
     let mut roads = MeshData::default();
+    // Stations every quarter of a grid cell: the ribbon follows the terrain between nodes.
+    let step = cell / ROAD_STATIONS_PER_CELL;
     for road in &tile.roads {
         let half = road_width_m(&road.highway) / 2.0;
-        for seg in road.points.windows(2) {
-            let (p, q) = (seg[0], seg[1]);
-            let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
-            let len = (dx * dx + dy * dy).sqrt();
-            if len < 1e-9 {
-                continue;
-            }
-            let (nx, ny) = (-dy / len * half, dx / len * half);
-            let corners = [
-                [p[0] + nx, p[1] + ny],
-                [p[0] - nx, p[1] - ny],
-                [q[0] - nx, q[1] - ny],
-                [q[0] + nx, q[1] + ny],
-            ];
-            let base = roads.vertices.len() as u32;
-            for [cx, cy] in corners {
-                let height = sample_height(tile, tile_m, cx, cy) + ROAD_LIFT_M;
-                roads.vertices.push(world(cx, cy, height));
-                roads.normals.push([0.0, 1.0, 0.0]);
-            }
-            push_up_facing(&mut roads, base, base + 1, base + 2);
-            push_up_facing(&mut roads, base, base + 2, base + 3);
-        }
+        push_road(&mut roads, tile, tile_m, &road.points, half, step);
     }
 
     TileGeometry { terrain, roads }
+}
+
+/// Stations per terrain grid cell along a road.
+const ROAD_STATIONS_PER_CELL: f64 = 4.0;
+/// Miter joins are cut back when the corner is sharper than this (scale limit).
+const MITER_LIMIT: f64 = 2.0;
+
+/// Adds one road as a continuous strip: three vertices per station (left edge, center,
+/// right edge), two quads between stations. Stations sit at the polyline nodes and every
+/// `step` meters in between, so each vertex is sampled on the terrain and the strip
+/// does not cut under a crest between two nodes. At each node the two segment normals
+/// are joined (miter), so bends have no gaps or overlaps.
+fn push_road(mesh: &mut MeshData, tile: &Tile, tile_m: f64, points: &[[f64; 2]], half: f64, step: f64) {
+    // Drop repeated points: they have no direction.
+    let mut pts: Vec<[f64; 2]> = Vec::with_capacity(points.len());
+    for &p in points {
+        match pts.last() {
+            Some(&q) if dist(p, q) <= 1e-9 => {}
+            _ => pts.push(p),
+        }
+    }
+    if pts.len() < 2 {
+        return;
+    }
+    let normals: Vec<[f64; 2]> = pts.windows(2).map(|w| unit_normal(w[0], w[1])).collect();
+
+    // Offset from the center to the left edge, one per station, with its position.
+    let mut stations: Vec<([f64; 2], [f64; 2])> = Vec::new();
+    stations.push((pts[0], scale(normals[0], half)));
+    for k in 0..pts.len() - 1 {
+        let (p, q) = (pts[k], pts[k + 1]);
+        let pieces = (dist(p, q) / step).ceil().max(1.0) as usize;
+        for s in 1..pieces {
+            let t = s as f64 / pieces as f64;
+            let at = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+            stations.push((at, scale(normals[k], half)));
+        }
+        let offset = match normals.get(k + 1) {
+            Some(&next) => miter(normals[k], next, half),
+            None => scale(normals[k], half),
+        };
+        stations.push((q, offset));
+    }
+
+    let base = mesh.vertices.len() as u32;
+    for &(c, o) in &stations {
+        for [x, y] in [[c[0] + o[0], c[1] + o[1]], c, [c[0] - o[0], c[1] - o[1]]] {
+            let height = sample_height(tile, tile_m, x, y) + ROAD_LIFT_M;
+            mesh.vertices.push(world(x, y, height));
+            mesh.normals.push([0.0, 1.0, 0.0]);
+        }
+    }
+    for s in 0..stations.len() - 1 {
+        // Vertex of station s on the left (3s), center (3s + 1) and right (3s + 2) edge.
+        let l0 = base + 3 * s as u32;
+        let l1 = l0 + 3;
+        push_up_facing(mesh, l0, l0 + 1, l1 + 1);
+        push_up_facing(mesh, l0, l1 + 1, l1);
+        push_up_facing(mesh, l0 + 1, l0 + 2, l1 + 2);
+        push_up_facing(mesh, l0 + 1, l1 + 2, l1 + 1);
+    }
+}
+
+fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
+    ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
+}
+
+fn scale(v: [f64; 2], k: f64) -> [f64; 2] {
+    [v[0] * k, v[1] * k]
+}
+
+/// Unit normal (left of the direction) of the segment `p -> q`. Caller ensures `p != q`.
+fn unit_normal(p: [f64; 2], q: [f64; 2]) -> [f64; 2] {
+    let len = dist(p, q);
+    [-(q[1] - p[1]) / len, (q[0] - p[0]) / len]
+}
+
+/// Offset of length `half` at a node joining segments with normals `m1` and `m2`:
+/// the bisector scaled so both edges stay at `half` from the centerline.
+fn miter(m1: [f64; 2], m2: [f64; 2], half: f64) -> [f64; 2] {
+    let sum = [m1[0] + m2[0], m1[1] + m2[1]];
+    let len = (sum[0] * sum[0] + sum[1] * sum[1]).sqrt();
+    if len < 1e-9 {
+        // Opposite directions (U-turn): no bisector, keep the first normal.
+        return scale(m1, half);
+    }
+    let bisector = scale(sum, 1.0 / len);
+    let cos_half = (bisector[0] * m1[0] + bisector[1] * m1[1]).max(1.0 / MITER_LIMIT);
+    scale(bisector, half / cos_half)
 }
 
 /// Local `(x, y)` plus height to Godot world space.
@@ -260,14 +339,121 @@ mod tests {
     }
 
     #[test]
-    fn sample_height_is_bilinear() {
+    fn sample_height_is_linear_on_a_ramp() {
         // 3x3 samples over 20 m (cell 10 m): height = x_m + 100 (ramp along x).
         let t = tile(0, 0, grid(3, |u, _| (u * 20.0) as f32 + 100.0), Vec::new());
         assert!((sample_height(&t, 20.0, 0.0, 0.0) - 100.0).abs() < 1e-4);
         assert!((sample_height(&t, 20.0, 5.0, 7.0) - 105.0).abs() < 1e-4);
         assert!((sample_height(&t, 20.0, 20.0, 3.0) - 120.0).abs() < 1e-4);
-        // Outside the tile: clamped to the edge.
-        assert!((sample_height(&t, 20.0, 50.0, -9.0) - 120.0).abs() < 1e-4);
+        // Outside the tile: the edge plane is extended (the neighbor has the same edge).
+        assert!((sample_height(&t, 20.0, 30.0, -9.0) - 130.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn sample_height_follows_the_mesh_diagonal() {
+        // One cell (2x2 samples, 10 m): only the north-east corner is high.
+        // The mesh splits the cell from north-east to south-west, so the south-west
+        // half is flat and the point (5, 5) is at 0 m (bilinear would give 2.5 m).
+        let t = tile(0, 0, HeightGrid { cols: 2, rows: 2, values: vec![0.0, 0.0, 0.0, 10.0] }, Vec::new());
+        assert!((sample_height(&t, 10.0, 5.0, 5.0)).abs() < 1e-5);
+        // In the north-east half: d + ... = 4 m at (7, 7).
+        assert!((sample_height(&t, 10.0, 7.0, 7.0) - 4.0).abs() < 1e-4);
+        // Mesh vertices give their own heights.
+        assert!((sample_height(&t, 10.0, 10.0, 10.0) - 10.0).abs() < 1e-5);
+    }
+
+    /// Smooth hill of 8 m, 20 m wide, centered in a 250 m tile.
+    fn hill(x: f64, y: f64) -> f32 {
+        (8.0 * (-((x - 125.0).powi(2) + (y - 125.0).powi(2)) / (2.0 * 20.0 * 20.0)).exp()) as f32
+    }
+
+    /// Height of the drawn road mesh at local `(x, y)`, by barycentric interpolation
+    /// over the triangle that contains the point (`None` outside all triangles).
+    fn ribbon_height(mesh: &MeshData, x: f64, y: f64) -> Option<f64> {
+        for tri in mesh.indices.chunks(3) {
+            let p: Vec<[f64; 3]> = tri
+                .iter()
+                .map(|&i| {
+                    let v = mesh.vertices[i as usize];
+                    // Godot (x, y, z) -> local (x, y) with z = -north.
+                    [v[0] as f64, v[1] as f64, -(v[2] as f64)]
+                })
+                .collect();
+            let det = (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let l1 = ((x - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (y - p[0][2])) / det;
+            let l2 = ((p[1][0] - p[0][0]) * (y - p[0][2]) - (x - p[0][0]) * (p[1][2] - p[0][2])) / det;
+            let l0 = 1.0 - l1 - l2;
+            let eps = -1e-9;
+            if l0 >= eps && l1 >= eps && l2 >= eps {
+                return Some(l0 * p[0][1] + l1 * p[1][1] + l2 * p[2][1]);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn road_never_goes_under_the_terrain() {
+        // A bendy road over a hill: the strip is sampled between nodes, so it must stay
+        // above the drawn terrain everywhere, not only at the nodes.
+        let road = Polyline {
+            highway: "residential".into(),
+            points: vec![[60.0, 100.0], [120.0, 128.0], [190.0, 150.0], [200.0, 60.0]],
+        };
+        let t = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![road.clone()]);
+        let g = tile_geometry(&t, 250.0);
+        let mut checked = 0;
+        for k in 0..road.points.len() - 1 {
+            let (p, q) = (road.points[k], road.points[k + 1]);
+            for s in 0..=40 {
+                for side in [-3.0, -1.5, 0.0, 1.5, 3.0] {
+                    let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+                    let len = (dx * dx + dy * dy).sqrt();
+                    let t_ = s as f64 / 40.0;
+                    // Stay off the nodes of the polyline: the bend is covered by the miter.
+                    let x = p[0] + dx * t_ + -dy / len * side;
+                    let y = p[1] + dy * t_ + dx / len * side;
+                    let Some(strip) = ribbon_height(&g.roads, x, y) else { continue };
+                    let terrain = sample_height(&t, 250.0, x, y) as f64;
+                    assert!(strip >= terrain, "road under terrain at ({x:.2}, {y:.2}): {strip} < {terrain}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 400, "only {checked} points checked");
+    }
+
+    #[test]
+    fn road_ends_meet_across_tiles() {
+        // Two tiles share the edge x = 250 m: a road crossing it gives a piece on each side.
+        // Their end vertices are the same point, with the same height from both tiles.
+        // Grid values are global heights: tile (0, 0) spans x in [0, 250], tile (1, 0) in [250, 500].
+        let left = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![]);
+        let right = tile(1, 0, grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)), vec![]);
+        for y in [0.0, 60.0, 125.0, 200.0] {
+            let a = sample_height(&left, 250.0, 250.0, y);
+            let b = sample_height(&right, 250.0, 250.0, y);
+            assert!((a - b).abs() < 1e-4, "edge height differs at y={y}: {a} vs {b}");
+        }
+        // The strip of each tile ends on the shared border line.
+        let piece = |x0: f64, x1: f64| Polyline {
+            highway: "residential".into(),
+            points: vec![[x0, 125.0], [x1, 125.0]],
+        };
+        let gl = tile_geometry(&tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![piece(100.0, 250.0)]), 250.0);
+        let gr = tile_geometry(
+            &tile(1, 0, grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)), vec![piece(250.0, 400.0)]),
+            250.0,
+        );
+        let edge_x = |m: &MeshData| {
+            m.vertices.iter().filter(|v| (v[0] - 250.0).abs() < 1e-4).map(|v| (v[1], v[2])).collect::<Vec<_>>()
+        };
+        assert!(!edge_x(&gl.roads).is_empty() && !edge_x(&gr.roads).is_empty());
+        for (y1, z1) in edge_x(&gl.roads) {
+            assert!(edge_x(&gr.roads).iter().any(|&(y2, z2)| (y1 - y2).abs() < 1e-4 && (z1 - z2).abs() < 1e-4));
+        }
     }
 
     #[test]
@@ -321,8 +507,9 @@ mod tests {
         };
         let t = tile(0, 0, grid(3, |_, _| 50.0), vec![road]);
         let g = tile_geometry(&t, 20.0);
-        assert_eq!(g.roads.vertices.len(), 4);
-        assert_eq!(g.roads.indices.len(), 6);
+        // 20 m at a station every 2.5 m: 9 stations x 3 vertices, 8 x 4 triangles.
+        assert_eq!(g.roads.vertices.len(), 27);
+        assert_eq!(g.roads.indices.len(), 8 * 4 * 3);
         for v in &g.roads.vertices {
             assert!((v[1] - (50.0 + ROAD_LIFT_M)).abs() < 1e-4);
         }

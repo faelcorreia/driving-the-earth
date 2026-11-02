@@ -61,6 +61,23 @@ pub fn covering_tiles(radius_m: f64, tile_m: f64) -> Vec<(i32, i32)> {
     out
 }
 
+/// Geographic bounding box `(south, west, north, east)` of all the covering tiles.
+/// The OSM query uses it, so every way that touches a baked tile is downloaded.
+pub fn covering_bbox(meta: &MapMeta) -> (f64, f64, f64, f64) {
+    let grid = MapGrid::from_meta(meta);
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for (x, y) in covering_tiles(meta.radius_m, meta.tile_size_m) {
+        let r = tile_rect(x, y, meta.tile_size_m);
+        x0 = x0.min(r.x0);
+        y0 = y0.min(r.y0);
+        x1 = x1.max(r.x1);
+        y1 = y1.max(r.y1);
+    }
+    let (south, west) = grid.latlon(x0, y0);
+    let (north, east) = grid.latlon(x1, y1);
+    (south, west, north, east)
+}
+
 /// Roads and buildings from a raw Overpass response (`out body geom`), in the local plane.
 pub fn parse_ways(overpass_json: &str, grid: &MapGrid) -> io::Result<(Vec<Polyline>, Vec<Polygon>)> {
     let v: Value = serde_json::from_str(overpass_json).map_err(invalid_data)?;
@@ -190,6 +207,31 @@ mod tests {
         assert!(!tiles.contains(&(3, 3)));
         assert!(!tiles.contains(&(-4, -4)));
         assert_eq!(tiles.len(), 60);
+    }
+
+    #[test]
+    fn covering_bbox_spans_the_covering_tiles() {
+        let meta = MapMeta {
+            id: "t".into(),
+            name: "t".into(),
+            center_lat: -19.9,
+            center_lon: -43.9,
+            radius_m: 1000.0,
+            tile_size_m: 250.0,
+            created_unix: 0,
+            complete: false,
+        };
+        let (s, w, n, e) = covering_bbox(&meta);
+        assert!(s < meta.center_lat && meta.center_lat < n);
+        assert!(w < meta.center_lon && meta.center_lon < e);
+        // Covering tiles run from x = -1000 m to 1000 m and from y = -1000 m to 1000 m.
+        let grid = MapGrid::from_meta(&meta);
+        let (lat_top, _) = grid.latlon(0.0, 1000.0);
+        let (lat_bottom, _) = grid.latlon(0.0, -1000.0);
+        assert!((n - lat_top).abs() < 1e-12 && (s - lat_bottom).abs() < 1e-12, "{s} {n}");
+        let (_, lon_left) = grid.latlon(-1000.0, 0.0);
+        let (_, lon_right) = grid.latlon(1000.0, 0.0);
+        assert!((w - lon_left).abs() < 1e-12 && (e - lon_right).abs() < 1e-12);
     }
 
     #[test]

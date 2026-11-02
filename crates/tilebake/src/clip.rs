@@ -46,7 +46,11 @@ pub fn clip_segment(a: Pt, b: Pt, r: Rect) -> Option<(Pt, Pt)> {
             }
         }
     }
-    Some((lerp(a, b, t0), lerp(a, b, t1)))
+    // Keep the original endpoints bit-exact when they are not clipped: `lerp(a, b, 1.0)`
+    // may differ from `b` by a rounding error, which would split a polyline at its nodes.
+    let p = if t0 == 0.0 { a } else { lerp(a, b, t0) };
+    let q = if t1 == 1.0 { b } else { lerp(a, b, t1) };
+    Some((p, q))
 }
 
 fn push_distinct(v: &mut Vec<Pt>, p: Pt) {
@@ -164,6 +168,14 @@ mod tests {
         assert_eq!(clip_polyline(&road, r1), vec![vec![[250.0, 125.0], [500.0, 125.0]]]);
         let r2 = Rect { x0: 500.0, x1: 750.0, ..R };
         assert_eq!(clip_polyline(&road, r2), vec![vec![[500.0, 125.0], [600.0, 125.0]]]);
+    }
+
+    #[test]
+    fn polyline_inside_with_inexact_nodes_is_one_piece() {
+        // Coordinates that are not exact in binary: nodes must not split the way.
+        let line = [[10.1, 10.3], [77.7, 90.9], [200.3, 150.7], [33.3, 44.4], [12.7, 201.9]];
+        let pieces = clip_polyline(&line, R);
+        assert_eq!(pieces, vec![line.to_vec()]);
     }
 
     #[test]
