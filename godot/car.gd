@@ -97,6 +97,12 @@ func _add_face(st: SurfaceTool, centroid: Vector3, a: Vector3, b: Vector3, c: Ve
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("drive_reset"):
 		_reset_requested = true
+	if event.is_action_pressed("debug_position"):
+		# Map local meters: x east, y north (= -z), home at the origin.
+		var pos := global_transform.origin
+		var forward := -global_transform.basis.z
+		var yaw_deg := rad_to_deg(atan2(-forward.x, -forward.z))
+		print("Position x=%.2f y=%.2f height=%.2f m, yaw=%.1f deg" % [pos.x, -pos.z, pos.y, yaw_deg])
 
 
 ## Endireita o carro na posição atual, mantendo o yaw, e zera as velocidades.
