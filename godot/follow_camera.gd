@@ -3,7 +3,7 @@ extends Camera3D
 ## Câmera de terceira pessoa estilo GTA. Orbita o carro (pai do nó) com free-look pelo mouse.
 ## Yaw e pitch são do jogador: o carro girar não gira a câmera. Após `recenter_delay` segundos
 ## sem mexer o mouse, o yaw volta suavemente para trás do carro.
-## Esc alterna captura do mouse; clique esquerdo recaptura.
+## Ligada e desligada pelo carro (set_active); desligada não processa input nem física.
 
 @export var mouse_sensitivity := 0.003  ## rad por pixel de mouse
 @export var distance := 6.0  ## m entre o ponto de mira e a câmera
@@ -29,7 +29,6 @@ func _ready() -> void:
 	top_level = true
 	_car = get_parent() as VehicleBody3D
 	_pitch = deg_to_rad(initial_pitch_deg)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -42,19 +41,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			deg_to_rad(max_pitch_deg)
 		)
 		_idle = 0.0
-		return
 
-	if event.is_action_pressed("ui_cancel"):
-		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		else:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-		get_viewport().set_input_as_handled()
-		return
 
-	var click := event as InputEventMouseButton
-	if click and click.pressed and click.button_index == MOUSE_BUTTON_LEFT:
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+## Liga ou desliga esta visão. Desligada, a câmera deixa de receber input e de rodar `_physics_process`.
+func set_active(on: bool) -> void:
+	current = on
+	process_mode = Node.PROCESS_MODE_INHERIT if on else Node.PROCESS_MODE_DISABLED
 
 
 func _physics_process(delta: float) -> void:

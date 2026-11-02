@@ -26,6 +26,10 @@ extends VehicleBody3D
 ## Altura extra, em metros, ao endireitar o carro com drive_reset.
 @export var reset_lift_m := 1.0
 
+## Visões da câmera, em ordem de ciclo pela tecla C (drive_camera). Cada uma tem `set_active(on)`.
+@onready var _views: Array = [$Camera, $DriverCamera]
+var _view_index := 0
+
 ## Cabine (teto, para-brisa e vidro traseiro) como prisma convexo extrudado em X.
 ## Perfil em (z, y) do carro, com frente em -Z. Convexo, para a colisão ser um ConvexPolygonShape3D.
 var _cabin_profile := PackedVector2Array([
@@ -49,6 +53,17 @@ func _ready() -> void:
 	shape.points = points
 	$CabinShape.shape = shape
 	$CabinMesh.mesh = _prism_mesh(_cabin_profile, CABIN_HALF_WIDTH)
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_set_view(0)
+
+
+## Troca a visão ativa. Desliga as outras antes de ligar a nova, para só uma câmera ficar `current`.
+func _set_view(index: int) -> void:
+	_view_index = index
+	for i in _views.size():
+		if i != index:
+			_views[i].set_active(false)
+	_views[index].set_active(true)
 
 
 ## Malha de um prisma convexo: perfil (x = z do carro, y = altura) extrudado de -w a +w em X.
@@ -97,6 +112,18 @@ func _add_face(st: SurfaceTool, centroid: Vector3, a: Vector3, b: Vector3, c: Ve
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("drive_reset"):
 		_reset_requested = true
+	if event.is_action_pressed("drive_camera"):
+		_set_view((_view_index + 1) % _views.size())
+	if event.is_action_pressed("ui_cancel"):
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		else:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		get_viewport().set_input_as_handled()
+		return
+	var click := event as InputEventMouseButton
+	if click and click.pressed and click.button_index == MOUSE_BUTTON_LEFT:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	if event.is_action_pressed("debug_position"):
 		# Map local meters: x east, y north (= -z), home at the origin.
 		var pos := global_transform.origin

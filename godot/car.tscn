@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" path="res://car.gd" id="1_car"]
 [ext_resource type="Script" path="res://follow_camera.gd" id="2_camera"]
+[ext_resource type="Script" path="res://driver_camera.gd" id="3_driver_camera"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_body"]
 size = Vector3(1.55, 0.6, 3.7)
@@ -79,3 +80,7 @@ mesh = SubResource("CylinderMesh_wheel")
 [node name="Camera" type="Camera3D" parent="."]
 script = ExtResource("2_camera")
 current = true
+
+[node name="DriverCamera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.35, 0.755, -0.15)
+script = ExtResource("3_driver_camera")
