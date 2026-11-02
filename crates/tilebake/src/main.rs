@@ -26,4 +26,16 @@ fn main() {
             std::process::exit(1);
         }
     }
+    match tilebake::tiles::bake_tiles(&cache, "casa") {
+        Ok(t) => {
+            println!("tiles: {} written", t.tiles);
+            println!("road pieces: {}", t.road_pieces);
+            println!("building pieces: {}", t.building_pieces);
+            println!("meta.complete: true");
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
 }

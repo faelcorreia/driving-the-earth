@@ -61,11 +61,22 @@ impl MapGrid {
         }
     }
 
+    /// Meters per degree of latitude and longitude, at the center of the map.
+    fn meters_per_degree(&self) -> (f64, f64) {
+        let m_lat = EARTH_RADIUS_M.to_radians();
+        (m_lat, m_lat * self.lat0.to_radians().cos())
+    }
+
     /// (lat, lon) of the point `(x_m, y_m)` on the local plane (east, north).
     pub fn latlon(&self, x_m: f64, y_m: f64) -> (f64, f64) {
-        let m_lat = EARTH_RADIUS_M.to_radians();
-        let m_lon = m_lat * self.lat0.to_radians().cos();
+        let (m_lat, m_lon) = self.meters_per_degree();
         (self.lat0 + y_m / m_lat, self.lon0 + x_m / m_lon)
+    }
+
+    /// `(x_m, y_m)` on the local plane (east, north) of `(lat, lon)`. Inverse of `latlon`.
+    pub fn local(&self, lat: f64, lon: f64) -> (f64, f64) {
+        let (m_lat, m_lon) = self.meters_per_degree();
+        ((lon - self.lon0) * m_lon, (lat - self.lat0) * m_lat)
     }
 }
 

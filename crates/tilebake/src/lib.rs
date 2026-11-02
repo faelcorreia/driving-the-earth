@@ -6,7 +6,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tileformat::MapMeta;
 
+pub mod clip;
 pub mod dem;
+pub mod tiles;
 
 const USER_AGENT: &str = "driving-the-earth/0.1 (tilebake; projeto pessoal)";
 const NOMINATIM_URL: &str = "https://nominatim.openstreetmap.org/search";
