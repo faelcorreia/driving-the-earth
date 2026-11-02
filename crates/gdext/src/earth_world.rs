@@ -1,5 +1,6 @@
 //! Godot node that loads a baked map from the cache, builds the terrain and roads of
-//! the neighborhood, and spawns the car at home (the map center).
+//! the neighborhood, and spawns the car on the road nearest to home (the map center),
+//! facing south.
 use std::path::PathBuf;
 
 use godot::classes::mesh::{ArrayType, PrimitiveType};
@@ -11,6 +12,7 @@ use godot::prelude::*;
 use godot::tools::try_load;
 
 use crate::map::{load_map, tile_geometry, MeshData};
+use crate::spawn::road_spawn;
 
 /// Height of the car above the terrain when spawned, in meters.
 const SPAWN_LIFT_M: f32 = 1.0;
@@ -63,12 +65,21 @@ impl INode3D for EarthWorld {
             }
         }
 
-        // Home is the map center, which is the local origin.
-        let Some(height) = map.height_at(0.0, 0.0) else {
-            godot_error!("map '{id}' has no tile at home, car not spawned");
+        // Spawn on the road nearest to home (the local origin), facing south. Without any
+        // road, fall back to home itself facing south.
+        let (x, y, yaw) = match road_spawn(&map.tiles) {
+            Some(pose) => (pose.x, pose.y, pose.yaw),
+            None => {
+                godot_warn!("map '{id}' has no road to spawn on, spawning at home");
+                (0.0, 0.0, std::f32::consts::PI)
+            }
+        };
+        let Some(height) = map.height_at(x, y) else {
+            godot_error!("map '{id}' has no tile at the spawn point, car not spawned");
             return;
         };
-        match spawn_car(height + SPAWN_LIFT_M) {
+        let position = Vector3::new(x as f32, height + SPAWN_LIFT_M, -(y as f32));
+        match spawn_car(position, yaw) {
             Some(car) => self.base_mut().add_child(&car),
             None => {
                 godot_error!("cannot instantiate res://car.tscn");
@@ -83,10 +94,12 @@ fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
     mat
 }
 
-fn spawn_car(height: f32) -> Option<Gd<Node3D>> {
+/// Instantiates the car at `position`, turned by `yaw` about +Y.
+fn spawn_car(position: Vector3, yaw: f32) -> Option<Gd<Node3D>> {
     let scene: Gd<PackedScene> = try_load("res://car.tscn").ok()?;
     let mut car = scene.instantiate()?.try_cast::<Node3D>().ok()?;
-    car.set_position(Vector3::new(0.0, height, 0.0));
+    car.set_position(position);
+    car.set_rotation(Vector3::new(0.0, yaw, 0.0));
     Some(car)
 }
 
