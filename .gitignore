@@ -1,0 +1,5 @@
+target/
+cache/
+godot/.godot/
+CLAUDE.md
+BACKLOG.md

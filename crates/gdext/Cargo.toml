@@ -1,0 +1,12 @@
+[package]
+name = "driving_the_earth_ext"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tileformat = { path = "../tileformat" }
+tilebake = { path = "../tilebake" }
+godot = "0.5"
