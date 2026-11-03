@@ -5,12 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use godot::classes::directional_light_3d::ShadowMode;
 use godot::classes::environment::{AmbientSource, BgMode, ToneMapper};
+use godot::classes::input::MouseMode;
 use godot::classes::light_3d::Param;
 use godot::classes::rendering_server::GlobalShaderParameterType;
 use godot::classes::RenderingServer;
 use godot::classes::{
-    Camera3D, DirectionalLight3D, Environment, INode, InputEvent, Node, Shader, ShaderMaterial,
-    Sky, WorldEnvironment,
+    Camera3D, DirectionalLight3D, Environment, INode, Input, InputEvent, Node, Shader,
+    ShaderMaterial, Sky, WorldEnvironment,
 };
 use godot::prelude::*;
 
@@ -115,6 +116,8 @@ pub struct EnvironmentClock {
     lamps_primed: bool,
     /// Painel de hora (tecla T), criado em `ready`.
     panel: Option<TimePanel>,
+    /// Mouse mode before the panel opened, restored on close.
+    mouse_before: Option<MouseMode>,
 }
 
 #[godot_api]
@@ -422,6 +425,14 @@ impl EnvironmentClock {
             panel.update(sim, speed);
         }
         panel.set_open(open);
+        // The mouse is always visible while the panel is open; closing restores the previous mode.
+        let mut input = Input::singleton();
+        if open {
+            self.mouse_before = Some(input.get_mouse_mode());
+            input.set_mouse_mode(MouseMode::VISIBLE);
+        } else if let Some(mode) = self.mouse_before.take() {
+            input.set_mouse_mode(mode);
+        }
         godot_print!(
             "environment: time panel {}",
             if open { "open" } else { "closed" }
@@ -561,6 +572,10 @@ impl INode for EnvironmentClock {
                 && self.panel.as_ref().is_some_and(|p| p.is_open()))
         {
             self.toggle_time_panel();
+            // Esc must not also reach the car, which toggles the mouse capture on it.
+            if let Some(mut viewport) = self.base().get_viewport() {
+                viewport.set_input_as_handled();
+            }
         }
     }
 }

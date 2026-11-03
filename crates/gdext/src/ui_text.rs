@@ -55,6 +55,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("time.date_label", "Date", "Data"),
     ("time.hour_label", "Hour", "Hora"),
     ("time.date_example", "DD/MM/YYYY", "DD/MM/AAAA"),
+    ("time.hour_example", "HH:MM", "HH:MM"),
     ("time.set", "Set", "Aplicar"),
     (
         "time.invalid",
@@ -103,7 +104,10 @@ mod tests {
     fn every_key_has_both_languages() {
         for (key, en, pt) in TABLE {
             assert!(!en.is_empty() && !pt.is_empty(), "{key}");
-            assert_ne!(en, pt, "{key} is not translated");
+            // Formats such as HH:MM are the same in both languages.
+            if !key.ends_with("_example") {
+                assert_ne!(en, pt, "{key} is not translated");
+            }
             assert_eq!(text(key, Lang::En), *en);
             assert_eq!(text(key, Lang::PtBr), *pt);
         }

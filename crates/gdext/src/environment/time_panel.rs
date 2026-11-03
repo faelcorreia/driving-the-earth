@@ -6,8 +6,8 @@ use godot::builtin::Side;
 use godot::classes::control::{LayoutPreset, SizeFlags};
 use godot::classes::text_server::AutowrapMode;
 use godot::classes::{
-    Button, CanvasLayer, HBoxContainer, Label, LineEdit, OptionButton, Os, PanelContainer,
-    VBoxContainer,
+    Button, CanvasLayer, GridContainer, HBoxContainer, Label, LineEdit, MarginContainer,
+    OptionButton, Os, PanelContainer, VBoxContainer,
 };
 use godot::prelude::*;
 
@@ -24,10 +24,11 @@ const PANEL_WIDTH_PX: f32 = 340.0;
 const PANEL_MARGIN_PX: f32 = 16.0;
 /// Camada do painel: acima do jogo e do mapa.
 const PANEL_LAYER: i32 = 20;
-/// Largura mínima do campo de data, em pixels.
-const DATE_FIELD_WIDTH_PX: f32 = 110.0;
-/// Largura mínima do campo de hora, em pixels.
-const HOUR_FIELD_WIDTH_PX: f32 = 70.0;
+/// Folga interna entre a borda do painel e o conteúdo, em pixels.
+const PANEL_PADDING_PX: i32 = 10;
+/// Largura do conteúdo (painel menos a folga dos dois lados), em pixels. Os textos que quebram
+/// linha precisam dela, senão um `Label` com quebra encolhe a zero e quebra letra por letra.
+const CONTENT_WIDTH_PX: f32 = PANEL_WIDTH_PX - 2.0 * PANEL_PADDING_PX as f32;
 
 /// Tela do painel de hora. Os sinais dos botões chamam métodos `#[func]` de `EnvironmentClock`,
 /// que fazem a lógica e devolvem os valores para cá.
@@ -66,23 +67,23 @@ impl TimePanel {
         let title = Self::label(&text("time.title", lang));
         let current = Self::label("");
 
-        let mut date_row = HBoxContainer::new_alloc();
+        // Data e hora em grade de duas colunas (rótulo, campo); o botão ocupa a linha de baixo.
+        let mut fields = GridContainer::new_alloc();
+        fields.set_columns(2);
         let date_label = Self::label(&text("time.date_label", lang));
         let mut date_edit = LineEdit::new_alloc();
         date_edit.set_placeholder(&text("time.date_example", lang));
-        date_edit.set_custom_minimum_size(Vector2::new(DATE_FIELD_WIDTH_PX, 0.0));
         date_edit.set_h_size_flags(SizeFlags::EXPAND_FILL);
         let hour_label = Self::label(&text("time.hour_label", lang));
         let mut hour_edit = LineEdit::new_alloc();
-        hour_edit.set_placeholder("HH:MM");
-        hour_edit.set_custom_minimum_size(Vector2::new(HOUR_FIELD_WIDTH_PX, 0.0));
+        hour_edit.set_placeholder(&text("time.hour_example", lang));
+        hour_edit.set_h_size_flags(SizeFlags::EXPAND_FILL);
+        fields.add_child(&date_label);
+        fields.add_child(&date_edit);
+        fields.add_child(&hour_label);
+        fields.add_child(&hour_edit);
         let mut set_button = Button::new_alloc();
         set_button.set_text(&text("time.set", lang));
-        date_row.add_child(&date_label);
-        date_row.add_child(&date_edit);
-        date_row.add_child(&hour_label);
-        date_row.add_child(&hour_edit);
-        date_row.add_child(&set_button);
 
         let mut speed_row = HBoxContainer::new_alloc();
         let speed_label = Self::label(&text("time.speed_label", lang));
@@ -105,20 +106,29 @@ impl TimePanel {
         shortcut_row.add_child(&sunrise_button);
         shortcut_row.add_child(&sunset_button);
 
-        let events = Self::label("");
-        let mut error = Self::label("");
+        let events = Self::wrapped_label("");
+        let mut error = Self::wrapped_label("");
         error.set_visible(false);
-        let hint = Self::label(&text("time.hint", lang));
+        let hint = Self::wrapped_label(&text("time.hint", lang));
 
         column.add_child(&title);
         column.add_child(&current);
-        column.add_child(&date_row);
+        column.add_child(&fields);
+        column.add_child(&set_button);
         column.add_child(&speed_row);
         column.add_child(&shortcut_row);
         column.add_child(&events);
         column.add_child(&error);
         column.add_child(&hint);
-        panel.add_child(&column);
+        let mut margin = MarginContainer::new_alloc();
+        for side in [Side::LEFT, Side::RIGHT, Side::TOP, Side::BOTTOM] {
+            margin.add_theme_constant_override(
+                &format!("margin_{}", side_name(side)),
+                PANEL_PADDING_PX,
+            );
+        }
+        margin.add_child(&column);
+        panel.add_child(&margin);
         root.add_child(&panel);
 
         // Os sinais chamam os `#[func]` do relógio, com o mesmo nome (ver `environment/clock.rs`).
@@ -248,11 +258,29 @@ impl TimePanel {
         )
     }
 
+    /// Rótulo de uma linha, com a largura do próprio texto.
     fn label(text: &str) -> Gd<Label> {
         let mut label = Label::new_alloc();
         label.set_text(text);
-        label.set_autowrap_mode(AutowrapMode::WORD_SMART);
         label
+    }
+
+    /// Texto longo que quebra linha, com largura mínima para não encolher a zero.
+    fn wrapped_label(text: &str) -> Gd<Label> {
+        let mut label = Self::label(text);
+        label.set_autowrap_mode(AutowrapMode::WORD_SMART);
+        label.set_custom_minimum_size(Vector2::new(CONTENT_WIDTH_PX, 0.0));
+        label
+    }
+}
+
+/// Nome da borda no tema (`margin_left` etc.).
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::LEFT => "left",
+        Side::RIGHT => "right",
+        Side::TOP => "top",
+        _ => "bottom",
     }
 }
 
