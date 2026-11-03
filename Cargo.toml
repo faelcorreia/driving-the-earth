@@ -4,7 +4,7 @@ members = ["crates/tileformat", "crates/tilebake", "crates/gdext"]
 
 [workspace.package]
 edition = "2021"
-version = "0.0.1"
+version = "0.0.2"
 
 [profile.release]
 opt-level = 3

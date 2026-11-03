@@ -10,6 +10,12 @@ use super::vec2::{dist, miter, scale, unit_normal};
 pub(crate) const ROAD_LIFT_M: f32 = 0.1;
 /// Extra lift per road index (modulo 8), so overlapping ribbons do not z-fight.
 pub(super) const ROAD_ORDER_LIFT_M: f32 = 0.002;
+/// Extra ribbon lift per meter of height step to the neighboring stations beyond
+/// `ROAD_STEP_FREE_M` (about 6% grade at 2.5 m stations; gentler stretches keep the plain lift), capped.
+const ROAD_STEP_FREE_M: f32 = 0.15;
+const ROAD_STEP_LIFT: f32 = 0.4;
+const ROAD_STEP_LIFT_MAX_M: f32 = 0.4;
+const ROAD_STEP_CLIFF_M: f32 = 1.5;
 
 /// Adds one road as a continuous strip: three vertices per station (left edge, center,
 /// right edge), two quads between stations. Stations sit at the polyline nodes and every
@@ -56,10 +62,42 @@ pub(super) fn push_road(
     }
 
     let base = mesh.vertices.len() as u32;
+    let mut xy: Vec<[f64; 2]> = Vec::with_capacity(stations.len() * 3);
+    let mut heights: Vec<f32> = Vec::with_capacity(stations.len() * 3);
     for &(c, o) in &stations {
         for [x, y] in [[c[0] + o[0], c[1] + o[1]], c, [c[0] - o[0], c[1] - o[1]]] {
-            let height = surface.height(ground, x, y) + lift;
-            mesh.vertices.push(world(x, y, height));
+            xy.push([x, y]);
+            heights.push(surface.height(ground, x, y));
+        }
+    }
+    // The ribbon is flat between its stations and the terrain between its grid vertices, with
+    // different triangles; on a steep stretch they differ by a fraction of the height step
+    // between neighbors. The ribbon rises by that fraction so the terrain never shows through.
+    let n = stations.len();
+    for s in 0..n {
+        let mut step = 0.0f32;
+        for c in 0..3 {
+            let h = heights[3 * s + c];
+            if s > 0 {
+                step = step.max((h - heights[3 * (s - 1) + c]).abs());
+            }
+            if s + 1 < n {
+                step = step.max((h - heights[3 * (s + 1) + c]).abs());
+            }
+        }
+        step = step
+            .max((heights[3 * s] - heights[3 * s + 1]).abs())
+            .max((heights[3 * s + 1] - heights[3 * s + 2]).abs());
+        // A step beyond `ROAD_STEP_CLIFF_M` is a cliff (a tile border over a different terrain), not a slope.
+        let extra = if step > ROAD_STEP_CLIFF_M {
+            0.0
+        } else {
+            (ROAD_STEP_LIFT * (step - ROAD_STEP_FREE_M).max(0.0)).min(ROAD_STEP_LIFT_MAX_M)
+        };
+        for c in 0..3 {
+            let [x, y] = xy[3 * s + c];
+            mesh.vertices
+                .push(world(x, y, heights[3 * s + c] + lift + extra));
             mesh.normals.push([0.0, 1.0, 0.0]);
         }
     }
