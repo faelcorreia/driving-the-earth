@@ -40,7 +40,7 @@ pub struct Tile {
     pub buildings: Vec<Polygon>,
     /// Ground class per cell, row-major, `units::GROUND_N` x `units::GROUND_N` cells of
     /// `units::GROUND_CELL_M`. Empty when the bake gave no ground map (old caches).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "ground_rle")]
     pub ground: Vec<u8>,
 }
 
@@ -103,6 +103,35 @@ impl Polygon {
     /// A real building from OSM: no generated data.
     pub fn real(points: Vec<[f64; 2]>) -> Polygon {
         Polygon { points, generated: false, levels: 0, color_idx: 0, tint: 0 }
+    }
+}
+
+/// The ground map is stored run-length encoded: flat `[value, run, value, run, ...]` (most of a tile is
+/// one or two classes). In memory it is the plain `Vec<u8>` of one byte per cell.
+mod ground_rle {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(ground: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        let mut flat: Vec<u32> = Vec::new();
+        for &v in ground {
+            match flat.len() {
+                n if n >= 2 && flat[n - 2] == v as u32 => flat[n - 1] += 1,
+                _ => flat.extend([v as u32, 1]),
+            }
+        }
+        s.collect_seq(flat)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let flat: Vec<u32> = Vec::deserialize(d)?;
+        if flat.len() % 2 != 0 {
+            return Err(serde::de::Error::custom("ground runs must come in (value, count) pairs"));
+        }
+        let mut out = Vec::new();
+        for pair in flat.chunks(2) {
+            out.extend(std::iter::repeat(pair[0] as u8).take(pair[1] as usize));
+        }
+        Ok(out)
     }
 }
 
@@ -208,5 +237,24 @@ mod tests {
     fn tile_path_layout() {
         let p = tile_path(Path::new("cache"), "casa", 1, -2);
         assert_eq!(p, Path::new("cache/casa/tiles/1_-2.json"));
+    }
+}
+
+#[cfg(test)]
+mod ground_rle_tests {
+    use super::*;
+
+    #[test]
+    fn ground_round_trips_and_is_run_length_encoded() {
+        let mut ground = vec![GROUND_GRASS; units::GROUND_N * units::GROUND_N];
+        ground[7] = GROUND_CONCRETE;
+        ground[8] = GROUND_CONCRETE;
+        ground[2499] = GROUND_WATER;
+        let tile = Tile { x: 1, y: -2, height: HeightGrid { cols: 1, rows: 1, values: vec![0.0] }, roads: vec![], buildings: vec![], ground: ground.clone() };
+        let json = serde_json::to_string(&tile).unwrap();
+        // Runs: grass 7, concrete 2, grass 2490, water 1 -> 8 numbers, far below 2500 cells.
+        assert!(json.contains("[0,7,1,2,0,2490,4,1]"), "{json}");
+        let back: Tile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ground, ground);
     }
 }

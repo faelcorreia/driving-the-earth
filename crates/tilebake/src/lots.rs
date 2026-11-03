@@ -271,10 +271,10 @@ fn rasterize(win: &Window) -> Raster {
         origin,
     };
     for (_, road) in &win.roads {
-        if is_urban(&road.highway, polyline_len(&road.points)) {
-            let hw = road_width_m(&road.highway) / 2.0;
-            paint_band(&mut r, &road.points, hw, hw + SIDEWALK_M);
-        }
+        // Every road blocks the lots over its own width; only urban roads add the sidewalk band.
+        let hw = road_width_m(&road.highway) / 2.0;
+        let reach = if is_urban(&road.highway, polyline_len(&road.points)) { hw + SIDEWALK_M } else { hw };
+        paint_band(&mut r, &road.points, hw, reach);
     }
     for ring in &win.footprints {
         paint_ring(&mut r, ring, FOOTPRINT_MARGIN_M, F_FOOT | F_BLOCK, F_BLOCK);
@@ -444,8 +444,10 @@ fn building(lot: &Lot) -> Option<Polygon> {
     if x1 - x0 < MODULE_M || y1 - y0 < MODULE_M {
         return None;
     }
+    // Corners rounded to 1 mm: far below a module, and it keeps the tile JSON small.
+    let r3 = |p: [f64; 2]| [(p[0] * 1000.0).round() / 1000.0, (p[1] * 1000.0).round() / 1000.0];
     Some(Polygon {
-        points: vec![at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)],
+        points: [at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)].into_iter().map(r3).collect(),
         generated: true,
         levels,
         color_idx,
@@ -624,7 +626,8 @@ mod tests {
         for b in &out.buildings {
             for k in 0..4 {
                 let q = edge_len(b, k) / MODULE_M;
-                assert!((q - q.round()).abs() < 1e-6, "edge {} m", edge_len(b, k));
+                // 1 mm rounding of the corners moves an edge by at most 2 mm.
+                assert!((q - q.round()).abs() * MODULE_M < 2e-3, "edge {} m", edge_len(b, k));
             }
             assert!((1..=8).contains(&b.levels) && b.generated && b.color_idx <= 3);
         }
