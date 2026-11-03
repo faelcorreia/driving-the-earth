@@ -6,7 +6,9 @@ use std::path::Path;
 use tileformat::far_lights::read_far_lights;
 
 fn main() {
-    let dir = std::env::args().nth(1).unwrap_or_else(|| "casa-10km".into());
+    let dir = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "casa-10km".into());
     let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     let started = std::time::Instant::now();
     let s = tilebake::far_lights::bake_far_lights(&cache, &dir).expect("far_lights bake");
@@ -18,13 +20,22 @@ fn main() {
         .iter()
         .filter(|l| {
             let r = (l.x as f64).hypot(l.y as f64);
-            let az = (l.x as f64).atan2(l.y as f64).to_degrees().rem_euclid(360.0);
+            let az = (l.x as f64)
+                .atan2(l.y as f64)
+                .to_degrees()
+                .rem_euclid(360.0);
             (3000.0..=9000.0).contains(&r) && (140.0..=210.0).contains(&az)
         })
         .count();
     println!(
         "{dir}: tiles {} buildings {} (generated {}) cells {} lights {} file {} bytes in {:.1} s",
-        s.tiles, s.buildings, s.generated, s.cells, lights.len(), bytes, secs
+        s.tiles,
+        s.buildings,
+        s.generated,
+        s.cells,
+        lights.len(),
+        bytes,
+        secs
     );
     println!("{dir}: lights in sector 140-210 deg, 3-9 km: {in_sector}");
 }

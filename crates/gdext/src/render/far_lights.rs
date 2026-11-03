@@ -67,7 +67,11 @@ impl DistantLights {
         node.set_multimesh(&mm);
         node.set_material_override(&mat.upcast::<Material>());
         node.set_visible(false);
-        Some(Self { node, delays: load.delays, lit: 0 })
+        Some(Self {
+            node,
+            delays: load.delays,
+            lit: 0,
+        })
     }
 
     /// The node to add under the world node.
@@ -99,7 +103,12 @@ impl DistantLights {
 /// A unit quad in the XY plane (corners at ±1); the shader turns it into a billboard.
 fn quad_model() -> MeshData {
     MeshData {
-        vertices: vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]],
+        vertices: vec![
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ],
         normals: vec![[0.0, 0.0, 1.0]; 4],
         colors: Vec::new(),
         uvs: Vec::new(),

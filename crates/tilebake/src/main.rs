@@ -28,7 +28,9 @@ fn main() {
     let address = match std::env::var("TILEBAKE_ADDRESS") {
         Ok(e) if !e.trim().is_empty() => e,
         _ => {
-            eprintln!("Set TILEBAKE_ADDRESS to the start address (or use DTE_HOME / home.local.json).");
+            eprintln!(
+                "Set TILEBAKE_ADDRESS to the start address (or use DTE_HOME / home.local.json)."
+            );
             std::process::exit(2);
         }
     };
@@ -39,7 +41,14 @@ fn main() {
                 "meta: id={} radius={}m center=({:.6}, {:.6})",
                 r.meta.id, r.meta.radius_m, r.meta.center_lat, r.meta.center_lon
             );
-            println!("geocoding: {}", if r.geocoding_cached { "cache" } else { "Nominatim" });
+            println!(
+                "geocoding: {}",
+                if r.geocoding_cached {
+                    "cache"
+                } else {
+                    "Nominatim"
+                }
+            );
             println!(
                 "osm: {} blocks, {} downloaded, {:.1} MB on disk",
                 r.blocks,
@@ -56,7 +65,11 @@ fn main() {
     }
     match tilebake::tiles::bake_tiles(&cache, "casa") {
         Ok(t) => {
-            println!("tiles: {} written in {:.1} s", t.tiles, t.elapsed.as_secs_f64());
+            println!(
+                "tiles: {} written in {:.1} s",
+                t.tiles,
+                t.elapsed.as_secs_f64()
+            );
             println!("tiles on disk: {:.1} MB", t.tiles_bytes as f64 / 1e6);
             println!("road pieces: {}", t.road_pieces);
             println!("building pieces: {}", t.building_pieces);

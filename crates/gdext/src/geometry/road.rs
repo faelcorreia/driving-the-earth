@@ -16,7 +16,14 @@ pub(super) const ROAD_ORDER_LIFT_M: f32 = 0.002;
 /// `ROAD_STATION_M` meters in between. Every vertex takes the height of the terrain field at
 /// its own position plus `lift`, so the ribbon lies on the same surface as the terrain mesh.
 /// At each node the two segment normals are joined (miter), so bends have no gaps or overlaps.
-pub(super) fn push_road(mesh: &mut MeshData, surface: &Surface, ground: &dyn Fn(f64, f64) -> f32, points: &[[f64; 2]], half: f64, lift: f32) {
+pub(super) fn push_road(
+    mesh: &mut MeshData,
+    surface: &Surface,
+    ground: &dyn Fn(f64, f64) -> f32,
+    points: &[[f64; 2]],
+    half: f64,
+    lift: f32,
+) {
     // Drop repeated points: they have no direction.
     let mut pts: Vec<[f64; 2]> = Vec::with_capacity(points.len());
     for &p in points {

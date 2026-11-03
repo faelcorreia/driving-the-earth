@@ -44,7 +44,10 @@ mod tests {
         for id in [0u64, 1, 42, u64::MAX, 0x9E37_79B9_7F4A_7C15] {
             let d = delay_s(id);
             assert_eq!(d, delay_s(id));
-            assert!((0.0..=LAMP_STAGGER_MAX_MIN as f64 * 60.0).contains(&d), "delay {d} for {id}");
+            assert!(
+                (0.0..=LAMP_STAGGER_MAX_MIN as f64 * 60.0).contains(&d),
+                "delay {d} for {id}"
+            );
         }
     }
 
@@ -54,7 +57,11 @@ mod tests {
         for index in 0..500u64 {
             seen.insert(delay_s(index * 7919) as u64);
         }
-        assert!(seen.len() >= LAMP_STAGGER_MAX_MIN as usize, "only {} distinct delays", seen.len());
+        assert!(
+            seen.len() >= LAMP_STAGGER_MAX_MIN as usize,
+            "only {} distinct delays",
+            seen.len()
+        );
     }
 
     #[test]

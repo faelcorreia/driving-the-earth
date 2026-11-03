@@ -47,7 +47,9 @@ pub fn sirgas_zone_lon0(crs: &str) -> Result<f64, String> {
         .and_then(|c| c.trim().parse().ok())
         .ok_or_else(|| format!("unsupported crs '{crs}': expected 'EPSG:<code>'"))?;
     if !(31978..=31985).contains(&code) {
-        return Err(format!("unsupported crs '{crs}': only SIRGAS 2000 UTM 18S-25S (EPSG:31978-31985)"));
+        return Err(format!(
+            "unsupported crs '{crs}': only SIRGAS 2000 UTM 18S-25S (EPSG:31978-31985)"
+        ));
     }
     let zone = (code - 31960) as f64;
     Ok(-183.0 + 6.0 * zone)
@@ -100,7 +102,11 @@ mod tests {
         let e2 = F * (2.0 - F);
         let n_rad = A / (1.0 - e2 * phi.sin().powi(2)).sqrt();
         let expected = n_rad * phi.cos() * 0.01f64.to_radians() * K0;
-        assert!(((e1 - e0) - expected).abs() < 1.0, "{} vs {expected}", e1 - e0);
+        assert!(
+            ((e1 - e0) - expected).abs() < 1.0,
+            "{} vs {expected}",
+            e1 - e0
+        );
     }
 
     #[test]
@@ -108,7 +114,10 @@ mod tests {
         for (lat, lon) in [(-19.9, -43.9), (-19.5, -43.2), (-20.3, -44.5)] {
             let (e, n) = utm23s(lat, lon);
             let (lat2, lon2) = inverse(e, n, UTM23S_LON0);
-            assert!((lat2 - lat).abs() < 1e-8 && (lon2 - lon).abs() < 1e-8, "{lat2} {lon2} vs {lat} {lon}");
+            assert!(
+                (lat2 - lat).abs() < 1e-8 && (lon2 - lon).abs() < 1e-8,
+                "{lat2} {lon2} vs {lat} {lon}"
+            );
         }
     }
 

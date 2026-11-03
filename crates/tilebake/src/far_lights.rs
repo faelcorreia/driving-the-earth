@@ -49,22 +49,32 @@ fn centroid(points: &[[f64; 2]]) -> Option<[f64; 2]> {
         return None;
     }
     let n = points.len() as f64;
-    let (sx, sy) = points.iter().fold((0.0, 0.0), |(a, b), p| (a + p[0], b + p[1]));
+    let (sx, sy) = points
+        .iter()
+        .fold((0.0, 0.0), |(a, b), p| (a + p[0], b + p[1]));
     Some([sx / n, sy / n])
 }
 
 /// Pure aggregation: centroids of every building of `tiles` into cells, then the lights between the
 /// near limit and `radius_m`. Also returns the counts for the summary.
-pub fn aggregate<'a>(tiles: impl IntoIterator<Item = &'a Tile>, radius_m: f64) -> (Vec<FarLight>, Summary) {
+pub fn aggregate<'a>(
+    tiles: impl IntoIterator<Item = &'a Tile>,
+    radius_m: f64,
+) -> (Vec<FarLight>, Summary) {
     let mut cells: BTreeMap<(i32, i32), Cell> = BTreeMap::new();
     let mut summary = Summary::default();
     for tile in tiles {
         summary.tiles += 1;
         for b in &tile.buildings {
-            let Some([cx, cy]) = centroid(&b.points) else { continue };
+            let Some([cx, cy]) = centroid(&b.points) else {
+                continue;
+            };
             summary.buildings += 1;
             summary.generated += usize::from(b.generated);
-            let key = ((cx / FAR_LIGHT_CELL_M).floor() as i32, (cy / FAR_LIGHT_CELL_M).floor() as i32);
+            let key = (
+                (cx / FAR_LIGHT_CELL_M).floor() as i32,
+                (cy / FAR_LIGHT_CELL_M).floor() as i32,
+            );
             let c = cells.entry(key).or_default();
             c.count += 1;
             c.sum_x += cx;
@@ -104,7 +114,10 @@ pub fn bake_far_lights(cache_root: &Path, id: &str) -> io::Result<Summary> {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
     paths.sort();
-    let tiles: Vec<Tile> = paths.iter().map(|p| read_tile(p)).collect::<io::Result<_>>()?;
+    let tiles: Vec<Tile> = paths
+        .iter()
+        .map(|p| read_tile(p))
+        .collect::<io::Result<_>>()?;
     let (lights, summary) = aggregate(&tiles, meta.radius_m);
     write_far_lights(&dir.join("far_lights.bin"), &lights)?;
     Ok(summary)
@@ -119,7 +132,11 @@ mod tests {
         Tile {
             x,
             y,
-            height: HeightGrid { cols: 2, rows: 2, values: vec![h; 4] },
+            height: HeightGrid {
+                cols: 2,
+                rows: 2,
+                values: vec![h; 4],
+            },
             roads: vec![],
             buildings: vec![],
             ground: vec![],
@@ -127,7 +144,12 @@ mod tests {
     }
 
     fn square(cx: f64, cy: f64, generated: bool) -> Polygon {
-        let mut p = Polygon::real(vec![[cx - 3.0, cy - 3.0], [cx + 3.0, cy - 3.0], [cx + 3.0, cy + 3.0], [cx - 3.0, cy + 3.0]]);
+        let mut p = Polygon::real(vec![
+            [cx - 3.0, cy - 3.0],
+            [cx + 3.0, cy - 3.0],
+            [cx + 3.0, cy + 3.0],
+            [cx - 3.0, cy + 3.0],
+        ]);
         p.generated = generated;
         p
     }
@@ -136,7 +158,11 @@ mod tests {
     fn buildings_in_one_cell_make_one_light_with_their_count() {
         let mut t = flat_tile(4, 0, 120.0);
         // Three centroids inside the cell [1000, 1020) x [1000, 1020) (on the 20 m grid, away from its edges).
-        t.buildings = vec![square(1005.0, 1005.0, false), square(1010.0, 1012.0, true), square(1015.0, 1008.0, false)];
+        t.buildings = vec![
+            square(1005.0, 1005.0, false),
+            square(1010.0, 1012.0, true),
+            square(1015.0, 1008.0, false),
+        ];
         let (lights, s) = aggregate([&t], 10_000.0);
         assert_eq!(lights.len(), 1);
         assert_eq!(lights[0].weight, 3);

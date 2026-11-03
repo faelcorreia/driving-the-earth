@@ -3,7 +3,9 @@
 use std::path::Path;
 
 fn main() {
-    let dir = std::env::args().nth(1).expect("usage: bake_cache <cache-dir-name>");
+    let dir = std::env::args()
+        .nth(1)
+        .expect("usage: bake_cache <cache-dir-name>");
     let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     let started = std::time::Instant::now();
     let s = tilebake::tiles::bake_tiles(&cache, &dir).expect("bake");

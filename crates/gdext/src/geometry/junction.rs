@@ -108,5 +108,9 @@ fn extend_end(pts: &[[f64; 2]], half: f64, roads: &[Polyline], own: usize, tile_
 
 /// The last point before `end` in `pts` that differs from it (or `end` if none).
 fn last_distinct(pts: &[[f64; 2]], end: [f64; 2]) -> [f64; 2] {
-    pts.iter().rev().copied().find(|&p| dist(p, end) > 1e-9).unwrap_or(end)
+    pts.iter()
+        .rev()
+        .copied()
+        .find(|&p| dist(p, end) > 1e-9)
+        .unwrap_or(end)
 }

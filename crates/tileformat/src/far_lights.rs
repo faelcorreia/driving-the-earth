@@ -85,8 +85,20 @@ mod tests {
 
     fn sample() -> Vec<FarLight> {
         vec![
-            FarLight { x: 1200.5, y: -3400.25, z: 912.0, weight: 3, hue: 0 },
-            FarLight { x: -5000.0, y: 4200.0, z: 1100.75, weight: 255, hue: 255 },
+            FarLight {
+                x: 1200.5,
+                y: -3400.25,
+                z: 912.0,
+                weight: 3,
+                hue: 0,
+            },
+            FarLight {
+                x: -5000.0,
+                y: 4200.0,
+                z: 1100.75,
+                weight: 255,
+                hue: 255,
+            },
         ]
     }
 

@@ -4,8 +4,8 @@
 
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{
-    ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, Material, MeshInstance3D, Node3D, PackedScene,
-    Shader, ShaderMaterial, StandardMaterial3D, StaticBody3D,
+    ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, Material, MeshInstance3D, Node3D,
+    PackedScene, Shader, ShaderMaterial, StandardMaterial3D, StaticBody3D,
 };
 use godot::obj::Inherits;
 use godot::prelude::*;
@@ -20,7 +20,10 @@ pub(crate) fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
     mat.set_albedo(Color::from_rgb(color.0, color.1, color.2));
     // Per-vertex colors (when a mesh has them) multiply the albedo; without them the vertex color
     // is white and the look is the albedo, as before.
-    mat.set_flag(godot::classes::base_material_3d::Flags::ALBEDO_FROM_VERTEX_COLOR, true);
+    mat.set_flag(
+        godot::classes::base_material_3d::Flags::ALBEDO_FROM_VERTEX_COLOR,
+        true,
+    );
     mat
 }
 
@@ -43,7 +46,10 @@ pub(crate) fn building_material() -> Option<Gd<ShaderMaterial>> {
 }
 
 /// Visible mesh only.
-pub(crate) fn mesh_instance<M: Inherits<Material>>(data: &MeshData, mat: &Gd<M>) -> Gd<MeshInstance3D> {
+pub(crate) fn mesh_instance<M: Inherits<Material>>(
+    data: &MeshData,
+    mat: &Gd<M>,
+) -> Gd<MeshInstance3D> {
     let mut instance = MeshInstance3D::new_alloc();
     instance.set_mesh(&array_mesh(data));
     instance.set_material_override(&mat.clone().upcast::<Material>());
@@ -72,9 +78,21 @@ pub(crate) fn array_mesh(data: &MeshData) -> Gd<ArrayMesh> {
     let vertices: PackedVector3Array = data.vertices.iter().map(|&p| vec3(p)).collect();
     let normals: PackedVector3Array = data.normals.iter().map(|&p| vec3(p)).collect();
     let indices: PackedInt32Array = data.indices.iter().map(|&i| i as i32).collect();
-    let colors: PackedColorArray = data.colors.iter().map(|c| Color::from_rgba(c[0], c[1], c[2], c[3])).collect();
-    let uvs: PackedVector2Array = data.uvs.iter().map(|uv| Vector2::new(uv[0], uv[1])).collect();
-    let uv2s: PackedVector2Array = data.uv2.iter().map(|uv| Vector2::new(uv[0], uv[1])).collect();
+    let colors: PackedColorArray = data
+        .colors
+        .iter()
+        .map(|c| Color::from_rgba(c[0], c[1], c[2], c[3]))
+        .collect();
+    let uvs: PackedVector2Array = data
+        .uvs
+        .iter()
+        .map(|uv| Vector2::new(uv[0], uv[1]))
+        .collect();
+    let uv2s: PackedVector2Array = data
+        .uv2
+        .iter()
+        .map(|uv| Vector2::new(uv[0], uv[1]))
+        .collect();
 
     let mut arrays = VarArray::new();
     arrays.resize(ArrayType::MAX.ord() as usize, &Variant::nil());

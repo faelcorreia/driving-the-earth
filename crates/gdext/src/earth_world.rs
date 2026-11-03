@@ -12,8 +12,7 @@ use std::thread;
 use std::time::Instant;
 
 use godot::classes::{
-    INode3D, MeshInstance3D, Node3D,
-    ProjectSettings, ShaderMaterial, StandardMaterial3D,
+    INode3D, MeshInstance3D, Node3D, ProjectSettings, ShaderMaterial, StandardMaterial3D,
 };
 use godot::prelude::*;
 
@@ -21,15 +20,15 @@ use crate::environment::lamps::{delay_s, is_lit};
 use crate::environment::EnvironmentClock;
 use crate::geometry::lamps::LampPost;
 use crate::geometry::{TileGeometry, GRASS_RGB};
-use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::far_lights::{rss_mb, DistantLights};
+use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::{building_material, material, solid_body, spawn_car};
-use tileformat::units::lamps::LAMP_REAL_REACH_M;
+use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::find_spawn;
-use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::streaming::{is_stale, tiles_in_range};
 use crate::world::{open_map, MapIndex};
+use tileformat::units::lamps::LAMP_REAL_REACH_M;
 
 /// Height of the car above the terrain when spawned, in meters.
 const SPAWN_LIFT_M: f32 = 1.0;
@@ -211,7 +210,12 @@ impl INode3D for EarthWorld {
         self.add_lamp_lights();
         if let (Some(car), Some(material)) = (&self.car, &self.terrain_mat) {
             lod::configure_view(self.base().get_parent(), car);
-            self.lod = Some(TerrainLod::start(&cache_root, &id, &index.meta, material.clone()));
+            self.lod = Some(TerrainLod::start(
+                &cache_root,
+                &id,
+                &index.meta,
+                material.clone(),
+            ));
         }
         self.start_loader(Arc::new(index));
     }
@@ -414,14 +418,20 @@ impl EarthWorld {
 
     /// Creates the nodes of one tile: terrain body, and road and building bodies when there are some.
     fn add_tile(&mut self, t: (i32, i32), geometry: &TileGeometry) {
-        let (Some(terrain_mat), Some(road_mat), Some(vertex_mat)) =
-            (self.terrain_mat.clone(), self.road_mat.clone(), self.vertex_mat.clone())
-        else {
+        let (Some(terrain_mat), Some(road_mat), Some(vertex_mat)) = (
+            self.terrain_mat.clone(),
+            self.road_mat.clone(),
+            self.vertex_mat.clone(),
+        ) else {
             return;
         };
         let mut node = Node3D::new_alloc();
         // Terrain of tiles with ground cover carries its colors; older tiles keep the albedo.
-        let terrain = if geometry.terrain.colors.is_empty() { &terrain_mat } else { &vertex_mat };
+        let terrain = if geometry.terrain.colors.is_empty() {
+            &terrain_mat
+        } else {
+            &vertex_mat
+        };
         node.add_child(&solid_body(&geometry.terrain, terrain));
         if !geometry.roads.is_empty() {
             // Roads are solid too, so the wheels rest on them instead of on the terrain below.
@@ -464,7 +474,11 @@ impl EarthWorld {
 
     /// Adds the pool of real lights under the world node.
     fn add_lamp_lights(&mut self) {
-        let nodes = self.lamp_lights.as_ref().map(|l| l.nodes()).unwrap_or_default();
+        let nodes = self
+            .lamp_lights
+            .as_ref()
+            .map(|l| l.nodes())
+            .unwrap_or_default();
         for light in nodes {
             self.base_mut().add_child(&light);
         }

@@ -2,7 +2,6 @@
 //! bake of the distant lights).
 use crate::Tile;
 
-
 /// Terrain height at local `(x, y)`, on the same triangles that `tile_geometry` draws
 /// (each grid cell is split along the diagonal from its north-east to its south-west corner).
 /// Sampling the bilinear surface instead would differ from the drawn mesh on slopes, so
@@ -20,7 +19,12 @@ pub fn sample_height(tile: &Tile, tile_m: f64, x: f64, y: f64) -> f32 {
     let i0 = (v.floor().max(0.0) as usize).min(n - 2);
     let (fu, fv) = (u - j0 as f64, v - i0 as f64);
     let at = |i: usize, j: usize| grid.values[i * n + j] as f64;
-    let (a, b, c, d) = (at(i0, j0), at(i0, j0 + 1), at(i0 + 1, j0), at(i0 + 1, j0 + 1));
+    let (a, b, c, d) = (
+        at(i0, j0),
+        at(i0, j0 + 1),
+        at(i0 + 1, j0),
+        at(i0 + 1, j0 + 1),
+    );
     let h = if fu + fv <= 1.0 {
         // Triangle a, b, c.
         a + (b - a) * fu + (c - a) * fv

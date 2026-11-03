@@ -122,11 +122,16 @@ pub struct Region {
 
 /// Checks a package id: non-empty, lowercase ASCII letters, digits and '-' (it is a folder name).
 pub fn validate_id(id: &str) -> io::Result<()> {
-    let ok = !id.is_empty() && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let ok = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if ok {
         Ok(())
     } else {
-        Err(bad(&format!("invalid region id '{id}': use lowercase letters, digits and '-'")))
+        Err(bad(&format!(
+            "invalid region id '{id}': use lowercase letters, digits and '-'"
+        )))
     }
 }
 
@@ -160,15 +165,22 @@ impl Region {
 
     /// Reads the package in `dir`, validating the sizes of its files.
     pub fn load(dir: &Path) -> io::Result<Region> {
-        let manifest: Manifest = serde_json::from_str(&fs::read_to_string(dir.join("manifest.json"))?)
-            .map_err(|e| bad(&format!("manifest: {e}")))?;
-        let n = manifest.cols.checked_mul(manifest.rows).ok_or_else(|| bad("manifest: grid too large"))?;
+        let manifest: Manifest =
+            serde_json::from_str(&fs::read_to_string(dir.join("manifest.json"))?)
+                .map_err(|e| bad(&format!("manifest: {e}")))?;
+        let n = manifest
+            .cols
+            .checked_mul(manifest.rows)
+            .ok_or_else(|| bad("manifest: grid too large"))?;
         let hb = fs::read(dir.join("height.i16"))?;
         let mask = fs::read(dir.join("mask.u8"))?;
         if hb.len() != 2 * n || mask.len() != n {
             return Err(bad("package: file sizes do not match the manifest"));
         }
-        let heights = hb.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        let heights = hb
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
         Region::new(manifest, heights, mask)
     }
 
@@ -204,7 +216,12 @@ impl Region {
         let (tx, ty) = (fx - i0 as f64, fy - j0 as f64);
         let k = j0 * m.cols + i0;
         let corners = [k, k + 1, k + m.cols, k + m.cols + 1];
-        let weights = [(1.0 - tx) * (1.0 - ty), tx * (1.0 - ty), (1.0 - tx) * ty, tx * ty];
+        let weights = [
+            (1.0 - tx) * (1.0 - ty),
+            tx * (1.0 - ty),
+            (1.0 - tx) * ty,
+            tx * ty,
+        ];
         let (mut h, mut mask) = (0.0, 0.0);
         for (&idx, w) in corners.iter().zip(weights) {
             h += w * self.heights[idx] as f64;
@@ -274,7 +291,13 @@ pub fn blend(cop: f64, parts: impl IntoIterator<Item = (f64, f64)>) -> f64 {
 
 /// Applies the regions to the height grid of a tile whose south-west corner is `(x0, y0)` in the
 /// local plane of `grid`. Points are converted to UTM for the lookup.
-pub fn apply_regions(height: &mut HeightGrid, grid: &MapGrid, regions: &[Region], x0: f64, y0: f64) {
+pub fn apply_regions(
+    height: &mut HeightGrid,
+    grid: &MapGrid,
+    regions: &[Region],
+    x0: f64,
+    y0: f64,
+) {
     if regions.is_empty() {
         return;
     }
@@ -296,7 +319,9 @@ pub fn apply_regions(height: &mut HeightGrid, grid: &MapGrid, regions: &[Region]
 /// Convex hull (monotone chain), counter-clockwise, without the repeated first point.
 fn convex_hull(points: &mut [[f64; 2]]) -> Vec<[f64; 2]> {
     points.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
-    let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| {
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    };
     let mut h: Vec<[f64; 2]> = Vec::new();
     for &q in points.iter() {
         while h.len() >= 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
@@ -318,10 +343,13 @@ fn convex_hull(points: &mut [[f64; 2]]) -> Vec<[f64; 2]> {
 /// Neighbours (4-connected) of node `k` in a grid of `cols` x `rows`.
 fn neighbours(k: usize, cols: usize, rows: usize) -> impl Iterator<Item = usize> {
     let (i, j) = ((k % cols) as isize, (k / cols) as isize);
-    [(-1, 0), (1, 0), (0, -1), (0, 1)].into_iter().filter_map(move |(di, dj)| {
-        let (a, b) = (i + di, j + dj);
-        (a >= 0 && b >= 0 && (a as usize) < cols && (b as usize) < rows).then(|| b as usize * cols + a as usize)
-    })
+    [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        .into_iter()
+        .filter_map(move |(di, dj)| {
+            let (a, b) = (i + di, j + dj);
+            (a >= 0 && b >= 0 && (a as usize) < cols && (b as usize) < rows)
+                .then(|| b as usize * cols + a as usize)
+        })
 }
 
 /// A contour segment `a`-`b` (x, y relative to `ORIGIN_E`, `ORIGIN_N`) at elevation `z` in meters.
@@ -345,10 +373,17 @@ fn contour_at(cand: &[(f64, u32, f64, f64)], segs: &[Seg]) -> f64 {
     };
     let z1 = segs[i1 as usize].z as f64;
     // Nearest segment of each side: (squared distance, x, y, z).
-    let (mut lo, mut hi): (Option<(f64, f64, f64, f64)>, Option<(f64, f64, f64, f64)>) = (None, None);
+    let (mut lo, mut hi): (Option<(f64, f64, f64, f64)>, Option<(f64, f64, f64, f64)>) =
+        (None, None);
     for &(d2, idx, vx, vy) in cand {
         let z = segs[idx as usize].z as f64;
-        let side = if z < z1 { &mut lo } else if z > z1 { &mut hi } else { continue };
+        let side = if z < z1 {
+            &mut lo
+        } else if z > z1 {
+            &mut hi
+        } else {
+            continue;
+        };
         if side.is_none_or(|(b, ..)| d2 < b) {
             *side = Some((d2, vx, vy, z));
         }
@@ -364,7 +399,14 @@ fn contour_at(cand: &[(f64, u32, f64, f64)], segs: &[Seg]) -> f64 {
 
 /// Builds a package from contour points `[x, y, z]` (every point is a degenerate segment).
 pub fn build(points: &[[f32; 3]], info: &RegionInfo) -> io::Result<Region> {
-    let segs: Vec<Seg> = points.iter().map(|p| Seg { a: [p[0], p[1]], b: [p[0], p[1]], z: p[2] }).collect();
+    let segs: Vec<Seg> = points
+        .iter()
+        .map(|p| Seg {
+            a: [p[0], p[1]],
+            b: [p[0], p[1]],
+            z: p[2],
+        })
+        .collect();
     build_segments(&segs, info)
 }
 
@@ -448,9 +490,14 @@ pub fn build_segments(segs: &[Seg], info: &RegionInfo) -> io::Result<Region> {
                     for &idx in &items[start[b] as usize..start[b + 1] as usize] {
                         let s = segs[idx as usize];
                         let (ax, ay) = (s.a[0] as f64 - px, s.a[1] as f64 - py);
-                        let (ux, uy) = (s.b[0] as f64 - s.a[0] as f64, s.b[1] as f64 - s.a[1] as f64);
+                        let (ux, uy) =
+                            (s.b[0] as f64 - s.a[0] as f64, s.b[1] as f64 - s.a[1] as f64);
                         let len2 = ux * ux + uy * uy;
-                        let t = if len2 > 0.0 { (-(ax * ux + ay * uy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                        let t = if len2 > 0.0 {
+                            (-(ax * ux + ay * uy) / len2).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
                         let (cx, cy) = (ax + t * ux, ay + t * uy);
                         let d2 = cx * cx + cy * cy;
                         if d2 <= r2 {
@@ -517,7 +564,11 @@ pub fn build_segments(segs: &[Seg], info: &RegionInfo) -> io::Result<Region> {
         .collect();
     let heights: Vec<i16> = height
         .iter()
-        .map(|&h| (h as f64 / HEIGHT_UNIT_M).round().clamp(i16::MIN as f64 + 1.0, i16::MAX as f64) as i16)
+        .map(|&h| {
+            (h as f64 / HEIGHT_UNIT_M)
+                .round()
+                .clamp(i16::MIN as f64 + 1.0, i16::MAX as f64) as i16
+        })
         .collect();
 
     // Polygon: convex hull of the points, absolute UTM coordinates.
@@ -579,13 +630,22 @@ pub fn build_from_shapefiles(source: &Path, base: &Path) -> io::Result<Region> {
     for shp_path in &shps {
         let t = Instant::now();
         let before = segs.len();
-        let parts = shp::read_contours(shp_path, &shp_path.with_extension("dbf"), "COTA_CURVA", |ax, ay, bx, by, z| {
-            let (ax, ay, bx, by) = (ax - ORIGIN_E, ay - ORIGIN_N, bx - ORIGIN_E, by - ORIGIN_N);
-            let inside = [ax, ay, bx, by].iter().all(|v| v.abs() < 200_000.0);
-            if z.is_finite() && inside {
-                segs.push(Seg { a: [ax as f32, ay as f32], b: [bx as f32, by as f32], z: z as f32 });
-            }
-        })?;
+        let parts = shp::read_contours(
+            shp_path,
+            &shp_path.with_extension("dbf"),
+            "COTA_CURVA",
+            |ax, ay, bx, by, z| {
+                let (ax, ay, bx, by) = (ax - ORIGIN_E, ay - ORIGIN_N, bx - ORIGIN_E, by - ORIGIN_N);
+                let inside = [ax, ay, bx, by].iter().all(|v| v.abs() < 200_000.0);
+                if z.is_finite() && inside {
+                    segs.push(Seg {
+                        a: [ax as f32, ay as f32],
+                        b: [bx as f32, by as f32],
+                        z: z as f32,
+                    });
+                }
+            },
+        )?;
         eprintln!(
             "{}: {parts} parts, {} segments kept, {:.1} s",
             shp_path.display(),
@@ -612,7 +672,8 @@ pub fn read_index(base: &Path) -> io::Result<Vec<String>> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
-    let index: Index = serde_json::from_str(&fs::read_to_string(&path)?).map_err(|e| bad(&format!("{INDEX_FILE}: {e}")))?;
+    let index: Index = serde_json::from_str(&fs::read_to_string(&path)?)
+        .map_err(|e| bad(&format!("{INDEX_FILE}: {e}")))?;
     Ok(index.regions)
 }
 
@@ -625,13 +686,17 @@ pub fn add_to_index(base: &Path, id: &str) -> io::Result<()> {
         ids.push(id.to_string());
     }
     ids.sort();
-    let text = serde_json::to_string_pretty(&Index { regions: ids }).map_err(|e| bad(&e.to_string()))?;
+    let text =
+        serde_json::to_string_pretty(&Index { regions: ids }).map_err(|e| bad(&e.to_string()))?;
     fs::write(base.join(INDEX_FILE), text + "\n")
 }
 
 /// Loads every package listed in `base/index.json`. Missing index: no regions.
 pub fn load_indexed(base: &Path) -> io::Result<Vec<Region>> {
-    read_index(base)?.iter().map(|id| Region::load(&base.join(id))).collect()
+    read_index(base)?
+        .iter()
+        .map(|id| Region::load(&base.join(id)))
+        .collect()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -656,7 +721,13 @@ mod tests {
         ]
     }
 
-    fn manifest(origin_e: f64, origin_n: f64, n: usize, feather_m: f64, polygon_utm: &[[f64; 2]]) -> Manifest {
+    fn manifest(
+        origin_e: f64,
+        origin_n: f64,
+        n: usize,
+        feather_m: f64,
+        polygon_utm: &[[f64; 2]],
+    ) -> Manifest {
         Manifest {
             id: "t".into(),
             source: Source {
@@ -686,9 +757,20 @@ mod tests {
     }
 
     /// Flat region: official height `h_m` everywhere on an `n` x `n` grid at absolute `(origin_e, origin_n)`.
-    fn flat_region(origin_e: f64, origin_n: f64, n: usize, h_m: f64, polygon_utm: &[[f64; 2]]) -> Region {
+    fn flat_region(
+        origin_e: f64,
+        origin_n: f64,
+        n: usize,
+        h_m: f64,
+        polygon_utm: &[[f64; 2]],
+    ) -> Region {
         let m = manifest(origin_e, origin_n, n, FEATHER_M, polygon_utm);
-        Region::new(m, vec![(h_m / HEIGHT_UNIT_M) as i16; n * n], vec![MASK_FULL as u8; n * n]).unwrap()
+        Region::new(
+            m,
+            vec![(h_m / HEIGHT_UNIT_M) as i16; n * n],
+            vec![MASK_FULL as u8; n * n],
+        )
+        .unwrap()
     }
 
     fn info(id: &str) -> RegionInfo {
@@ -759,7 +841,9 @@ mod tests {
         let mut max_step = 0.0f64;
         let mut x = -300.0;
         while x <= 2300.0 {
-            let (w, h) = r.sample(ORIGIN_E + x, ORIGIN_N + 1000.0).unwrap_or((0.0, 0.0));
+            let (w, h) = r
+                .sample(ORIGIN_E + x, ORIGIN_N + 1000.0)
+                .unwrap_or((0.0, 0.0));
             let v = blend(0.0, [(w, h)]);
             if let Some(p) = prev {
                 max_step = max_step.max((v - p).abs());
@@ -771,7 +855,14 @@ mod tests {
         assert!(max_step <= 0.16, "step {max_step}");
         // Outside the polygon nothing is changed; well inside it is fully official.
         assert!(blend(0.0, [r.sample(ORIGIN_E - 50.0, ORIGIN_N + 1000.0).unwrap()]).abs() < 1e-9);
-        assert!((blend(0.0, [r.sample(ORIGIN_E + 1000.0, ORIGIN_N + 1000.0).unwrap()]) - 50.0).abs() < 1e-9);
+        assert!(
+            (blend(
+                0.0,
+                [r.sample(ORIGIN_E + 1000.0, ORIGIN_N + 1000.0).unwrap()]
+            ) - 50.0)
+                .abs()
+                < 1e-9
+        );
     }
 
     #[test]
@@ -816,7 +907,13 @@ mod tests {
             }
         }
         let r = build(&pts, &info("ramp")).unwrap();
-        for (x, y) in [(100.0, 100.0), (200.0, 150.0), (300.0, 300.0), (150.0, 250.0), (120.0, 330.0)] {
+        for (x, y) in [
+            (100.0, 100.0),
+            (200.0, 150.0),
+            (300.0, 300.0),
+            (150.0, 250.0),
+            (120.0, 330.0),
+        ] {
             let (_, h) = r.sample(ORIGIN_E + x, ORIGIN_N + y).unwrap();
             let expected = 0.2 * x + 0.1 * y + 500.0;
             assert!((h - expected).abs() < 0.05, "({x}, {y}): {h} vs {expected}");
@@ -833,11 +930,22 @@ mod tests {
             let n = (std::f64::consts::TAU * radius).ceil() as usize;
             for i in 0..n {
                 let a = std::f64::consts::TAU * i as f64 / n as f64;
-                pts.push([(cx + radius * a.cos()) as f32, (cy + radius * a.sin()) as f32, c as f32]);
+                pts.push([
+                    (cx + radius * a.cos()) as f32,
+                    (cy + radius * a.sin()) as f32,
+                    c as f32,
+                ]);
             }
         }
         let r = build(&pts, &info("cone")).unwrap();
-        for (x, y) in [(230.0, 200.0), (200.0, 150.0), (240.0, 230.0), (290.0, 200.0), (250.0, 260.0), (120.0, 200.0)] {
+        for (x, y) in [
+            (230.0, 200.0),
+            (200.0, 150.0),
+            (240.0, 230.0),
+            (290.0, 200.0),
+            (250.0, 260.0),
+            (120.0, 200.0),
+        ] {
             let (_, h) = r.sample(ORIGIN_E + x, ORIGIN_N + y).unwrap();
             let expected = 100.0 - ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
             assert!((h - expected).abs() < 0.1, "({x}, {y}): {h} vs {expected}");
@@ -853,7 +961,10 @@ mod tests {
             let x_lo = (-100.0f64).max((10.0 * (c - 500) as f64 - 500.0) / 2.0);
             let x_hi = 500.0f64.min((10.0 * (c - 500) as f64 + 100.0) / 2.0);
             if x_lo < x_hi {
-                let (a, b) = ([x_lo as f32, y_of(x_lo) as f32], [x_hi as f32, y_of(x_hi) as f32]);
+                let (a, b) = (
+                    [x_lo as f32, y_of(x_lo) as f32],
+                    [x_hi as f32, y_of(x_hi) as f32],
+                );
                 segs.push(Seg { a, b, z: c as f32 });
             }
         }
@@ -883,11 +994,17 @@ mod tests {
         let r = flat_region(ORIGIN_E, ORIGIN_N, 10, 1.0, &utm_poly);
         // Stored as [lon, lat] WGS84 near Belo Horizonte (lat ~ -19.9, lon ~ -44).
         for [lon, lat] in &r.manifest.polygon_lonlat {
-            assert!((-45.0..-43.0).contains(lon) && (-21.0..-19.0).contains(lat), "{lon} {lat}");
+            assert!(
+                (-45.0..-43.0).contains(lon) && (-21.0..-19.0).contains(lat),
+                "{lon} {lat}"
+            );
         }
         // Converted back on load: within a millimeter of the original UTM vertices.
         for (a, b) in r.poly_utm.iter().zip(&utm_poly) {
-            assert!((a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3, "{a:?} vs {b:?}");
+            assert!(
+                (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3,
+                "{a:?} vs {b:?}"
+            );
         }
     }
 
@@ -896,15 +1013,21 @@ mod tests {
         let base = temp_dir("index");
         assert!(read_index(&base).unwrap().is_empty());
         assert!(load_indexed(&base).unwrap().is_empty());
-        flat_region(ORIGIN_E, ORIGIN_N, 10, 1.0, &square(200.0)).save(&base.join("b")).unwrap();
-        flat_region(ORIGIN_E, ORIGIN_N, 10, 2.0, &square(200.0)).save(&base.join("a")).unwrap();
+        flat_region(ORIGIN_E, ORIGIN_N, 10, 1.0, &square(200.0))
+            .save(&base.join("b"))
+            .unwrap();
+        flat_region(ORIGIN_E, ORIGIN_N, 10, 2.0, &square(200.0))
+            .save(&base.join("a"))
+            .unwrap();
         add_to_index(&base, "b").unwrap();
         add_to_index(&base, "a").unwrap();
         add_to_index(&base, "a").unwrap();
         assert_eq!(read_index(&base).unwrap(), vec!["a", "b"]);
         assert_eq!(load_indexed(&base).unwrap().len(), 2);
         // Only the listed packages are loaded: a folder not in the index is ignored.
-        flat_region(ORIGIN_E, ORIGIN_N, 10, 3.0, &square(200.0)).save(&base.join("c")).unwrap();
+        flat_region(ORIGIN_E, ORIGIN_N, 10, 3.0, &square(200.0))
+            .save(&base.join("c"))
+            .unwrap();
         assert_eq!(load_indexed(&base).unwrap().len(), 2);
         // An index that points to a missing package is an error.
         add_to_index(&base, "ghost").unwrap();
@@ -916,9 +1039,16 @@ mod tests {
     fn region_info_defaults_and_validation() {
         let text = r#"{"id":"x","source":{"provider":"p","name":"n"},"source_year":2015,"attribution":"a","crs":"EPSG:31983"}"#;
         let i: RegionInfo = serde_json::from_str(text).unwrap();
-        assert_eq!((i.license.as_str(), i.priority, i.feather_m), ("", 0, FEATHER_M));
+        assert_eq!(
+            (i.license.as_str(), i.priority, i.feather_m),
+            ("", 0, FEATHER_M)
+        );
         assert!(validate_id("br-mg-belo-horizonte").is_ok());
-        assert!(validate_id("../x").is_err() && validate_id("Upper").is_err() && validate_id("").is_err());
+        assert!(
+            validate_id("../x").is_err()
+                && validate_id("Upper").is_err()
+                && validate_id("").is_err()
+        );
         let pts = [[0.0f32, 0.0, 1.0], [10.0, 0.0, 1.0], [0.0, 10.0, 1.0]];
         let mut bad_crs = info("x");
         bad_crs.crs = "EPSG:4326".into();

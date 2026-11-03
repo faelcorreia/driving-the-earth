@@ -37,7 +37,10 @@ impl Seg {
     fn value(&self, x: f64, y: f64, g: f32) -> Option<f32> {
         let p = [x - self.a[0], y - self.a[1]];
         let t = ((p[0] * self.dir[0] + p[1] * self.dir[1]) / self.len).clamp(0.0, 1.0);
-        let (qx, qy) = (p[0] - self.dir[0] * self.len * t, p[1] - self.dir[1] * self.len * t);
+        let (qx, qy) = (
+            p[0] - self.dir[0] * self.len * t,
+            p[1] - self.dir[1] * self.len * t,
+        );
         let dist = qx.hypot(qy);
         if dist > self.half + ROAD_BLEND_M {
             return None;
@@ -47,7 +50,11 @@ impl Seg {
         let at = |v: [f32; 2]| v[0] + (v[1] - v[0]) * t;
         let (zc, zl, zr) = (at(self.z), at(self.zl), at(self.zr));
         let k = (s / self.half) as f32;
-        let edge = if k >= 0.0 { zc + (zl - zc) * k } else { zc + (zr - zc) * -k };
+        let edge = if k >= 0.0 {
+            zc + (zl - zc) * k
+        } else {
+            zc + (zr - zc) * -k
+        };
         if dist <= self.half {
             Some(edge)
         } else {
@@ -102,7 +109,11 @@ impl Field {
                 continue;
             }
             let (z, zl, zr) = if has_edges {
-                ([road.z[k], road.z[k + 1]], [road.zl[k], road.zl[k + 1]], [road.zr[k], road.zr[k + 1]])
+                (
+                    [road.z[k], road.z[k + 1]],
+                    [road.zl[k], road.zl[k + 1]],
+                    [road.zr[k], road.zr[k + 1]],
+                )
             } else {
                 let z = [road.z[k], road.z[k + 1]];
                 (z, z, z)
@@ -132,8 +143,12 @@ impl Field {
 
     /// Bucket (column, row) of a map point, clamped to the block.
     fn cell(&self, x: f64, y: f64) -> (usize, usize) {
-        let c = ((x - self.origin[0]) / BUCKET_M).floor().clamp(0.0, (self.cols - 1) as f64);
-        let r = ((y - self.origin[1]) / BUCKET_M).floor().clamp(0.0, (self.rows - 1) as f64);
+        let c = ((x - self.origin[0]) / BUCKET_M)
+            .floor()
+            .clamp(0.0, (self.cols - 1) as f64);
+        let r = ((y - self.origin[1]) / BUCKET_M)
+            .floor()
+            .clamp(0.0, (self.rows - 1) as f64);
         (c as usize, r as usize)
     }
 
@@ -169,7 +184,15 @@ pub(super) struct Surface {
 impl Surface {
     /// Rasterizes the road candidates on the fine grid, segment by segment: each segment only
     /// visits the vertices in its reach. Vertices with no candidate keep the grid height.
-    pub(super) fn new(field: Field, tile: &Tile, tile_m: f64, ground: &dyn Fn(f64, f64) -> f32, origin: [f64; 2], n: usize, cell: f64) -> Surface {
+    pub(super) fn new(
+        field: Field,
+        tile: &Tile,
+        tile_m: f64,
+        ground: &dyn Fn(f64, f64) -> f32,
+        origin: [f64; 2],
+        n: usize,
+        cell: f64,
+    ) -> Surface {
         let mut grid = vec![0.0f32; n * n];
         for i in 0..n {
             for j in 0..n {
@@ -211,7 +234,13 @@ impl Surface {
                 *h = *b;
             }
         }
-        Surface { heights: grid, origin, n, cell, field }
+        Surface {
+            heights: grid,
+            origin,
+            n,
+            cell,
+            field,
+        }
     }
 
     /// Height at `(x, y)`: the triangle sample of the grid inside the grid (the same triangles the

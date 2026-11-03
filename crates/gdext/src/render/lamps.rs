@@ -5,8 +5,7 @@ use godot::classes::base_material_3d::CullMode;
 use godot::classes::light_3d::Param;
 use godot::classes::multi_mesh::TransformFormat;
 use godot::classes::{
-    MultiMesh, MultiMeshInstance3D, Node3D, OmniLight3D, Shader, ShaderMaterial,
-    StandardMaterial3D,
+    MultiMesh, MultiMeshInstance3D, Node3D, OmniLight3D, Shader, ShaderMaterial, StandardMaterial3D,
 };
 use godot::prelude::*;
 
@@ -41,11 +40,17 @@ impl LampMaterials {
         let glow_shader: Gd<Shader> = try_load("res://shaders/lamp_glow.gdshader").ok()?;
         let mut head = ShaderMaterial::new_gd();
         head.set_shader(&head_shader);
-        head.set_shader_parameter("lamp_color", &Vector3::new(LAMP_HEAD_RGB.0, LAMP_HEAD_RGB.1, LAMP_HEAD_RGB.2).to_variant());
+        head.set_shader_parameter(
+            "lamp_color",
+            &Vector3::new(LAMP_HEAD_RGB.0, LAMP_HEAD_RGB.1, LAMP_HEAD_RGB.2).to_variant(),
+        );
         head.set_shader_parameter("lamp_energy", &HEAD_EMISSION.to_variant());
         let mut glow = ShaderMaterial::new_gd();
         glow.set_shader(&glow_shader);
-        glow.set_shader_parameter("lamp_color", &Vector3::new(LAMP_HEAD_RGB.0, LAMP_HEAD_RGB.1, LAMP_HEAD_RGB.2).to_variant());
+        glow.set_shader_parameter(
+            "lamp_color",
+            &Vector3::new(LAMP_HEAD_RGB.0, LAMP_HEAD_RGB.1, LAMP_HEAD_RGB.2).to_variant(),
+        );
         let mut pole = material(POLE_RGB);
         pole.set_cull_mode(CullMode::DISABLED);
         Some(Self {
@@ -62,7 +67,11 @@ impl LampMaterials {
 /// The lamps of one tile as a node with three MultiMeshes (three draw calls). The glow can be
 /// hidden (export `lamp_glow_enabled`). Custom data of the head and glow instances: the lamp's
 /// own delay in seconds, read by the shaders.
-pub(crate) fn lamp_node(posts: &[LampPost], mats: &LampMaterials, glow_visible: bool) -> Gd<Node3D> {
+pub(crate) fn lamp_node(
+    posts: &[LampPost],
+    mats: &LampMaterials,
+    glow_visible: bool,
+) -> Gd<Node3D> {
     let mut node = Node3D::new_alloc();
     let pole = multimesh(posts, &mats.pole_mesh, false);
     let mut pole_i = MultiMeshInstance3D::new_alloc();
@@ -85,7 +94,11 @@ pub(crate) fn lamp_node(posts: &[LampPost], mats: &LampMaterials, glow_visible: 
     node
 }
 
-fn multimesh(posts: &[LampPost], mesh: &Gd<godot::classes::ArrayMesh>, custom: bool) -> Gd<MultiMesh> {
+fn multimesh(
+    posts: &[LampPost],
+    mesh: &Gd<godot::classes::ArrayMesh>,
+    custom: bool,
+) -> Gd<MultiMesh> {
     let mut mm = MultiMesh::new_gd();
     mm.set_transform_format(TransformFormat::TRANSFORM_3D);
     mm.set_use_custom_data(custom);
@@ -123,7 +136,11 @@ impl LampLights {
         let lights = (0..LAMP_POOL)
             .map(|_| {
                 let mut light = OmniLight3D::new_alloc();
-                light.set_color(Color::from_rgb(LAMP_HEAD_RGB.0, LAMP_HEAD_RGB.1, LAMP_HEAD_RGB.2));
+                light.set_color(Color::from_rgb(
+                    LAMP_HEAD_RGB.0,
+                    LAMP_HEAD_RGB.1,
+                    LAMP_HEAD_RGB.2,
+                ));
                 light.set_param(Param::ENERGY, REAL_LIGHT_ENERGY);
                 light.set_param(Param::RANGE, LAMP_REAL_RANGE_M as f32);
                 light.set_shadow(false);

@@ -12,7 +12,12 @@ pub fn distance_to_tile(tile: (i32, i32), tile_m: f64, p: [f64; 2]) -> f64 {
 }
 
 /// The tiles of `all` within `radius_m` of `p`, nearest first.
-pub fn tiles_in_range(all: &[(i32, i32)], tile_m: f64, p: [f64; 2], radius_m: f64) -> Vec<(i32, i32)> {
+pub fn tiles_in_range(
+    all: &[(i32, i32)],
+    tile_m: f64,
+    p: [f64; 2],
+    radius_m: f64,
+) -> Vec<(i32, i32)> {
     let mut hits: Vec<((i32, i32), f64)> = all
         .iter()
         .map(|&t| (t, distance_to_tile(t, tile_m, p)))
@@ -24,7 +29,13 @@ pub fn tiles_in_range(all: &[(i32, i32)], tile_m: f64, p: [f64; 2], radius_m: f6
 
 /// A loaded tile is unloaded only once it is beyond `radius_m + hysteresis_m`, so a tile at the
 /// edge of the view does not flicker in and out while the car moves along it.
-pub fn is_stale(tile: (i32, i32), tile_m: f64, p: [f64; 2], radius_m: f64, hysteresis_m: f64) -> bool {
+pub fn is_stale(
+    tile: (i32, i32),
+    tile_m: f64,
+    p: [f64; 2],
+    radius_m: f64,
+    hysteresis_m: f64,
+) -> bool {
     distance_to_tile(tile, tile_m, p) > radius_m + hysteresis_m
 }
 

@@ -32,17 +32,50 @@ pub const FLOOR_HEIGHT_M: f64 = 3.0;
 /// Width of a sidewalk along the urban roads, in meters.
 pub const SIDEWALK_M: f64 = 2.5;
 
-const _: () = assert!(TILE_M % TERRAIN_CELL_M == 0.0, "a tile holds whole terrain cells");
-const _: () = assert!(TILE_M % GROUND_CELL_M == 0.0, "a tile holds whole ground cells");
-const _: () = assert!(TERRAIN_CELL_M % GROUND_CELL_M == 0.0, "a terrain cell holds whole ground cells");
-const _: () = assert!(GROUND_CELL_M % MODULE_M == 0.0, "ground cells are whole modules");
-const _: () = assert!(FLOOR_HEIGHT_M % MODULE_M == 0.0, "a floor is a whole number of modules");
-const _: () = assert!(SIDEWALK_M % MODULE_M == 0.0, "a sidewalk is a whole number of modules");
-const _: () = assert!(GROUND_N as f64 * GROUND_CELL_M == TILE_M, "the ground grid covers the tile");
-const _: () = assert!(TILE_M % TERRAIN_FINE_CELL_M == 0.0, "a tile holds whole fine cells");
-const _: () = assert!(TERRAIN_CELL_M % TERRAIN_FINE_CELL_M == 0.0, "a terrain cell holds whole fine cells");
-const _: () = assert!(GROUND_CELL_M % TERRAIN_FINE_CELL_M == 0.0, "a ground cell holds whole fine cells");
-const _: () = assert!(TERRAIN_FINE_N == 101, "the fine grid is 101 vertices per side");
+const _: () = assert!(
+    TILE_M % TERRAIN_CELL_M == 0.0,
+    "a tile holds whole terrain cells"
+);
+const _: () = assert!(
+    TILE_M % GROUND_CELL_M == 0.0,
+    "a tile holds whole ground cells"
+);
+const _: () = assert!(
+    TERRAIN_CELL_M % GROUND_CELL_M == 0.0,
+    "a terrain cell holds whole ground cells"
+);
+const _: () = assert!(
+    GROUND_CELL_M % MODULE_M == 0.0,
+    "ground cells are whole modules"
+);
+const _: () = assert!(
+    FLOOR_HEIGHT_M % MODULE_M == 0.0,
+    "a floor is a whole number of modules"
+);
+const _: () = assert!(
+    SIDEWALK_M % MODULE_M == 0.0,
+    "a sidewalk is a whole number of modules"
+);
+const _: () = assert!(
+    GROUND_N as f64 * GROUND_CELL_M == TILE_M,
+    "the ground grid covers the tile"
+);
+const _: () = assert!(
+    TILE_M % TERRAIN_FINE_CELL_M == 0.0,
+    "a tile holds whole fine cells"
+);
+const _: () = assert!(
+    TERRAIN_CELL_M % TERRAIN_FINE_CELL_M == 0.0,
+    "a terrain cell holds whole fine cells"
+);
+const _: () = assert!(
+    GROUND_CELL_M % TERRAIN_FINE_CELL_M == 0.0,
+    "a ground cell holds whole fine cells"
+);
+const _: () = assert!(
+    TERRAIN_FINE_N == 101,
+    "the fine grid is 101 vertices per side"
+);
 
 /// Lot rules of the generated buildings (B0). Distances in meters; the drawn values are snapped
 /// to `MODULE_M`, so every lot edge is a whole number of modules.
@@ -70,11 +103,19 @@ pub mod lots {
 
     const _: () = assert!(LOT_W_MIN_M < LOT_W_MAX_M && LOT_D_MIN_M < LOT_D_MAX_M);
     const _: () = assert!(LOT_W_MIN_M % MODULE_M == 0.0 && LOT_D_MIN_M % MODULE_M == 0.0);
-    const _: () = assert!(FRONT_SETBACK_MAX_M % MODULE_M == 0.0 && SIDE_SETBACK_MAX_M % MODULE_M == 0.0);
+    const _: () =
+        assert!(FRONT_SETBACK_MAX_M % MODULE_M == 0.0 && SIDE_SETBACK_MAX_M % MODULE_M == 0.0);
     const _: () = assert!(FOOTPRINT_MARGIN_M % MODULE_M == 0.0);
-    const _: () = assert!(EMPTY_LOT_PERMILLE < 1000 && TALL_PERMILLE <= TALL_MAIN_PERMILLE && TALL_MAIN_PERMILLE < 1000);
+    const _: () = assert!(
+        EMPTY_LOT_PERMILLE < 1000
+            && TALL_PERMILLE <= TALL_MAIN_PERMILLE
+            && TALL_MAIN_PERMILLE < 1000
+    );
     // A lot must still hold a building after both setbacks on each side.
-    const _: () = assert!(LOT_W_MIN_M > 2.0 * SIDE_SETBACK_MAX_M && LOT_D_MIN_M > FRONT_SETBACK_MAX_M + SIDE_SETBACK_MAX_M);
+    const _: () = assert!(
+        LOT_W_MIN_M > 2.0 * SIDE_SETBACK_MAX_M
+            && LOT_D_MIN_M > FRONT_SETBACK_MAX_M + SIDE_SETBACK_MAX_M
+    );
 }
 
 /// Distant lights (L2): side of the cell in which building centroids are aggregated into one light, in meters.
@@ -117,7 +158,10 @@ pub mod lamps {
     pub const LAMP_REAL_RANGE_M: f64 = 18.0;
     pub const LAMP_REAL_REACH_M: f64 = 60.0;
 
-    const _: () = assert!(LAMP_SPACING_M % ROAD_STATION_M == 0.0, "lamps sit on road stations");
+    const _: () = assert!(
+        LAMP_SPACING_M % ROAD_STATION_M == 0.0,
+        "lamps sit on road stations"
+    );
     const _: () = assert!(LAMP_ARM_M > 0.0 && LAMP_HEIGHT_M > 0.0 && LAMP_SIDE_OFFSET_M >= 0.0);
 }
 

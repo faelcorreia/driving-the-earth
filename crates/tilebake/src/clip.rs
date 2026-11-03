@@ -164,16 +164,36 @@ mod tests {
         let road = [[-100.0, 125.0], [600.0, 125.0]];
         let inside_0 = clip_polyline(&road, R);
         assert_eq!(inside_0, vec![vec![[0.0, 125.0], [250.0, 125.0]]]);
-        let r1 = Rect { x0: 250.0, x1: 500.0, ..R };
-        assert_eq!(clip_polyline(&road, r1), vec![vec![[250.0, 125.0], [500.0, 125.0]]]);
-        let r2 = Rect { x0: 500.0, x1: 750.0, ..R };
-        assert_eq!(clip_polyline(&road, r2), vec![vec![[500.0, 125.0], [600.0, 125.0]]]);
+        let r1 = Rect {
+            x0: 250.0,
+            x1: 500.0,
+            ..R
+        };
+        assert_eq!(
+            clip_polyline(&road, r1),
+            vec![vec![[250.0, 125.0], [500.0, 125.0]]]
+        );
+        let r2 = Rect {
+            x0: 500.0,
+            x1: 750.0,
+            ..R
+        };
+        assert_eq!(
+            clip_polyline(&road, r2),
+            vec![vec![[500.0, 125.0], [600.0, 125.0]]]
+        );
     }
 
     #[test]
     fn polyline_inside_with_inexact_nodes_is_one_piece() {
         // Coordinates that are not exact in binary: nodes must not split the way.
-        let line = [[10.1, 10.3], [77.7, 90.9], [200.3, 150.7], [33.3, 44.4], [12.7, 201.9]];
+        let line = [
+            [10.1, 10.3],
+            [77.7, 90.9],
+            [200.3, 150.7],
+            [33.3, 44.4],
+            [12.7, 201.9],
+        ];
         let pieces = clip_polyline(&line, R);
         assert_eq!(pieces, vec![line.to_vec()]);
     }
@@ -200,7 +220,12 @@ mod tests {
 
     #[test]
     fn polygon_outside_is_empty() {
-        let sq = [[300.0, 300.0], [400.0, 300.0], [400.0, 400.0], [300.0, 400.0]];
+        let sq = [
+            [300.0, 300.0],
+            [400.0, 300.0],
+            [400.0, 400.0],
+            [300.0, 400.0],
+        ];
         assert!(clip_polygon(&sq, R).len() < 3);
     }
 

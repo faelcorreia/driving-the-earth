@@ -5,10 +5,10 @@
 //! `[y*tile, (y+1)*tile]`. The grid has samples at the corners, with step `CELL_M`:
 //! `cols = rows = tile/CELL_M + 1`, `values[row * cols + col]` with `row` to the north
 //! and `col` to the east. Neighboring tiles share their edge.
+use std::fmt::Display;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::fmt::Display;
 
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
@@ -94,12 +94,21 @@ pub fn tile_name(lat: f64, lon: f64) -> String {
     let lo = lon.floor() as i32;
     let ns = if la >= 0 { 'N' } else { 'S' };
     let ew = if lo >= 0 { 'E' } else { 'W' };
-    format!("Copernicus_DSM_COG_10_{ns}{:02}_00_{ew}{:03}_00_DEM", la.abs(), lo.abs())
+    format!(
+        "Copernicus_DSM_COG_10_{ns}{:02}_00_{ew}{:03}_00_DEM",
+        la.abs(),
+        lo.abs()
+    )
 }
 
 /// Downloads the tile that covers `(lat, lon)` to `cache_root/<id>/raw/copernicus/`.
 /// Returns (path, came_from_cache). If it already exists, it is not downloaded again.
-pub fn download_dem(cache_root: &Path, id: &str, lat: f64, lon: f64) -> io::Result<(PathBuf, bool)> {
+pub fn download_dem(
+    cache_root: &Path,
+    id: &str,
+    lat: f64,
+    lon: f64,
+) -> io::Result<(PathBuf, bool)> {
     let name = tile_name(lat, lon);
     let dir = cache_root.join(id).join("raw").join("copernicus");
     fs::create_dir_all(&dir)?;
@@ -136,7 +145,9 @@ pub fn read_smoothed_dem(path: &Path) -> io::Result<Raster> {
         .get_tag_f64_vec(Tag::Unknown(TAG_TIEPOINT))
         .map_err(invalid_data)?;
     if scale.len() < 2 || tiepoint.len() < 6 || tiepoint[0] != 0.0 || tiepoint[1] != 0.0 {
-        return Err(invalid_data("GeoTIFF without simple georeferencing (ModelPixelScale/Tiepoint)"));
+        return Err(invalid_data(
+            "GeoTIFF without simple georeferencing (ModelPixelScale/Tiepoint)",
+        ));
     }
     let raw = match dec.read_image().map_err(invalid_data)? {
         DecodingResult::F32(v) => v,
@@ -148,7 +159,13 @@ pub fn read_smoothed_dem(path: &Path) -> io::Result<Raster> {
     }
     let clean: Vec<f32> = raw
         .into_iter()
-        .map(|v| if v.is_finite() && v > NODATA_LIMIT { v } else { f32::NAN })
+        .map(|v| {
+            if v.is_finite() && v > NODATA_LIMIT {
+                v
+            } else {
+                f32::NAN
+            }
+        })
         .collect();
     let values = smooth(&clean, w, h);
     Ok(Raster {
@@ -252,7 +269,12 @@ pub fn tile_heights(r: &Raster, grid: &MapGrid, x: i32, y: i32) -> io::Result<He
 }
 
 /// Like `tile_heights`, with several rasters (the 1-degree DEM tiles that cover the map).
-pub fn tile_heights_any(rasters: &[Raster], grid: &MapGrid, x: i32, y: i32) -> io::Result<HeightGrid> {
+pub fn tile_heights_any(
+    rasters: &[Raster],
+    grid: &MapGrid,
+    x: i32,
+    y: i32,
+) -> io::Result<HeightGrid> {
     let n = (grid.tile_m / grid.cell_m).round() as u32;
     let cols = n + 1;
     let x0 = x as f64 * grid.tile_m;
@@ -368,8 +390,14 @@ mod tests {
         let max_expected = 1000.0 + 2.0 * (100.0 + d) + 3.0 * 100.0;
         let min = g.values.iter().cloned().fold(f32::INFINITY, f32::min) as f64;
         let max = g.values.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
-        assert!((min - min_expected).abs() < 0.01, "min {min} vs {min_expected}");
-        assert!((max - max_expected).abs() < 0.01, "max {max} vs {max_expected}");
+        assert!(
+            (min - min_expected).abs() < 0.01,
+            "min {min} vs {min_expected}"
+        );
+        assert!(
+            (max - max_expected).abs() < 0.01,
+            "max {max} vs {max_expected}"
+        );
         // North is at a larger row: the value at corner (row=2, col=0) is the minimum.
         assert!((g.values[2 * 3] as f64 - min_expected).abs() < 0.01);
     }

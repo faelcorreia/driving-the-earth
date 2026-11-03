@@ -26,12 +26,14 @@ pub struct LampPost {
 pub fn lamp_posts(tile: &Tile, ground: &dyn Fn(f64, f64) -> f32) -> Vec<LampPost> {
     lamps_of_tile(tile)
         .into_iter()
-        .map(|lamp| {
-            LampPost {
-                id: lamp.id,
-                base: world(lamp.base[0], lamp.base[1], ground(lamp.base[0], lamp.base[1])),
-                turn: lamp.arm_dir[1].atan2(lamp.arm_dir[0]) as f32,
-            }
+        .map(|lamp| LampPost {
+            id: lamp.id,
+            base: world(
+                lamp.base[0],
+                lamp.base[1],
+                ground(lamp.base[0], lamp.base[1]),
+            ),
+            turn: lamp.arm_dir[1].atan2(lamp.arm_dir[0]) as f32,
         })
         .collect()
 }
@@ -57,7 +59,11 @@ pub fn pole_model() -> MeshData {
         let n = (k + 1) % 6;
         push_quad(&mut m, [bot[k], bot[n], top[n], top[k]]);
     }
-    push_box(&mut m, [0.0, h - ARM_THICK_M, -ARM_THICK_M / 2.0], [LAMP_ARM_M, h, ARM_THICK_M / 2.0]);
+    push_box(
+        &mut m,
+        [0.0, h - ARM_THICK_M, -ARM_THICK_M / 2.0],
+        [LAMP_ARM_M, h, ARM_THICK_M / 2.0],
+    );
     m
 }
 
@@ -66,8 +72,16 @@ pub fn head_model() -> MeshData {
     let mut m = MeshData::default();
     push_box(
         &mut m,
-        [LAMP_ARM_M - LAMP_HEAD_LEN_M / 2.0, LAMP_HEIGHT_M - LAMP_HEAD_HEIGHT_M, -LAMP_HEAD_WIDTH_M / 2.0],
-        [LAMP_ARM_M + LAMP_HEAD_LEN_M / 2.0, LAMP_HEIGHT_M, LAMP_HEAD_WIDTH_M / 2.0],
+        [
+            LAMP_ARM_M - LAMP_HEAD_LEN_M / 2.0,
+            LAMP_HEIGHT_M - LAMP_HEAD_HEIGHT_M,
+            -LAMP_HEAD_WIDTH_M / 2.0,
+        ],
+        [
+            LAMP_ARM_M + LAMP_HEAD_LEN_M / 2.0,
+            LAMP_HEIGHT_M,
+            LAMP_HEAD_WIDTH_M / 2.0,
+        ],
     );
     m
 }
@@ -83,7 +97,10 @@ pub fn glow_model() -> MeshData {
         (0..SEG)
             .map(|k| {
                 let t = k as f64 * std::f64::consts::TAU / SEG as f64;
-                ([(c + rad * t.cos()) as f32, y as f32, (rad * t.sin()) as f32], [1.0, 1.0, 1.0, a])
+                (
+                    [(c + rad * t.cos()) as f32, y as f32, (rad * t.sin()) as f32],
+                    [1.0, 1.0, 1.0, a],
+                )
             })
             .collect()
     };
@@ -122,7 +139,13 @@ fn push_quad(m: &mut MeshData, p: [[f64; 3]; 4]) {
 /// Axis-aligned box `[min, max]`, flat-shaded, outward winding (both sides face out; the lamp
 /// material is double-sided).
 fn push_box(m: &mut MeshData, min: [f64; 3], max: [f64; 3]) {
-    let c = |i: usize, j: usize, k: usize| [[min[0], max[0]][i], [min[1], max[1]][j], [min[2], max[2]][k]];
+    let c = |i: usize, j: usize, k: usize| {
+        [
+            [min[0], max[0]][i],
+            [min[1], max[1]][j],
+            [min[2], max[2]][k],
+        ]
+    };
     let faces = [
         [c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0)],
         [c(0, 0, 1), c(0, 1, 1), c(1, 1, 1), c(1, 0, 1)],
@@ -139,7 +162,11 @@ fn push_box(m: &mut MeshData, min: [f64; 3], max: [f64; 3]) {
 fn normal_of(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f32; 3] {
     let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    normalize([u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]])
+    normalize([
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ])
 }
 
 /// One street lamp: the pole base on the ground and the unit direction of its arm.
@@ -155,7 +182,9 @@ pub struct Lamp {
 /// `LAMP_SERVICE_MIN_M` (the length given is the one of the road piece in the tile).
 pub fn is_lamp_road(highway: &str, length_m: f64) -> bool {
     match highway {
-        "residential" | "tertiary" | "secondary" | "primary" | "unclassified" | "living_street" => true,
+        "residential" | "tertiary" | "secondary" | "primary" | "unclassified" | "living_street" => {
+            true
+        }
         "service" => length_m > LAMP_SERVICE_MIN_M,
         _ => false,
     }
@@ -165,7 +194,13 @@ pub fn is_lamp_road(highway: &str, length_m: f64) -> bool {
 pub fn lamps_of_tile(tile: &Tile) -> Vec<Lamp> {
     let mut out = Vec::new();
     for (idx, road) in tile.roads.iter().enumerate() {
-        let others: Vec<&Polyline> = tile.roads.iter().enumerate().filter(|(j, _)| *j != idx).map(|(_, r)| r).collect();
+        let others: Vec<&Polyline> = tile
+            .roads
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != idx)
+            .map(|(_, r)| r)
+            .collect();
         out.extend(lamps_of_road(idx as u64, road, &others, &tile.buildings));
     }
     out
@@ -173,7 +208,12 @@ pub fn lamps_of_tile(tile: &Tile) -> Vec<Lamp> {
 
 /// Lamps of one road. `others` are the other road axes of the tile (crossings) and `buildings`
 /// the footprints of the tile. Output order: along the road, then by side.
-pub fn lamps_of_road(road_key: u64, road: &Polyline, others: &[&Polyline], buildings: &[Polygon]) -> Vec<Lamp> {
+pub fn lamps_of_road(
+    road_key: u64,
+    road: &Polyline,
+    others: &[&Polyline],
+    buildings: &[Polygon],
+) -> Vec<Lamp> {
     let length = polyline_length(&road.points);
     if !is_lamp_road(&road.highway, length) {
         return Vec::new();
@@ -198,13 +238,20 @@ pub fn lamps_of_road(road_key: u64, road: &Polyline, others: &[&Polyline], build
                 &[-1.0]
             };
             for &side in sides {
-                let base = [pos[0] + side * normal[0] * reach, pos[1] + side * normal[1] * reach];
+                let base = [
+                    pos[0] + side * normal[0] * reach,
+                    pos[1] + side * normal[1] * reach,
+                ];
                 let arm_dir = [-side * normal[0], -side * normal[1]];
                 let index = k * 2 + u64::from(side < 0.0);
                 if inside_any(base, buildings) || near_other_axis(base, others) {
                     continue;
                 }
-                out.push(Lamp { id: lamp_id(road_key, index), base, arm_dir });
+                out.push(Lamp {
+                    id: lamp_id(road_key, index),
+                    base,
+                    arm_dir,
+                });
             }
         }
         k += 1;
@@ -240,7 +287,10 @@ fn point_at(points: &[[f64; 2]], s: f64) -> Option<([f64; 2], [f64; 2])> {
         if acc + len >= s {
             let t = (s - acc) / len;
             let tan = [(w[1][0] - w[0][0]) / len, (w[1][1] - w[0][1]) / len];
-            let pos = [w[0][0] + t * (w[1][0] - w[0][0]), w[0][1] + t * (w[1][1] - w[0][1])];
+            let pos = [
+                w[0][0] + t * (w[1][0] - w[0][0]),
+                w[0][1] + t * (w[1][1] - w[0][1]),
+            ];
             return Some((pos, tan));
         }
         acc += len;
@@ -262,7 +312,9 @@ fn point_in_ring(p: [f64; 2], ring: &[[f64; 2]]) -> bool {
     let mut j = n - 1;
     for i in 0..n {
         let (a, b) = (ring[i], ring[j]);
-        if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0] {
+        if (a[1] > p[1]) != (b[1] > p[1])
+            && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]
+        {
             inside = !inside;
         }
         j = i;
@@ -298,7 +350,13 @@ mod tests {
     use super::*;
 
     fn road(highway: &str, points: &[[f64; 2]]) -> Polyline {
-        Polyline { highway: highway.into(), points: points.to_vec(), z: vec![], zl: vec![], zr: vec![] }
+        Polyline {
+            highway: highway.into(),
+            points: points.to_vec(),
+            z: vec![],
+            zl: vec![],
+            zr: vec![],
+        }
     }
 
     fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon {
@@ -334,7 +392,10 @@ mod tests {
 
     #[test]
     fn avenues_light_both_sides_and_service_needs_length() {
-        assert_eq!(lamps_of_road(0, &straight("primary", 350.0), &[], &[]).len(), 20);
+        assert_eq!(
+            lamps_of_road(0, &straight("primary", 350.0), &[], &[]).len(),
+            20
+        );
         assert!(lamps_of_road(0, &straight("service", 50.0), &[], &[]).is_empty());
         assert!(!lamps_of_road(0, &straight("service", 100.0), &[], &[]).is_empty());
         assert!(lamps_of_road(0, &straight("footway", 300.0), &[], &[]).is_empty());
@@ -346,7 +407,11 @@ mod tests {
         let all = lamps_of_road(0, &r, &[], &[]);
         let b = [square(10.0, 0.0, 25.0, 10.0)];
         let lamps = lamps_of_road(0, &r, &[], &b);
-        assert_eq!(lamps.len(), all.len() - 1, "only the lamp at 17.5 m is inside");
+        assert_eq!(
+            lamps.len(),
+            all.len() - 1,
+            "only the lamp at 17.5 m is inside"
+        );
         assert!(lamps.iter().all(|l| !inside_any(l.base, &b)));
     }
 
@@ -356,7 +421,12 @@ mod tests {
         // Crossing road on x = 52.5 m, where a lamp would stand.
         let cross = road("residential", &[[52.5, -50.0], [52.5, 50.0]]);
         let lamps = lamps_of_road(0, &r, &[&cross], &[]);
-        assert!(lamps.iter().all(|l| dist_to_segment(l.base, [52.5, -50.0], [52.5, 50.0]) >= LAMP_CROSSING_CLEAR_M));
+        assert!(
+            lamps
+                .iter()
+                .all(|l| dist_to_segment(l.base, [52.5, -50.0], [52.5, 50.0])
+                    >= LAMP_CROSSING_CLEAR_M)
+        );
         assert_eq!(lamps.len(), 9);
     }
 
@@ -398,7 +468,11 @@ mod model_tests {
         let head = head_model();
         let glow = glow_model();
         let tris = |m: &MeshData| m.indices.len() / 3;
-        assert!(tris(&pole) >= 24 && tris(&pole) <= 40, "pole {}", tris(&pole));
+        assert!(
+            tris(&pole) >= 24 && tris(&pole) <= 40,
+            "pole {}",
+            tris(&pole)
+        );
         assert_eq!(tris(&head), 12);
         assert_eq!(tris(&glow), 36);
     }
@@ -414,9 +488,14 @@ mod model_tests {
         assert!((max_x as f64 - (LAMP_ARM_M + LAMP_HEAD_LEN_M / 2.0)).abs() < 1e-6);
         let glow = glow_model();
         let xs: Vec<f32> = glow.vertices.iter().map(|v| v[0]).collect();
-        let cx = (xs.iter().cloned().fold(f32::MIN, f32::max) + xs.iter().cloned().fold(f32::MAX, f32::min)) / 2.0;
+        let cx = (xs.iter().cloned().fold(f32::MIN, f32::max)
+            + xs.iter().cloned().fold(f32::MAX, f32::min))
+            / 2.0;
         assert!((cx as f64 - LAMP_ARM_M).abs() < 1e-6);
-        assert!(glow.vertices.iter().all(|v| (v[1] as f64 - LAMP_GLOW_LIFT_M).abs() < 1e-6));
+        assert!(glow
+            .vertices
+            .iter()
+            .all(|v| (v[1] as f64 - LAMP_GLOW_LIFT_M).abs() < 1e-6));
         assert_eq!(glow.colors.len(), glow.vertices.len());
     }
 }
