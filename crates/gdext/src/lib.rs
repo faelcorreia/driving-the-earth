@@ -1,6 +1,7 @@
 use godot::prelude::*;
 
 mod earth_world;
+mod lod;
 mod map;
 mod spawn;
 mod streaming;

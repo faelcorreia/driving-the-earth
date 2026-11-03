@@ -20,6 +20,7 @@ use godot::prelude::*;
 use godot::tools::try_load;
 use tileformat::Tile;
 
+use crate::lod::{self, TerrainLod};
 use crate::map::{open_map, MapIndex, MeshData, TileGeometry};
 use crate::spawn::{road_spawn, SpawnPose};
 use crate::streaming::{distance_to_tile, is_stale, tiles_in_range};
@@ -69,6 +70,9 @@ pub struct EarthWorld {
     done: VecDeque<((i32, i32), TileGeometry)>,
     requests: Option<Sender<(i32, i32)>>,
     results: Option<Receiver<((i32, i32), io::Result<TileGeometry>)>>,
+    /// Distant terrain rings, and the node of the last build.
+    lod: Option<TerrainLod>,
+    lod_node: Option<Gd<MeshInstance3D>>,
 
     /// Worst `process` call and worst tile instantiation since the last log line, seconds.
     worst_frame: f64,
@@ -145,6 +149,10 @@ impl INode3D for EarthWorld {
                 return;
             }
         }
+        if let (Some(car), Some(material)) = (&self.car, &self.terrain_mat) {
+            lod::configure_view(self.base().get_parent(), car);
+            self.lod = Some(TerrainLod::start(&cache_root, &id, &index.meta, material.clone()));
+        }
         self.start_loader(Arc::new(index));
     }
 
@@ -170,6 +178,16 @@ impl INode3D for EarthWorld {
         }
 
         self.collect_results();
+
+        // Distant terrain: rebuilt in the background when the loaded tiles or the car's window
+        // change; one node per finished build, the previous one freed.
+        let loaded: HashSet<(i32, i32)> = self.loaded.keys().copied().collect();
+        if let Some(node) = self.lod.as_mut().and_then(|lod| lod.update(p, &loaded)) {
+            self.base_mut().add_child(&node);
+            if let Some(mut old) = self.lod_node.replace(node) {
+                old.queue_free();
+            }
+        }
 
         // Instantiate the geometry that came back, within the per-frame budget.
         let build_start = Instant::now();
