@@ -8,6 +8,7 @@ use tileformat::MapMeta;
 
 pub mod clip;
 pub mod dem;
+pub mod far_lights;
 pub mod lots;
 pub mod osm;
 pub mod osm_areas;
