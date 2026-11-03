@@ -44,6 +44,10 @@ pub struct Polyline {
     pub highway: String,
     /// Points `[x, y]` in the system defined by the bake.
     pub points: Vec<[f64; 2]>,
+    /// Terrain-following height of each point (same length as `points`). Empty when the
+    /// bake gave no profile: the road then follows the terrain under it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub z: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,6 +100,7 @@ mod tests {
             roads: vec![Polyline {
                 highway: "residential".into(),
                 points: vec![[-43.9123456789, -19.9234567891], [-43.9, -19.92]],
+                z: Vec::new(),
             }],
             buildings: vec![Polygon {
                 points: vec![[0.0, 0.0], [10.5, 0.0], [10.5, 8.25], [0.0, 8.25]],

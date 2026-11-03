@@ -9,6 +9,7 @@ use tileformat::MapMeta;
 pub mod clip;
 pub mod dem;
 pub mod osm;
+pub mod profile;
 pub mod region;
 pub mod shp;
 pub mod tiles;

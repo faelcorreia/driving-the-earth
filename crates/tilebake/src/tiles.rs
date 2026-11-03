@@ -1,15 +1,17 @@
 //! Raw data (OSM + DEM already in cache) -> tiles in `cache/<id>/tiles/`.
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tileformat::{MapMeta, Polygon, Polyline, Tile};
+use tileformat::{HeightGrid, MapMeta, Polygon, Polyline, Tile};
 
 use crate::clip::{clip_polygon, clip_polyline, Rect};
 use crate::dem::{download_dem, read_smoothed_dem, tile_heights_any, MapGrid, Raster};
 use crate::osm;
+use crate::profile;
 use crate::region::{apply_regions, Region};
 
 fn invalid_data<E: std::fmt::Display>(e: E) -> io::Error {
@@ -101,6 +103,7 @@ pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: 
             roads.push(Polyline {
                 highway: highway.to_string(),
                 points: points.clone(),
+                z: Vec::new(),
             });
         }
     }
@@ -143,12 +146,31 @@ pub fn build_tile(
     let rect = tile_rect(x, y, grid.tile_m);
     let mut height = tile_heights_any(rasters, grid, x, y)?;
     apply_regions(&mut height, grid, regions, rect.x0, rect.y0);
+    Ok(build_tile_from(height, grid, roads, buildings, x, y))
+}
+
+/// Tile `(x, y)` from its final height grid (regions already applied).
+pub fn build_tile_from(
+    height: HeightGrid,
+    grid: &MapGrid,
+    roads: &[Polyline],
+    buildings: &[Polygon],
+    x: i32,
+    y: i32,
+) -> (Tile, usize, usize) {
+    let rect = tile_rect(x, y, grid.tile_m);
     let mut tile_roads = Vec::new();
     for road in roads {
         for points in clip_polyline(&road.points, rect) {
+            let z = if road.z.is_empty() {
+                Vec::new()
+            } else {
+                profile::z_for_piece(&road.points, &road.z, &points)
+            };
             tile_roads.push(Polyline {
                 highway: road.highway.clone(),
                 points,
+                z,
             });
         }
     }
@@ -167,7 +189,7 @@ pub fn build_tile(
         roads: tile_roads,
         buildings: tile_buildings,
     };
-    Ok((tile, counts.0, counts.1))
+    (tile, counts.0, counts.1)
 }
 
 /// Regional packages listed in `index.json` of the packages folder (see `region::regions_dir`).
@@ -211,6 +233,26 @@ pub fn index_by_tile<T>(
 /// Bakes all the tiles covering the radius from the raw data in `cache_root/<id>/raw/osm/`
 /// (blocks, deduplicated by way id), writes them to `cache_root/<id>/tiles/`, and then sets
 /// `meta.complete = true`. Needs `meta.json` and the blocks; downloads the DEM tile only if it is missing.
+/// Final terrain height at a point: bilinear in the grid of the tile that contains it.
+fn terrain_at(heights: &HashMap<(i32, i32), HeightGrid>, grid: &MapGrid, p: [f64; 2]) -> Option<f64> {
+    let tile_m = grid.tile_m;
+    let (tx, ty) = ((p[0] / tile_m).floor() as i32, (p[1] / tile_m).floor() as i32);
+    let h = heights.get(&(tx, ty))?;
+    let n = h.cols as usize;
+    let cell = tile_m / (n - 1) as f64;
+    let fx = ((p[0] - tx as f64 * tile_m) / cell).clamp(0.0, (n - 1) as f64);
+    let fy = ((p[1] - ty as f64 * tile_m) / cell).clamp(0.0, (n - 1) as f64);
+    let (j, i) = ((fx.floor() as usize).min(n - 2), (fy.floor() as usize).min(n - 2));
+    let (u, v) = (fx - j as f64, fy - i as f64);
+    let at = |r: usize, c: usize| h.values[r * n + c] as f64;
+    Some(
+        at(i, j) * (1.0 - u) * (1.0 - v)
+            + at(i, j + 1) * u * (1.0 - v)
+            + at(i + 1, j) * (1.0 - u) * v
+            + at(i + 1, j + 1) * u * v,
+    )
+}
+
 pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
     let started = Instant::now();
     let dir = cache_root.join(id);
@@ -223,9 +265,6 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
     osm::visit_ways(&dir.join("raw").join("osm"), &meta, |e| {
         add_way(e, &grid, &mut roads, &mut buildings)
     })?;
-    let road_index = index_by_tile(&roads, |r| &r.points, meta.tile_size_m);
-    let building_index = index_by_tile(&buildings, |b| &b.points, meta.tile_size_m);
-
     // One Copernicus tile per 1 degree cell that the baked area touches; missing ones are downloaded.
     let (south, west, north, east) = covering_bbox(&meta);
     let mut rasters = Vec::new();
@@ -236,6 +275,27 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
         }
     }
     let regions = load_regions(cache_root)?;
+
+    // Final terrain of every tile (regions applied), shared by the road profiles and the tiles.
+    let mut heights: HashMap<(i32, i32), HeightGrid> = HashMap::new();
+    for (x, y) in covering_tiles(meta.radius_m, meta.tile_size_m) {
+        let rect = tile_rect(x, y, grid.tile_m);
+        let mut h = tile_heights_any(&rasters, &grid, x, y)?;
+        apply_regions(&mut h, &grid, &regions, rect.x0, rect.y0);
+        heights.insert((x, y), h);
+    }
+    // Road profiles: each way whole (not cut by tile), densified and smoothed over the final terrain.
+    let ways: Vec<Vec<[f64; 2]>> = roads.iter().map(|r| r.points.clone()).collect();
+    let pins = profile::pinned_nodes(&ways);
+    let terrain = |p: [f64; 2]| terrain_at(&heights, &grid, p);
+    for road in roads.iter_mut() {
+        if let Some(z) = profile::way_profile(&road.points, &terrain, &|p| pins.contains(&profile::node_key(p))) {
+            road.points = profile::densify(&road.points);
+            road.z = z;
+        }
+    }
+    let road_index = index_by_tile(&roads, |r| &r.points, meta.tile_size_m);
+    let building_index = index_by_tile(&buildings, |b| &b.points, meta.tile_size_m);
 
     let mut summary = BakeSummary {
         tiles: 0,
@@ -254,7 +314,8 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
             .get(&(x, y))
             .map(|ids| ids.iter().map(|&i| buildings[i].clone()).collect())
             .unwrap_or_default();
-        let (tile, r, b) = build_tile(&rasters, &grid, &tile_roads, &tile_buildings, &regions, x, y)?;
+        let final_heights = heights.remove(&(x, y)).ok_or_else(|| invalid_data("tile without terrain"))?;
+        let (tile, r, b) = build_tile_from(final_heights, &grid, &tile_roads, &tile_buildings, x, y);
         tileformat::write_tile(cache_root, id, &tile)?;
         summary.tiles += 1;
         summary.road_pieces += r;
