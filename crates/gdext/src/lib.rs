@@ -2,6 +2,8 @@ use godot::prelude::*;
 
 mod earth_world;
 mod lod;
+#[cfg(test)]
+mod measure;
 mod map;
 mod spawn;
 mod streaming;
