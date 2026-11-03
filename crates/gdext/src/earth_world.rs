@@ -203,7 +203,7 @@ impl INode3D for EarthWorld {
                 self.car = Some(car);
             }
             None => {
-                godot_error!("cannot instantiate res://tr4/tr4.tscn");
+                godot_error!("cannot instantiate res://car.tscn");
                 return;
             }
         }
