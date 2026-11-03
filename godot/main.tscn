@@ -1,0 +1,26 @@
+[gd_scene format=3]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_top_color = Color(0.22, 0.46, 0.92, 1)
+sky_horizon_color = Color(0.62, 0.82, 0.98, 1)
+ground_horizon_color = Color(0.62, 0.82, 0.98, 1)
+ground_bottom_color = Color(0.3, 0.42, 0.55, 1)
+
+[sub_resource type="Sky" id="Sky_main"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_main"]
+background_mode = 2
+sky = SubResource("Sky_main")
+ambient_light_source = 3
+ambient_light_energy = 1.0
+
+[node name="Main" type="EarthRoot"]
+
+[node name="World" type="EarthWorld" parent="."]
+
+[node name="Sun" type="DirectionalLight3D" parent="World"]
+transform = Transform3D(1, 0, 0, 0, 0.5, 0.866, 0, -0.866, 0.5, 0, 10, 0)
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_main")

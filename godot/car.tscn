@@ -1,0 +1,86 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://car.gd" id="1_car"]
+[ext_resource type="Script" path="res://follow_camera.gd" id="2_camera"]
+[ext_resource type="Script" path="res://driver_camera.gd" id="3_driver_camera"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_body"]
+size = Vector3(1.55, 0.6, 3.7)
+
+[sub_resource type="BoxMesh" id="BoxMesh_body"]
+size = Vector3(1.55, 0.6, 3.7)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_wheel"]
+top_radius = 0.29
+bottom_radius = 0.29
+height = 0.2
+
+[node name="Car" type="VehicleBody3D"]
+mass = 850.0
+center_of_mass_mode = 1
+center_of_mass = Vector3(0, -0.1, 0)
+script = ExtResource("1_car")
+
+[node name="BodyShape" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.01, 0)
+shape = SubResource("BoxShape3D_body")
+
+[node name="BodyMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.01, 0)
+mesh = SubResource("BoxMesh_body")
+
+[node name="CabinShape" type="CollisionShape3D" parent="."]
+
+[node name="CabinMesh" type="MeshInstance3D" parent="."]
+
+[node name="FrontLeft" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.7, 0, -1.18)
+use_as_steering = true
+wheel_radius = 0.29
+wheel_rest_length = 0.2
+suspension_stiffness = 40.0
+
+[node name="Mesh" type="MeshInstance3D" parent="FrontLeft"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0)
+mesh = SubResource("CylinderMesh_wheel")
+
+[node name="FrontRight" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.7, 0, -1.18)
+use_as_steering = true
+wheel_radius = 0.29
+wheel_rest_length = 0.2
+suspension_stiffness = 40.0
+
+[node name="Mesh" type="MeshInstance3D" parent="FrontRight"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0)
+mesh = SubResource("CylinderMesh_wheel")
+
+[node name="RearLeft" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.7, 0, 1.18)
+use_as_traction = true
+wheel_radius = 0.29
+wheel_rest_length = 0.2
+suspension_stiffness = 40.0
+
+[node name="Mesh" type="MeshInstance3D" parent="RearLeft"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0)
+mesh = SubResource("CylinderMesh_wheel")
+
+[node name="RearRight" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.7, 0, 1.18)
+use_as_traction = true
+wheel_radius = 0.29
+wheel_rest_length = 0.2
+suspension_stiffness = 40.0
+
+[node name="Mesh" type="MeshInstance3D" parent="RearRight"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0)
+mesh = SubResource("CylinderMesh_wheel")
+
+[node name="Camera" type="Camera3D" parent="."]
+script = ExtResource("2_camera")
+current = true
+
+[node name="DriverCamera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.35, 0.755, -0.15)
+script = ExtResource("3_driver_camera")
