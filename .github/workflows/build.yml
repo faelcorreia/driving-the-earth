@@ -1,0 +1,214 @@
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Godot version used by godot/project.godot (config/features 4.7). Keep in sync with the export templates folder name.
+  GODOT_VERSION: "4.7.2"
+  GODOT_RELEASE: "4.7.2-stable"
+  GODOT_BASE_URL: "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable"
+  # SHA512 from https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/SHA512-SUMS.txt
+  GODOT_SHA512_LINUX: "9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65"
+  GODOT_SHA512_WINDOWS: "83decd58fdf67b9d657958a1ae6bf1929c20785315a81effe245874cdc57acb709bf868e00778a96984338c1b29dafdb453c6847747694621c6ecf5da2259993"
+  GODOT_SHA512_MACOS: "38aa16e5bba2083941fc5b3e54be0089bd4cc35e32415f5b9fd9a8a6a7b9818255d44532ea8ef94b5aef56c4b407c2d634fa4f657e4ebe681ebbf59b7bac69ca"
+  GODOT_SHA512_TEMPLATES: "ca4d71c4d7b81dfc15d1a98baa07534aa95b03fdda78a0075b06672e1648d2e5f40980c9adc28d23e1b92e732ee7bf3461997aa804af74ec2fcd7a93ccb84079"
+
+jobs:
+  meta:
+    name: Read version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read workspace version and check the tag
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
+          echo "Workspace version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml [workspace.package] version v$version"
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-24.04
+            lib: libdriving_the_earth_ext.so
+          - name: windows
+            os: windows-2025
+            lib: driving_the_earth_ext.dll
+          - name: macos
+            os: macos-15
+            lib: libdriving_the_earth_ext.dylib
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.name }}-
+
+      - name: Build extension (Linux, Windows)
+        if: matrix.name != 'macos'
+        run: cargo build --release -p driving_the_earth_ext
+
+      - name: Build extension (macOS universal)
+        if: matrix.name == 'macos'
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release -p driving_the_earth_ext --target aarch64-apple-darwin
+          cargo build --release -p driving_the_earth_ext --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/libdriving_the_earth_ext.dylib \
+            target/aarch64-apple-darwin/release/libdriving_the_earth_ext.dylib \
+            target/x86_64-apple-darwin/release/libdriving_the_earth_ext.dylib
+          lipo -info target/release/libdriving_the_earth_ext.dylib
+
+      - name: Check extension library path used by godot/driving_the_earth.gdextension
+        run: test -f "target/release/${{ matrix.lib }}"
+
+      - name: Install Godot ${{ env.GODOT_RELEASE }} (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          set -euo pipefail
+          dl="$RUNNER_TEMP/godot"; mkdir -p "$dl"; cd "$dl"
+          curl -fsSL -o editor.zip "$GODOT_BASE_URL/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          curl -fsSL -o templates.tpz "$GODOT_BASE_URL/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          echo "$GODOT_SHA512_LINUX  editor.zip" | sha512sum -c -
+          echo "$GODOT_SHA512_TEMPLATES  templates.tpz" | sha512sum -c -
+          unzip -q editor.zip
+          chmod +x "Godot_v${GODOT_RELEASE}_linux.x86_64"
+          unzip -q templates.tpz -d tpl
+          tdir="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$tdir" && cp -r tpl/templates/. "$tdir/"
+          echo "GODOT_BIN=$dl/Godot_v${GODOT_RELEASE}_linux.x86_64" >> "$GITHUB_ENV"
+
+      - name: Install Godot ${{ env.GODOT_RELEASE }} (Windows)
+        if: matrix.name == 'windows'
+        run: |
+          set -euo pipefail
+          dl="$RUNNER_TEMP/godot"; mkdir -p "$dl"; cd "$dl"
+          curl -fsSL -o editor.zip "$GODOT_BASE_URL/Godot_v${GODOT_RELEASE}_win64.exe.zip"
+          curl -fsSL -o templates.tpz "$GODOT_BASE_URL/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          echo "$GODOT_SHA512_WINDOWS  editor.zip" | sha512sum -c -
+          echo "$GODOT_SHA512_TEMPLATES  templates.tpz" | sha512sum -c -
+          7z x -y -oeditor editor.zip > /dev/null
+          7z x -y -otpl templates.tpz > /dev/null
+          tdir="$(cygpath -u "$APPDATA")/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$tdir" && cp -r tpl/templates/. "$tdir/"
+          echo "GODOT_BIN=$dl/editor/Godot_v${GODOT_RELEASE}_win64_console.exe" >> "$GITHUB_ENV"
+
+      - name: Install Godot ${{ env.GODOT_RELEASE }} (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          set -euo pipefail
+          dl="$RUNNER_TEMP/godot"; mkdir -p "$dl"; cd "$dl"
+          curl -fsSL -o editor.zip "$GODOT_BASE_URL/Godot_v${GODOT_RELEASE}_macos.universal.zip"
+          curl -fsSL -o templates.tpz "$GODOT_BASE_URL/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          echo "$GODOT_SHA512_MACOS  editor.zip" | shasum -a 512 -c -
+          echo "$GODOT_SHA512_TEMPLATES  templates.tpz" | shasum -a 512 -c -
+          unzip -q editor.zip
+          unzip -q templates.tpz -d tpl
+          tdir="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$tdir" && cp -r tpl/templates/. "$tdir/"
+          echo "GODOT_BIN=$dl/Godot.app/Contents/MacOS/Godot" >> "$GITHUB_ENV"
+
+      - name: Import project (headless)
+        run: |
+          set -euo pipefail
+          "$GODOT_BIN" --headless --path godot --import
+
+      - name: Export release (headless)
+        run: |
+          set -euo pipefail
+          case "${{ matrix.name }}" in
+            linux)   preset="Linux";   out="dist/linux/driving-the-earth.x86_64" ;;
+            windows) preset="Windows"; out="dist/windows/driving-the-earth.exe" ;;
+            macos)   preset="macOS";   out="dist/macos/Driving the Earth.app" ;;
+          esac
+          # export_presets.cfg paths are relative to godot/ (../dist/...); Godot does not create the folder.
+          mkdir -p "$(dirname "$out")"
+          "$GODOT_BIN" --headless --path godot --export-release "$preset"
+          test -e "$out"
+
+      - name: Package zip
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          case "${{ matrix.name }}" in
+            linux)
+              (cd dist/linux && zip -q -r "../../artifacts/driving-the-earth-${VERSION}-linux.zip" .) ;;
+            windows)
+              (cd dist/windows && 7z a -tzip -bd -y "../../artifacts/driving-the-earth-${VERSION}-windows.zip" . > /dev/null) ;;
+            macos)
+              (cd dist/macos && ditto -c -k --sequesterRsrc --keepParent "Driving the Earth.app" "../../artifacts/driving-the-earth-${VERSION}-macos.zip") ;;
+          esac
+          ls -l artifacts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: driving-the-earth-${{ env.VERSION }}-${{ matrix.name }}
+          path: artifacts/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [meta, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the three zips
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: driving-the-earth-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -l artifacts
+          gh release create "$TAG" artifacts/*.zip --verify-tag --title "$TAG" --generate-notes
