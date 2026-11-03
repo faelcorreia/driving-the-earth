@@ -58,8 +58,13 @@ impl Seg {
             p[0] - self.dir[0] * self.len * t,
             p[1] - self.dir[1] * self.len * t,
         );
+        // Cheap reject before the square root: beyond the reach the result is `None` anyway.
+        let reach = self.flat + ROAD_BLEND_M;
+        if qx * qx + qy * qy > reach * reach * (1.0 + 1e-9) {
+            return None;
+        }
         let dist = qx.hypot(qy);
-        if dist > self.flat + ROAD_BLEND_M {
+        if dist > reach {
             return None;
         }
         let side = qx * self.nrm[0] + qy * self.nrm[1];
@@ -198,27 +203,44 @@ impl Field {
         let g = ground(x, y);
         let (c0, r0) = self.cell(x - self.reach, y - self.reach);
         let (c1, r1) = self.cell(x + self.reach, y + self.reach);
-        // Per road: (road, distance to its nearest axis, candidate there).
-        let mut per_road: Vec<(u32, f64, f32)> = Vec::new();
+        // Per road: (road, distance to its nearest axis, candidate there). A point sees a few
+        // roads, so the first `INLINE_ROADS` live on the stack and no heap block is allocated.
+        const INLINE_ROADS: usize = 8;
+        let mut inline = [(u32::MAX, f64::INFINITY, 0.0f32); INLINE_ROADS];
+        let mut inline_len = 0usize;
+        let mut spill: Vec<(u32, f64, f32)> = Vec::new();
         for r in r0..=r1 {
             for c in c0..=c1 {
                 for &k in &self.buckets[r * self.cols + c] {
                     let seg = &self.segs[k as usize];
                     if let Some((v, d)) = seg.value(x, y, g) {
-                        match per_road.iter_mut().find(|e| e.0 == seg.road) {
+                        let slot = inline[..inline_len]
+                            .iter_mut()
+                            .chain(spill.iter_mut())
+                            .find(|e| e.0 == seg.road);
+                        match slot {
                             Some(e) => {
                                 if d < e.1 {
                                     e.1 = d;
                                     e.2 = v;
                                 }
                             }
-                            None => per_road.push((seg.road, d, v)),
+                            None if inline_len < INLINE_ROADS => {
+                                inline[inline_len] = (seg.road, d, v);
+                                inline_len += 1;
+                            }
+                            None => spill.push((seg.road, d, v)),
                         }
                     }
                 }
             }
         }
-        per_road.iter().map(|e| e.2).reduce(f32::min).unwrap_or(g)
+        inline[..inline_len]
+            .iter()
+            .chain(spill.iter())
+            .map(|e| e.2)
+            .reduce(f32::min)
+            .unwrap_or(g)
     }
 }
 
