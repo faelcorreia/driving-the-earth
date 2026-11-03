@@ -22,10 +22,12 @@ use crate::environment::EnvironmentClock;
 use crate::geometry::lamps::LampPost;
 use crate::geometry::{TileGeometry, GRASS_RGB};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
+use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::{material, solid_body, spawn_car};
 use tileformat::units::lamps::LAMP_REAL_REACH_M;
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::find_spawn;
+use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::streaming::{is_stale, tiles_in_range};
 use crate::world::{open_map, MapIndex};
 
@@ -69,6 +71,15 @@ pub struct EarthWorld {
     #[init(val = true)]
     #[export]
     lamp_glow_enabled: bool,
+    /// Distant lights from `far_lights.bin` of the map (loaded in the background, none when the
+    /// file is missing).
+    #[init(val = true)]
+    #[export]
+    far_lights_enabled: bool,
+    /// Most distant lights kept, the heaviest by weight; the rest are cut.
+    #[init(val = 150000)]
+    #[export]
+    far_lights_max: i64,
 
     index: Option<Arc<MapIndex>>,
     car: Option<Gd<Node3D>>,
@@ -100,6 +111,10 @@ pub struct EarthWorld {
     /// Lit lamps (all loaded tiles) and lamps in total, at the last real-light update.
     lamps_lit: usize,
     lamps_total: usize,
+
+    /// Distant lights: the background load, then the node once built.
+    far_loader: Option<Receiver<io::Result<FarLoad>>>,
+    far: Option<DistantLights>,
 
     /// Worst `process` call and worst tile instantiation since the last log line, seconds.
     worst_frame: f64,
@@ -138,6 +153,10 @@ impl INode3D for EarthWorld {
             godot_warn!("lamp shaders not loaded: street lamps are not drawn");
         }
         self.lamp_lights = Some(LampLights::new());
+        if self.far_lights_enabled {
+            let path = cache_root.join(&id).join("far_lights.bin");
+            self.far_loader = Some(spawn_load(path, self.far_lights_max.max(0) as usize));
+        }
 
         // Spawn on the road nearest to home (the local origin), facing south. Without any
         // road, fall back to home itself facing south.
@@ -214,6 +233,7 @@ impl INode3D for EarthWorld {
         }
 
         self.collect_results();
+        self.collect_far();
 
         // Distant terrain: rebuilt in the background when the loaded tiles or the car's window
         // change; one node per finished build, the previous one freed.
@@ -281,6 +301,16 @@ impl INode3D for EarthWorld {
                 self.lamps_lit,
                 self.lamps_total
             );
+            if let Some(far) = &self.far {
+                godot_print!(
+                    "far lights lit: {} of {}; instances {}, triangles {}; worst frame {:.2} ms",
+                    far.lit,
+                    far.count(),
+                    far.count(),
+                    far.count() * 2,
+                    self.worst_frame * 1000.0
+                );
+            }
             self.stats_timer = 0.0;
             self.worst_frame = 0.0;
             self.worst_build = 0.0;
@@ -337,6 +367,41 @@ impl EarthWorld {
             Ok(geometry) => self.add_tile(t, &geometry),
             Err(e) => {
                 godot_error!("cannot load tile {} {}: {e}", t.0, t.1);
+            }
+        }
+    }
+
+    /// Builds the distant lights when the background load is back (the MultiMesh buffer is set in
+    /// one call). A missing file means no distant lights, without a message.
+    fn collect_far(&mut self) {
+        let Some(rx) = &self.far_loader else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(io::Error::other("loader gone")),
+        };
+        self.far_loader = None;
+        match result {
+            Ok(load) => {
+                let (file, kept, secs) = (load.file_points, load.loaded_points, load.secs);
+                let rss = rss_mb();
+                if let Some(far) = DistantLights::new(load) {
+                    self.base_mut().add_child(&far.node());
+                    godot_print!(
+                        "far lights: loaded {kept} of {file} in {:.0} ms in the background, resident {:.0} MB",
+                        secs * 1000.0,
+                        rss.unwrap_or(0.0)
+                    );
+                    self.far = Some(far);
+                } else {
+                    godot_warn!("far lights shader not loaded: distant lights are not drawn");
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                godot_warn!("cannot read far_lights.bin: {e}");
             }
         }
     }
@@ -418,6 +483,9 @@ impl EarthWorld {
         }
         self.lamps_lit = lit_total;
         self.lamps_total = total;
+        if let Some(far) = self.far.as_mut() {
+            far.update(now, on_since);
+        }
         lit.sort_by(|a, b| a.0.total_cmp(&b.0));
         let heads: Vec<Vector3> = lit.into_iter().take(LAMP_POOL).map(|(_, v)| v).collect();
         let active = self.lamp_real_lights.clamp(0, LAMP_POOL as i64) as usize;

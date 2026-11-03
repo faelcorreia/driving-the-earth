@@ -9,6 +9,7 @@ use godot::classes::{
 };
 use godot::prelude::*;
 
+pub(crate) mod far_lights;
 pub(crate) mod lamps;
 
 use crate::geometry::MeshData;
