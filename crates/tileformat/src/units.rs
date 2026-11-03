@@ -66,6 +66,11 @@ pub mod lots {
     const _: () = assert!(LOT_W_MIN_M > 2.0 * SIDE_SETBACK_MAX_M && LOT_D_MIN_M > FRONT_SETBACK_MAX_M + SIDE_SETBACK_MAX_M);
 }
 
+/// Distant lights (L2): side of the cell in which building centroids are aggregated into one light, in meters.
+pub const FAR_LIGHT_CELL_M: f64 = 20.0;
+/// Distant lights exist only from this distance to the map radius; nearer ones come from real buildings and lamps.
+pub const FAR_LIGHT_NEAR_M: f64 = 800.0;
+
 /// Spacing of the stations along a road (one quarter of a terrain cell), in meters.
 pub const ROAD_STATION_M: f64 = 2.5;
 

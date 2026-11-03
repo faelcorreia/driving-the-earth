@@ -5,6 +5,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub mod units;
+pub mod terrain;
+pub mod far_lights;
 
 /// Ground classes of `Tile::ground` (one byte per cell of `units::GROUND_CELL_M`).
 pub const GROUND_GRASS: u8 = 0;
