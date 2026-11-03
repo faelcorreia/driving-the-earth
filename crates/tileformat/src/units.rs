@@ -65,3 +65,8 @@ pub mod lots {
     // A lot must still hold a building after both setbacks on each side.
     const _: () = assert!(LOT_W_MIN_M > 2.0 * SIDE_SETBACK_MAX_M && LOT_D_MIN_M > FRONT_SETBACK_MAX_M + SIDE_SETBACK_MAX_M);
 }
+
+/// Widths of the waterway centerlines in the ground map (`river`, `canal`/`drain`, `stream`), in meters.
+pub const WATERWAY_RIVER_M: f64 = 8.0;
+pub const WATERWAY_CANAL_M: f64 = 4.0;
+pub const WATERWAY_STREAM_M: f64 = 2.0;

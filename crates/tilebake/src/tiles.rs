@@ -13,6 +13,8 @@ use crate::dem::{download_dem, read_smoothed_dem, tile_heights_any, MapGrid, Ras
 use crate::osm;
 use crate::profile;
 use crate::region::{apply_regions, Region};
+use crate::lots::{self, AreaKind};
+use tileformat::units::{FLOOR_HEIGHT_M, WATERWAY_CANAL_M, WATERWAY_RIVER_M, WATERWAY_STREAM_M};
 
 fn invalid_data<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
@@ -25,6 +27,8 @@ pub struct BakeSummary {
     /// Road pieces written over all tiles (a way crossing a border gives one piece per tile).
     pub road_pieces: usize,
     pub building_pieces: usize,
+    /// Generated lots (`Polygon::generated`) over all tiles.
+    pub generated_buildings: usize,
     /// Size of `cache/<id>/tiles/` after the bake, in bytes.
     pub tiles_bytes: u64,
     pub elapsed: Duration,
@@ -91,6 +95,33 @@ fn tiles_bbox(tiles: &[(i32, i32)], grid: &MapGrid) -> (f64, f64, f64, f64) {
     (south, west, north, east)
 }
 
+/// Number at the start of an OSM value ("9", "9.5", "9 m"); None when there is none.
+fn leading_number(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let end = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    s[..end].parse::<f64>().ok()
+}
+
+/// A real OSM building. Its palette and tint come from a stable hash of the way id; its floors
+/// come from `building:levels`, or else from `height` (one floor per `FLOOR_HEIGHT_M`); 0 when unknown.
+fn real_building(e: &Value, points: Vec<[f64; 2]>) -> Polygon {
+    let h = lots::hash(&[e["id"].as_u64().unwrap_or(0)]);
+    let tags = &e["tags"];
+    let levels = tags["building:levels"]
+        .as_str()
+        .and_then(leading_number)
+        .or_else(|| tags["height"].as_str().and_then(leading_number).map(|m| m / FLOOR_HEIGHT_M))
+        .map(|v| v.round().clamp(1.0, 255.0) as u8)
+        .unwrap_or(0);
+    Polygon {
+        points,
+        generated: false,
+        levels,
+        color_idx: (h % 4) as u8,
+        tint: ((h >> 8) % 8) as u8,
+    }
+}
+
 /// Adds one way (Overpass element with `out body geom`) to `roads` or `buildings`, in the local plane.
 pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: &mut Vec<Polygon>) {
     let Some(geom) = e["geometry"].as_array() else {
@@ -118,7 +149,7 @@ pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: 
             ring.pop();
         }
         if ring.len() >= 3 {
-            buildings.push(Polygon::real(ring));
+            buildings.push(real_building(e, ring));
         }
     }
 }
@@ -195,7 +226,7 @@ pub fn build_tile_from(
     for b in buildings {
         let points = clip_polygon(&b.points, rect);
         if points.len() >= 3 {
-            tile_buildings.push(Polygon::real(points));
+            tile_buildings.push(Polygon { points, generated: b.generated, levels: b.levels, color_idx: b.color_idx, tint: b.tint });
         }
     }
     let counts = (tile_roads.len(), tile_buildings.len());
@@ -208,6 +239,160 @@ pub fn build_tile_from(
         ground: Vec::new(),
     };
     (tile, counts.0, counts.1)
+}
+
+/// Green and water areas of the OSM, and waterway centerlines, in the local plane of the bake.
+#[derive(Debug, Default)]
+pub struct Areas {
+    /// Park (green) and water rings: they block lots.
+    pub areas: Vec<(AreaKind, Vec<[f64; 2]>)>,
+    /// Waterway centerlines with their half width in meters.
+    pub water_lines: Vec<(f64, Vec<[f64; 2]>)>,
+    /// Residential, commercial and industrial landuse rings. They do not block lots; kept for
+    /// the density of the lots, not used yet.
+    pub dense: Vec<Vec<[f64; 2]>>,
+    /// Multipolygon relations left out because an outer member is not a closed way.
+    pub skipped_relations: usize,
+}
+
+/// Park or water class of an OSM area (None for any other tag).
+fn area_kind(tags: &Value) -> Option<AreaKind> {
+    let is = |k: &str, vs: &[&str]| tags[k].as_str().is_some_and(|v| vs.contains(&v));
+    if tags["water"].is_string() || is("natural", &["water"]) {
+        Some(AreaKind::Water)
+    } else if is("leisure", &["park", "garden", "pitch", "playground"])
+        || is("landuse", &["grass", "forest", "meadow", "recreation_ground", "cemetery", "village_green"])
+        || is("natural", &["wood", "scrub", "grassland", "wetland"])
+    {
+        Some(AreaKind::Park)
+    } else {
+        None
+    }
+}
+
+fn is_dense(tags: &Value) -> bool {
+    tags["landuse"].as_str().is_some_and(|v| ["residential", "commercial", "industrial"].contains(&v))
+}
+
+/// Half width in meters of a waterway line (None for the other waterway classes).
+fn waterway_half_width_m(tags: &Value) -> Option<f64> {
+    let w = match tags["waterway"].as_str()? {
+        "river" => WATERWAY_RIVER_M,
+        "canal" | "drain" => WATERWAY_CANAL_M,
+        "stream" => WATERWAY_STREAM_M,
+        _ => return None,
+    };
+    Some(w / 2.0)
+}
+
+/// Local points of an Overpass `geometry` array.
+fn local_geom(g: &Value, grid: &MapGrid) -> Vec<[f64; 2]> {
+    g.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let (x, y) = grid.local(p["lat"].as_f64()?, p["lon"].as_f64()?);
+            Some([x, y])
+        })
+        .collect()
+}
+
+/// The ring without its closing point, when the points form a closed ring of at least 3 corners.
+fn closed_ring(pts: &[[f64; 2]]) -> Option<Vec<[f64; 2]>> {
+    (pts.len() >= 4 && pts.first() == pts.last()).then(|| pts[..pts.len() - 1].to_vec())
+}
+
+/// Adds the elements of one areas block. An element already seen in an earlier block (same type and id) is skipped.
+/// Multipolygon: each outer ring is used as a filled area (inner holes are filled too, which only blocks more).
+fn add_areas(v: &Value, grid: &MapGrid, seen: &mut HashSet<(String, u64)>, out: &mut Areas) -> io::Result<()> {
+    let elements = v["elements"]
+        .as_array()
+        .ok_or_else(|| invalid_data("areas block has no 'elements'"))?;
+    for e in elements {
+        let kind = e["type"].as_str().unwrap_or_default().to_string();
+        if !seen.insert((kind.clone(), e["id"].as_u64().unwrap_or(0))) {
+            continue;
+        }
+        let tags = &e["tags"];
+        match kind.as_str() {
+            "way" => {
+                let pts = local_geom(&e["geometry"], grid);
+                match (closed_ring(&pts), area_kind(tags), is_dense(tags)) {
+                    (Some(ring), Some(k), _) => out.areas.push((k, ring)),
+                    (Some(ring), None, true) => out.dense.push(ring),
+                    _ => {
+                        if let (Some(hw), true) = (waterway_half_width_m(tags), pts.len() >= 2) {
+                            out.water_lines.push((hw, pts));
+                        }
+                    }
+                }
+            }
+            "relation" => {
+                let area = area_kind(tags);
+                if area.is_none() && !is_dense(tags) {
+                    continue;
+                }
+                let outers: Vec<&Value> = e["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|m| m["role"].as_str() == Some("outer"))
+                    .collect();
+                let rings: Option<Vec<Vec<[f64; 2]>>> = outers
+                    .iter()
+                    .map(|m| closed_ring(&local_geom(&m["geometry"], grid)))
+                    .collect();
+                match rings {
+                    Some(rings) if !rings.is_empty() => {
+                        for ring in rings {
+                            match area {
+                                Some(k) => out.areas.push((k, ring)),
+                                None => out.dense.push(ring),
+                            }
+                        }
+                    }
+                    _ => out.skipped_relations += 1,
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Reads the areas layer `dir` (`raw/osm_areas/<bx>_<by>.json`) over the blocks of `meta`.
+/// Tolerant: a missing folder or a missing block gives empty areas. A partial layer would give
+/// lots over parks that are not known yet, so the layer is used only when all its blocks are there.
+pub fn read_areas(dir: &Path, meta: &MapMeta, grid: &MapGrid) -> io::Result<Areas> {
+    let mut out = Areas::default();
+    let blocks = osm::blocks_for(meta);
+    let complete = dir.is_dir()
+        && blocks
+            .iter()
+            .all(|&(bx, by)| dir.join(osm::block_file_name(bx, by)).is_file());
+    if !complete {
+        return Ok(out);
+    }
+    let mut seen = HashSet::new();
+    for (bx, by) in blocks {
+        let text = fs::read_to_string(dir.join(osm::block_file_name(bx, by)))?;
+        let v: Value = serde_json::from_str(&text).map_err(invalid_data)?;
+        add_areas(&v, grid, &mut seen, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Items of the 3 x 3 window of tile `(x, y)`: each index once, in increasing order.
+fn window_ids(index: &HashMap<(i32, i32), Vec<usize>>, x: i32, y: i32) -> Vec<usize> {
+    let mut ids: Vec<usize> = (-1..=1)
+        .flat_map(|dy| (-1..=1).map(move |dx| (x + dx, y + dy)))
+        .filter_map(|k| index.get(&k))
+        .flatten()
+        .copied()
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 /// Regional packages listed in `index.json` of the packages folder (see `region::regions_dir`).
@@ -303,6 +488,9 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
         }
     }
     let regions = load_regions(cache_root)?;
+    let areas = read_areas(&dir.join("raw").join("osm_areas"), &meta, &grid)?;
+    let area_index = index_by_tile(&areas.areas, |a| a.1.as_slice(), meta.tile_size_m);
+    let water_index = index_by_tile(&areas.water_lines, |w| w.1.as_slice(), meta.tile_size_m);
 
     // Final terrain of every tile (regions applied), shared by the road profiles and the tiles.
     // Tiles beyond the disc with no DEM data (the edge of the map) get no terrain: their ways
@@ -342,6 +530,7 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
         tiles: 0,
         road_pieces: 0,
         building_pieces: 0,
+        generated_buildings: 0,
         tiles_bytes: 0,
         elapsed: Duration::ZERO,
     };
@@ -356,7 +545,31 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
             .map(|ids| ids.iter().map(|&i| buildings[i].clone()).collect())
             .unwrap_or_default();
         let final_heights = heights.remove(&(x, y)).ok_or_else(|| invalid_data("tile without terrain"))?;
-        let (tile, r, b) = build_tile_from(final_heights, &grid, &tile_roads, &tile_buildings, x, y);
+        let (mut tile, r, b) = build_tile_from(final_heights, &grid, &tile_roads, &tile_buildings, x, y);
+        // Lots and ground from the 3 x 3 window around the tile: a lot is the same whichever tile sees it.
+        let win_roads: Vec<(usize, &Polyline)> = window_ids(&road_index, x, y).into_iter().map(|i| (i, &roads[i])).collect();
+        let win_footprints: Vec<&[[f64; 2]]> = window_ids(&building_index, x, y)
+            .into_iter()
+            .map(|i| buildings[i].points.as_slice())
+            .collect();
+        let win_areas: Vec<(AreaKind, &[[f64; 2]])> = window_ids(&area_index, x, y)
+            .into_iter()
+            .map(|i| (areas.areas[i].0, areas.areas[i].1.as_slice()))
+            .collect();
+        let win_water: Vec<(f64, &[[f64; 2]])> = window_ids(&water_index, x, y)
+            .into_iter()
+            .map(|i| (areas.water_lines[i].0, areas.water_lines[i].1.as_slice()))
+            .collect();
+        let out = lots::bake_window(&lots::Window {
+            tile: (x, y),
+            roads: win_roads,
+            footprints: win_footprints,
+            areas: win_areas,
+            water: win_water,
+        });
+        summary.generated_buildings += out.buildings.len();
+        tile.buildings.extend(out.buildings);
+        tile.ground = out.ground;
         tileformat::write_tile(cache_root, id, &tile)?;
         summary.tiles += 1;
         summary.road_pieces += r;
@@ -374,6 +587,70 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
 mod tests {
     use super::*;
     use crate::dem::CELL_M;
+
+    #[test]
+    fn real_building_takes_levels_and_stable_palette() {
+        let e: Value = serde_json::from_str(r#"{"id":42,"tags":{"building":"yes","building:levels":"3"}}"#).unwrap();
+        let b = real_building(&e, vec![[0.0, 0.0]]);
+        assert_eq!(b.levels, 3);
+        assert!(!b.generated);
+        let h: Value = serde_json::from_str(r#"{"id":43,"tags":{"building":"yes","height":"9.5 m"}}"#).unwrap();
+        assert_eq!(real_building(&h, vec![]).levels, 3);
+        let again = real_building(&e, vec![]);
+        assert_eq!((again.color_idx, again.tint), (b.color_idx, b.tint));
+        assert!(b.color_idx <= 3 && b.tint <= 7);
+        let none: Value = serde_json::from_str(r#"{"id":44,"tags":{"building":"yes"}}"#).unwrap();
+        assert_eq!(real_building(&none, vec![]).levels, 0);
+    }
+
+    #[test]
+    fn areas_block_gives_classes_widths_and_dedups() {
+        let grid = MapGrid { lat0: -19.9, lon0: -43.9, tile_m: 250.0, cell_m: CELL_M };
+        const SQ: &str = r#"[{"lat":-19.9,"lon":-43.9},{"lat":-19.9,"lon":-43.899},{"lat":-19.8995,"lon":-43.899},{"lat":-19.9,"lon":-43.9}]"#;
+        const LINE: &str = r#"[{"lat":-19.9,"lon":-43.9},{"lat":-19.91,"lon":-43.9}]"#;
+        let json = format!(
+            r#"{{"elements":[
+            {{"type":"way","id":1,"tags":{{"leisure":"park"}},"geometry":{SQ}}},
+            {{"type":"way","id":2,"tags":{{"waterway":"river"}},"geometry":{LINE}}},
+            {{"type":"way","id":3,"tags":{{"waterway":"stream"}},"geometry":{LINE}}},
+            {{"type":"way","id":4,"tags":{{"landuse":"residential"}},"geometry":{SQ}}},
+            {{"type":"way","id":6,"tags":{{"leisure":"park"}},"geometry":{LINE}}},
+            {{"type":"relation","id":5,"tags":{{"type":"multipolygon","natural":"water"}},"members":[{{"type":"way","ref":9,"role":"outer","geometry":{SQ}}}]}},
+            {{"type":"relation","id":7,"tags":{{"type":"multipolygon","leisure":"park"}},"members":[{{"type":"way","ref":10,"role":"outer","geometry":{LINE}}}]}}
+            ]}}"#
+        );
+        let v: Value = serde_json::from_str(&json).unwrap();
+        let mut seen = HashSet::new();
+        let mut out = Areas::default();
+        add_areas(&v, &grid, &mut seen, &mut out).unwrap();
+        assert_eq!(out.areas.len(), 2, "park way and water relation");
+        assert_eq!(out.areas[0].0, AreaKind::Park);
+        assert_eq!(out.areas[1].0, AreaKind::Water);
+        assert_eq!(out.areas[0].1.len(), 3, "closing point removed");
+        assert_eq!(out.water_lines.iter().map(|w| w.0).collect::<Vec<_>>(), vec![4.0, 1.0]);
+        assert_eq!(out.dense.len(), 1);
+        assert_eq!(out.skipped_relations, 1, "open outer ring");
+        // The same ids in a second block add nothing.
+        add_areas(&v, &grid, &mut seen, &mut out).unwrap();
+        assert_eq!((out.areas.len(), out.water_lines.len(), out.dense.len()), (2, 2, 1));
+    }
+
+    #[test]
+    fn missing_areas_layer_is_empty() {
+        let meta = MapMeta {
+            id: "t".into(),
+            name: "t".into(),
+            center_lat: -19.9,
+            center_lon: -43.9,
+            radius_m: 1000.0,
+            tile_size_m: 250.0,
+            created_unix: 0,
+            complete: false,
+        };
+        let grid = MapGrid { lat0: -19.9, lon0: -43.9, tile_m: 250.0, cell_m: CELL_M };
+        let out = read_areas(Path::new("/nonexistent/osm_areas"), &meta, &grid).unwrap();
+        assert!(out.areas.is_empty() && out.water_lines.is_empty() && out.dense.is_empty());
+    }
 
     #[test]
     fn covering_tiles_for_one_km_radius() {

@@ -47,6 +47,8 @@ pub struct Window<'a> {
     pub roads: Vec<(usize, &'a Polyline)>,
     pub footprints: Vec<&'a [[f64; 2]]>,
     pub areas: Vec<(AreaKind, &'a [[f64; 2]])>,
+    /// Waterway centerlines with their half width in meters (`river` 8 m, `stream` 2 m, ...): water cells.
+    pub water: Vec<(f64, &'a [[f64; 2]])>,
 }
 
 /// Output of one tile: the generated buildings whose center is in the tile, and the ground
@@ -85,7 +87,7 @@ fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn hash(parts: &[u64]) -> u64 {
+pub fn hash(parts: &[u64]) -> u64 {
     parts.iter().fold(0x1234_5678_u64, |h, &p| mix(h ^ p))
 }
 
@@ -220,6 +222,23 @@ fn paint_band(r: &mut Raster, pts: &[[f64; 2]], hw: f64, reach: f64) {
     }
 }
 
+/// Waterway band: cells within `hw` of the centerline are water.
+fn paint_water_band(r: &mut Raster, pts: &[[f64; 2]], hw: f64) {
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let lo = [a[0].min(b[0]) - hw, a[1].min(b[1]) - hw];
+        let hi = [a[0].max(b[0]) + hw, a[1].max(b[1]) + hw];
+        let (i0, i1, j0, j1) = r.span(lo, hi);
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                if seg_dist(r.center(i, j), a, b) <= hw {
+                    r.flags[Raster::idx(i, j)] |= F_WATER;
+                }
+            }
+        }
+    }
+}
+
 /// Ring area: cells inside get `inside`; cells within `margin` of the edge get `near`.
 fn paint_ring(r: &mut Raster, ring: &[[f64; 2]], margin: f64, inside: u8, near: u8) {
     if ring.len() < 3 {
@@ -259,6 +278,9 @@ fn rasterize(win: &Window) -> Raster {
     }
     for ring in &win.footprints {
         paint_ring(&mut r, ring, FOOTPRINT_MARGIN_M, F_FOOT | F_BLOCK, F_BLOCK);
+    }
+    for (half_w, line) in &win.water {
+        paint_water_band(&mut r, line, *half_w);
     }
     for (kind, ring) in &win.areas {
         let flag = match kind {
@@ -533,6 +555,7 @@ mod tests {
             roads: roads.iter().enumerate().collect(),
             footprints: vec![foot],
             areas: Vec::new(),
+            water: Vec::new(),
         }
     }
 
@@ -625,7 +648,7 @@ mod tests {
             street(&[[470.0, -100.0], [470.0, 300.0]]),
         ];
         let all: Vec<(usize, &Polyline)> = rs.iter().enumerate().collect();
-        let mk = |t: (i32, i32)| Window { tile: t, roads: all.clone(), footprints: vec![], areas: vec![] };
+        let mk = |t: (i32, i32)| Window { tile: t, roads: all.clone(), footprints: vec![], areas: vec![], water: vec![] };
         let left = bake_window(&mk((0, 0)));
         let right = bake_window(&mk((1, 0)));
         let mut seen = std::collections::HashSet::new();

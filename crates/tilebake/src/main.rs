@@ -60,6 +60,7 @@ fn main() {
             println!("tiles on disk: {:.1} MB", t.tiles_bytes as f64 / 1e6);
             println!("road pieces: {}", t.road_pieces);
             println!("building pieces: {}", t.building_pieces);
+            println!("generated buildings: {}", t.generated_buildings);
             println!("meta.complete: true");
         }
         Err(e) => {
