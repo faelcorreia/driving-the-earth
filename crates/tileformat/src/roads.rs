@@ -184,7 +184,7 @@ mod tests {
                 -1,
                 vec![road(
                     "residential",
-                    "Rua São Mateus",
+                    "Rua Exemplo",
                     &[[10.0, 10.0], [20.0, 10.0]],
                 )],
             ),
