@@ -253,6 +253,10 @@ pub struct Areas {
     pub dense: Vec<Vec<[f64; 2]>>,
     /// Multipolygon relations left out because an outer member is not a closed way.
     pub skipped_relations: usize,
+    /// Open waterway ways kept as water lines (`water_lines`).
+    pub waterways_open: usize,
+    /// Waterway ways left out because they run underground (see `is_culverted`).
+    pub waterways_ignored: usize,
 }
 
 /// Park or water class of an OSM area (None for any other tag).
@@ -278,11 +282,22 @@ fn is_dense(tags: &Value) -> bool {
 fn waterway_half_width_m(tags: &Value) -> Option<f64> {
     let w = match tags["waterway"].as_str()? {
         "river" => WATERWAY_RIVER_M,
-        "canal" | "drain" => WATERWAY_CANAL_M,
+        "canal" | "drain" | "ditch" => WATERWAY_CANAL_M,
         "stream" => WATERWAY_STREAM_M,
         _ => return None,
     };
     Some(w / 2.0)
+}
+
+/// True for a waterway that runs underground: `tunnel=*` (other than `no`), `culvert=*`,
+/// `covered=yes`, `layer<0` or `man_made=pipeline`. Such a way is not water: it blocks no lot.
+fn is_culverted(tags: &Value) -> bool {
+    let layer_below_zero = tags["layer"].as_str().and_then(|v| v.parse::<i32>().ok()).is_some_and(|l| l < 0);
+    tags["tunnel"].as_str().is_some_and(|v| v != "no")
+        || !tags["culvert"].is_null()
+        || tags["covered"].as_str() == Some("yes")
+        || layer_below_zero
+        || tags["man_made"].as_str() == Some("pipeline")
 }
 
 /// Local points of an Overpass `geometry` array.
@@ -321,8 +336,13 @@ fn add_areas(v: &Value, grid: &MapGrid, seen: &mut HashSet<(String, u64)>, out: 
                     (Some(ring), Some(k), _) => out.areas.push((k, ring)),
                     (Some(ring), None, true) => out.dense.push(ring),
                     _ => {
-                        if let (Some(hw), true) = (waterway_half_width_m(tags), pts.len() >= 2) {
-                            out.water_lines.push((hw, pts));
+                        if let Some(hw) = waterway_half_width_m(tags) {
+                            if is_culverted(tags) {
+                                out.waterways_ignored += 1;
+                            } else if pts.len() >= 2 {
+                                out.water_lines.push((hw, pts));
+                                out.waterways_open += 1;
+                            }
                         }
                     }
                 }
@@ -489,6 +509,10 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
     }
     let regions = load_regions(cache_root)?;
     let areas = read_areas(&dir.join("raw").join("osm_areas"), &meta, &grid)?;
+    eprintln!(
+        "{id}: waterways open {} (water), ignored {} (tunnel/culvert/covered/layer<0/pipeline)",
+        areas.waterways_open, areas.waterways_ignored
+    );
     let area_index = index_by_tile(&areas.areas, |a| a.1.as_slice(), meta.tile_size_m);
     let water_index = index_by_tile(&areas.water_lines, |w| w.1.as_slice(), meta.tile_size_m);
 
@@ -633,6 +657,33 @@ mod tests {
         // The same ids in a second block add nothing.
         add_areas(&v, &grid, &mut seen, &mut out).unwrap();
         assert_eq!((out.areas.len(), out.water_lines.len(), out.dense.len()), (2, 2, 1));
+    }
+
+    #[test]
+    fn culverted_waterway_is_ignored_and_open_one_kept() {
+        let grid = MapGrid { lat0: -19.9, lon0: -43.9, tile_m: 250.0, cell_m: CELL_M };
+        const LINE: &str = r#"[{"lat":-19.9,"lon":-43.9},{"lat":-19.91,"lon":-43.9}]"#;
+        let json = format!(
+            r#"{{"elements":[
+            {{"type":"way","id":1,"tags":{{"waterway":"stream","tunnel":"culvert","layer":"-1"}},"geometry":{LINE}}},
+            {{"type":"way","id":2,"tags":{{"waterway":"stream","tunnel":"yes"}},"geometry":{LINE}}},
+            {{"type":"way","id":3,"tags":{{"waterway":"drain","culvert":"pipe"}},"geometry":{LINE}}},
+            {{"type":"way","id":4,"tags":{{"waterway":"ditch","covered":"yes"}},"geometry":{LINE}}},
+            {{"type":"way","id":5,"tags":{{"waterway":"stream","layer":"-2"}},"geometry":{LINE}}},
+            {{"type":"way","id":6,"tags":{{"waterway":"stream","tunnel":"no"}},"geometry":{LINE}}},
+            {{"type":"way","id":7,"tags":{{"waterway":"ditch"}},"geometry":{LINE}}},
+            {{"type":"way","id":8,"tags":{{"waterway":"river","name":"Ribeirão Arrudas","layer":"0"}},"geometry":{LINE}}}
+            ]}}"#
+        );
+        let v: Value = serde_json::from_str(&json).unwrap();
+        let mut seen = HashSet::new();
+        let mut out = Areas::default();
+        add_areas(&v, &grid, &mut seen, &mut out).unwrap();
+        assert_eq!((out.waterways_open, out.waterways_ignored), (3, 5));
+        assert_eq!(out.water_lines.iter().map(|w| w.0).collect::<Vec<_>>(), vec![1.0, 2.0, 8.0 / 2.0]);
+        // The same ids in a second block add nothing to either count.
+        add_areas(&v, &grid, &mut seen, &mut out).unwrap();
+        assert_eq!((out.waterways_open, out.waterways_ignored, out.water_lines.len()), (3, 5, 3));
     }
 
     #[test]
