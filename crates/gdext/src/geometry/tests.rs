@@ -345,3 +345,16 @@ fn reference_tile_geometry_is_unchanged() {
 
 const REFERENCE_TERRAIN_HASH: u64 = 0x84e8_aac5_74f1_597e;
 const REFERENCE_ROADS_HASH: u64 = 0xe0743e9d4b222c16;
+
+/// Regression: a tile with no roads keeps the same terrain and (empty) road meshes as before the
+/// road lowering rework (`lower_under_roads` must leave its grid untouched without roads).
+#[test]
+fn tile_without_roads_geometry_is_unchanged() {
+    let t = tile(0, 0, grid(9, |u, v| hill(u * 250.0, v * 250.0)), Vec::new());
+    let g = tile_geometry(&t, 250.0);
+    assert!(g.roads.is_empty());
+    println!("no-roads terrain {:016x}", mesh_hash(&g.terrain));
+    assert_eq!(mesh_hash(&g.terrain), REFERENCE_NO_ROADS_TERRAIN_HASH);
+}
+
+const REFERENCE_NO_ROADS_TERRAIN_HASH: u64 = 0x0966_6548_a9bb_f653;
