@@ -4,6 +4,10 @@ Drive a realistic small car (a light hatchback) through real places, built from 
 Rust (Godot 4 GDExtension) runtime plus an offline `tilebake` pipeline that turns OpenStreetMap
 and elevation data into 250 m tiles.
 
+Strongly inspired by [BeamNG.Earth](https://github.com/tecnagamer/beamng.earth) (real-world maps
+streamed into BeamNG.drive). This project is independent, not affiliated with or endorsed by BeamNG
+GmbH or the BeamNG.Earth authors; all credit for the idea goes to them.
+
 Status: early work in progress. Priorities: 1) performance, 2) realistic driving feel.
 
 ## Layout
@@ -18,8 +22,44 @@ Status: early work in progress. Priorities: 1) performance, 2) realistic driving
 2. Bake tiles into `cache/` (not versioned) with `tilebake` (see `crates/tilebake/src/main.rs`).
 3. Build the extension (`cargo build`) and open `godot/` in Godot 4.
 
+## Release builds
+Releases are built by `.github/workflows/build.yml` for Linux (x86_64), Windows (x86_64) and macOS
+(universal). Godot version: 4.7.2 (stable), the same one in `godot/project.godot`.
+
+- A release package is only the executable plus the GDExtension library. **No baked data is included**:
+  the map tiles stay local in `cache/`, produced by `tilebake` on your machine. Nothing in `cache/` or
+  `*.local.json` is exported.
+- The cache path is still `res://../cache` (`EarthWorld.cache_root`). In an exported build it resolves
+  relative to the directory the game is launched from, not to the executable: from `dist/linux` the
+  game looks for `dist/cache`. Where the release should look for `cache/` is an open decision.
+- Push a tag `vX.Y.Z` that matches `[workspace.package] version` in `Cargo.toml`. The workflow fails on
+  a mismatch and then publishes a GitHub Release with the three zips
+  (`driving-the-earth-<version>-<os>.zip`). A manual run (`workflow_dispatch`) builds the zips as
+  workflow artifacts without publishing a release.
+- macOS builds are not signed with an Apple Developer ID. Gatekeeper will show a "cannot be opened
+  because the developer cannot be verified" alert. Open the app with right-click > Open, or run
+  `xattr -dr com.apple.quarantine "Driving the Earth.app"`.
+
+Local export (Godot 4.7.2 with export templates installed; create the output folder first, because
+Godot does not create it):
+
+```sh
+godot --headless --path godot --import
+mkdir -p dist/linux && godot --headless --path godot --export-release "Linux"
+```
+
+Presets are `Linux`, `Windows` and `macOS` in `godot/export_presets.cfg`. Output goes to `dist/`
+(not versioned).
+
 ## Contributing
-Code, identifiers, logs and commit messages are in English; UI text goes through i18n keys (en, pt-BR).
+The whole repository is in English (code, identifiers, comments, logs, commit messages, docs). This
+keeps the project easy to read and to extend with LLM-assisted code generation, which works best
+with a single language.
+
+Internationalization (i18n) is a core part of the project: every text shown in the interface must go
+through i18n keys (currently en and pt-BR), never hardcoded strings.
+
+Versioning rules (semver, major capped at 1, bumps checked in CI) are in [CONTRIBUTING.md](CONTRIBUTING.md).
 Commit messages must not contain AI tool names or `Co-Authored-By` trailers; the only allowed
 trailer line is `AI Generated` when AI wrote the change. Never commit personal data (addresses,
 exact home coordinates, `home.local.json`, `cache/`).

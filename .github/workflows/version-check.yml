@@ -1,0 +1,28 @@
+name: version-check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the PR with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Unit tests for the version check
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+      - name: Check the workspace version against origin/main
+        run: python3 scripts/check_version.py --base origin/main
