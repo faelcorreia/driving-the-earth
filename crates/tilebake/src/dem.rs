@@ -284,8 +284,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn home_tile_name() {
-        let n = tile_name(-19.9006792, -43.9174041);
+    fn default_home_tile_name() {
+        let n = tile_name(crate::home::DEFAULT_LAT_DEG, crate::home::DEFAULT_LON_DEG);
         assert_eq!(n, "Copernicus_DSM_COG_10_S20_00_W044_00_DEM");
     }
 

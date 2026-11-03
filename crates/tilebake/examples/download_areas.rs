@@ -1,7 +1,7 @@
 //! Downloads only the areas, nature and street infrastructure layer of one cache entry, and
 //! prints the counts and the Ribeirão Arrudas waterway (if any):
 //! `cargo run --release -p tilebake --example download_areas -- <cache-root> <id>`
-//! e.g. `... -- /mnt/Data/Codes/driving-the-earth/cache casa-10km`.
+//! e.g. `... -- <repo>/cache casa-10km`.
 use std::path::Path;
 use std::process::exit;
 use std::time::Instant;

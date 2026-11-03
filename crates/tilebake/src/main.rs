@@ -28,7 +28,7 @@ fn main() {
     let address = match std::env::var("TILEBAKE_ADDRESS") {
         Ok(e) if !e.trim().is_empty() => e,
         _ => {
-            eprintln!("Set TILEBAKE_ADDRESS to the home address (see CLAUDE.md).");
+            eprintln!("Set TILEBAKE_ADDRESS to the start address (or use DTE_HOME / home.local.json).");
             std::process::exit(2);
         }
     };

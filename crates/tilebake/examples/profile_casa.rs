@@ -1,16 +1,17 @@
-//! F12 validation: height profile along Rua São Mateus at the home (`cache/casa`), read from the baked
+//! F12 validation: height profile along the street of the home (`cache/casa`), read from the baked
 //! tiles, against an independent reference: the raw contour segments crossed by the street polyline.
 //! The street comes from the OSM cache (`cache/casa/raw/overpass.json`), not from code.
-//! Run: `cargo run --release -p tilebake --example profile_casa`.
+//! The name is the first argument, or the `street` field of `home.local.json`.
+//! Run: `cargo run --release -p tilebake --example profile_casa [street name]`.
 use std::fs;
 use std::path::Path;
 
 use tilebake::dem::MapGrid;
+use tilebake::home::home;
 use tilebake::shp::read_contours;
 use tilebake::utm::{inverse, utm23s, UTM23S_LON0};
 use tileformat::{read_tile, tile_path, MapMeta, Tile};
 
-const STREET: &str = "Rua São Mateus";
 const HALF_M: f64 = 200.0;
 const STEP_M: f64 = 10.0;
 
@@ -44,13 +45,17 @@ fn main() {
     let grid = MapGrid::from_meta(&meta);
     let tile_m = meta.tile_size_m;
     let (home_lat, home_lon) = (meta.center_lat, meta.center_lon);
+    let street = std::env::args()
+        .nth(1)
+        .or_else(|| home().street.clone())
+        .expect("street: pass the name as argument or set \"street\" in home.local.json");
 
     // Street polyline (UTM), nearest way with that name to the home.
     let overpass: serde_json::Value = serde_json::from_str(&fs::read_to_string(cache.join("casa/raw/overpass.json")).expect("overpass")).expect("json");
     let (he, hn) = utm23s(home_lat, home_lon);
     let mut best: Option<(f64, Vec<[f64; 2]>)> = None;
     for el in overpass["elements"].as_array().expect("elements") {
-        if el["type"] != "way" || el["tags"]["name"] != STREET {
+        if el["type"] != "way" || el["tags"]["name"] != street {
             continue;
         }
         let line: Vec<[f64; 2]> = el["geometry"].as_array().unwrap().iter().map(|p| {

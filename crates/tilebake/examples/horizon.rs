@@ -10,9 +10,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use tilebake::dem::{height_at_any, read_smoothed_dem, Raster};
+use tilebake::home::home;
 
-const HOME_LAT: f64 = -19.9006792;
-const HOME_LON: f64 = -43.9174041;
 const EYE_M: f64 = 1.5;
 const MAX_D_M: f64 = 15_000.0;
 const STEP_D_M: f64 = 50.0;
@@ -82,12 +81,12 @@ fn main() {
         .collect();
     println!("DEM rasters: {}", rasters.len());
 
-    let ground = height_at_any(&rasters, HOME_LAT, HOME_LON).expect("no DEM at home") as f64;
+    let ground = height_at_any(&rasters, home().lat_deg, home().lon_deg).expect("no DEM at home") as f64;
     let eye = ground + EYE_M;
     println!("home ground {ground:.1} m, eye {eye:.1} m");
 
     let m_lat = EARTH_RADIUS_M.to_radians();
-    let m_lon = m_lat * HOME_LAT.to_radians().cos();
+    let m_lon = m_lat * home().lat_deg.to_radians().cos();
     let steps = (MAX_D_M / STEP_D_M).round() as usize;
     let n_az = ((AZ_TO - AZ_FROM) / AZ_STEP).round() as usize + 1;
     let mut nodata = 0usize;
@@ -100,8 +99,8 @@ fn main() {
         let (mut crest, mut peak) = (empty, empty);
         for k in 1..=steps {
             let d = k as f64 * STEP_D_M;
-            let lat = HOME_LAT + d * cos / m_lat;
-            let lon = HOME_LON + d * sin / m_lon;
+            let lat = home().lat_deg + d * cos / m_lat;
+            let lon = home().lon_deg + d * sin / m_lon;
             let Some(h) = height_at_any(&rasters, lat, lon) else {
                 nodata += 1;
                 continue;
@@ -171,7 +170,7 @@ fn main() {
     println!("azimutes com crista >= {RIDGE_MIN_DEG}°: {visible} de {n_az}; distancia max da crista visivel: {:.2} km", max_visible_dist / 1000.0);
     println!("amostras sem DEM: {nodata}");
 
-    let (set_h, set_az) = sunset(HOME_LAT, HOME_LON, SUN_DAY_OF_YEAR, TZ_HOURS);
+    let (set_h, set_az) = sunset(home().lat_deg, home().lon_deg, SUN_DAY_OF_YEAR, TZ_HOURS);
     println!();
     println!("por do sol 15/11/2026 BH: ocaso {} (local), azimute {set_az:.1}°", hm(set_h));
 
@@ -201,7 +200,7 @@ fn points_stats(rasters: &[Raster], path: &str, m_lat: f64, m_lon: f64) {
     }
     let total = text.lines().count().max(1) as f64;
     let (clat, clon) = (clat / total, clon / total);
-    let (dx, dy) = ((clon - HOME_LON) * m_lon, (clat - HOME_LAT) * m_lat);
+    let (dx, dy) = ((clon - home().lon_deg) * m_lon, (clat - home().lat_deg) * m_lat);
     let dist = dx.hypot(dy);
     let az = dx.atan2(dy).to_degrees().rem_euclid(360.0);
     println!();

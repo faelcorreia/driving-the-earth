@@ -5,10 +5,6 @@
 
 use std::f64::consts::{PI, TAU};
 
-/// Latitude da casa (Rua São Mateus, 341, Sagrada Família, Belo Horizonte), graus.
-pub const HOME_LAT_DEG: f64 = -19.9006792;
-/// Longitude da casa, graus (leste positivo).
-pub const HOME_LON_DEG: f64 = -43.9174041;
 /// Fuso de Belo Horizonte, UTC-3 (sem horário de verão desde 2019), em segundos.
 pub const LOCAL_UTC_OFFSET_S: f64 = -3.0 * 3600.0;
 /// Altitude do centro do sol no nascer/pôr aparente (refração + semidiâmetro), graus.
@@ -96,11 +92,12 @@ fn sun_ecliptic_lon_rad(jd: f64) -> f64 {
     (l0 + c - 0.00569 - 0.00478 * omega.sin()).to_radians()
 }
 
-/// Converte ascensão reta e declinação (radianos) em azimute/altura para a casa.
+/// Converte ascensão reta e declinação (radianos) em azimute/altura para a posição de casa.
 fn horizontal(jd: f64, ra_rad: f64, dec_rad: f64) -> Horizontal {
-    let lat = HOME_LAT_DEG.to_radians();
+    let home = tilebake::home::home();
+    let lat = home.lat_deg.to_radians();
     let gmst_deg = (280.46061837 + 360.98564736629 * (jd - JD_J2000)).rem_euclid(360.0);
-    let ha = (gmst_deg + HOME_LON_DEG - ra_rad.to_degrees()).to_radians();
+    let ha = (gmst_deg + home.lon_deg - ra_rad.to_degrees()).to_radians();
     let sin_alt = lat.sin() * dec_rad.sin() + lat.cos() * dec_rad.cos() * ha.cos();
     // Azimute medido a partir do sul, para oeste; convertido para norte, sentido horário.
     let az_from_south = ha
