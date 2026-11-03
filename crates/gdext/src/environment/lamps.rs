@@ -13,6 +13,19 @@ pub fn delay_s(id: u64) -> f64 {
     stagger_delay_min(&id.to_string(), LAMP_STAGGER_MAX_MIN) * 60.0
 }
 
+/// Longest delay of a distant light after the street lamps come on, in game minutes.
+pub const FAR_DELAY_MAX_MIN: f64 = 12.0;
+
+/// Delay of a distant light, in game seconds (0 to `FAR_DELAY_MAX_MIN` minutes), from a hash of
+/// its index in `far_lights.bin` (splitmix64), so the distant lights come on over the whole span.
+pub fn far_delay_s(index: u64) -> f64 {
+    let mut z = index.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64 * FAR_DELAY_MAX_MIN * 60.0
+}
+
 /// Whether a lamp is lit at game time `now_s`, given the crossing time `on_since_s` (`None` when
 /// the street lamps are off) and the lamp's own delay in seconds.
 pub fn is_lit(now_s: f64, on_since_s: Option<f64>, delay: f64) -> bool {
@@ -50,5 +63,23 @@ mod tests {
         assert!(!is_lit(1000.0, Some(900.0), 120.0));
         assert!(is_lit(1020.0, Some(900.0), 120.0));
         assert!(is_lit(900.0, Some(900.0), 0.0));
+    }
+
+    #[test]
+    fn far_delays_stay_in_the_span_and_spread_over_it() {
+        let max = FAR_DELAY_MAX_MIN * 60.0;
+        let mut sum = 0.0;
+        let (mut lo, mut hi) = (f64::MAX, 0.0f64);
+        for i in 0..13_099u64 {
+            let d = far_delay_s(i);
+            assert_eq!(d, far_delay_s(i));
+            assert!((0.0..max).contains(&d), "delay {d} for {i}");
+            sum += d;
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        let mean = sum / 13_099.0;
+        assert!((mean - max / 2.0).abs() < 20.0, "mean {mean}");
+        assert!(lo < 60.0 && hi > max - 60.0, "span {lo}..{hi}");
     }
 }
