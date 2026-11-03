@@ -3,7 +3,11 @@
 use std::path::Path;
 use std::time::Instant;
 
+use std::collections::HashMap;
+
+use crate::geometry::TileGeometry;
 use crate::world::open_map;
+use crate::world::spawn::find_spawn;
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -36,3 +40,112 @@ fn baseline_casa() {
     println!("lamps per tile p50 {:.0} p90 {:.0} (total {})", pct(&mut lamps.clone(), 0.5), pct(&mut lamps.clone(), 0.9), lamps.iter().sum::<f64>());
     println!("tile_geometry ms p50 {:.2} p90 {:.2}", pct(&mut ms.clone(), 0.5), pct(&mut ms, 0.9));
 }
+
+/// Rendered terrain height at `p` (map meters) from the triangles of tile `key`'s terrain mesh.
+fn terrain_h(g: &TileGeometry, tm: f64, key: (i32, i32), p: [f64; 2]) -> f64 {
+    let v = &g.terrain.vertices;
+    let n = (v.len() as f64).sqrt().round() as usize;
+    let cell = tm / (n - 1) as f64;
+    let fx = ((p[0] - key.0 as f64 * tm) / cell).clamp(0.0, (n - 1) as f64 - 1e-9);
+    let fy = ((p[1] - key.1 as f64 * tm) / cell).clamp(0.0, (n - 1) as f64 - 1e-9);
+    let (j, i) = (fx.floor() as usize, fy.floor() as usize);
+    let (u, w) = (fx - j as f64, fy - i as f64);
+    let h = |r: usize, c: usize| v[r * n + c][1] as f64;
+    let (a, b, c, d) = (h(i, j), h(i, j + 1), h(i + 1, j), h(i + 1, j + 1));
+    // Same split as the mesh: (a, b, c) for u + w <= 1, else (d, b, c).
+    if u + w <= 1.0 {
+        a * (1.0 - u - w) + b * u + c * w
+    } else {
+        d * (u + w - 1.0) + b * (1.0 - w) + c * (1.0 - u)
+    }
+}
+
+/// Terrain height under `p` from the tile that owns it, `None` when no tile covers `p`.
+fn terrain_at(geo: &HashMap<(i32, i32), TileGeometry>, tm: f64, p: [f64; 2]) -> Option<f64> {
+    let key = ((p[0] / tm).floor() as i32, (p[1] / tm).floor() as i32);
+    geo.get(&key).map(|g| terrain_h(g, tm, key, p))
+}
+
+/// One road station: rendered axis and edge heights minus the rendered terrain under each.
+struct Station {
+    pos: [f64; 2],
+    d_axis: f64,
+    d_edge: [f64; 2],
+    /// Ribbon edge minus axis (what zl/zr add to the ribbon), per edge.
+    rib: [f64; 2],
+    /// Terrain under the edge minus terrain under the axis (the cross slope), per edge.
+    ter: [f64; 2],
+}
+
+fn summarize(name: &str, st: &[&Station]) {
+    if st.is_empty() {
+        println!("[{name}] no stations");
+        return;
+    }
+    let mut axis: Vec<f64> = st.iter().map(|s| s.d_axis).collect();
+    let edge: Vec<f64> = st.iter().flat_map(|s| s.d_edge).collect();
+    let mut rib: Vec<f64> = st.iter().flat_map(|s| s.rib.map(f64::abs)).collect();
+    let mut ter: Vec<f64> = st.iter().flat_map(|s| s.ter.map(f64::abs)).collect();
+    let mut no_lift: Vec<f64> = st.iter().map(|s| s.d_axis - 0.1).collect();
+    let over = |v: &[f64], t: f64| v.iter().filter(|x| **x > t).count();
+    println!("[{name}] stations {} | axis-terrain p50 {:+.3} p90 {:+.3} max {:+.3} (p90 w/o lift {:+.3})",
+        st.len(), pct(&mut axis.clone(), 0.5), pct(&mut axis.clone(), 0.9), pct(&mut axis.clone(), 1.0), pct(&mut no_lift, 0.9));
+    println!("   edge-terrain p50 {:+.3} p90 {:+.3} max {:+.3} | >0.25m {:.1}% >0.6m {:.1}%",
+        pct(&mut edge.clone(), 0.5), pct(&mut edge.clone(), 0.9), pct(&mut edge.clone(), 1.0),
+        100.0 * over(&edge, 0.25) as f64 / edge.len() as f64, 100.0 * over(&edge, 0.6) as f64 / edge.len() as f64);
+    println!("   |ribbon edge - axis| p50 {:.3} p90 {:.3} | |terrain edge - axis| p50 {:.3} p90 {:.3}",
+        pct(&mut rib.clone(), 0.5), pct(&mut rib, 0.9), pct(&mut ter.clone(), 0.5), pct(&mut ter, 0.9));
+    let mut worst: Vec<&&Station> = st.iter().collect();
+    worst.sort_by(|a, b| b.d_edge[0].max(b.d_edge[1]).total_cmp(&a.d_edge[0].max(a.d_edge[1])));
+    for s in worst.iter().take(5) {
+        println!("   worst at ({:.1},{:.1}) axis {:+.3} edges {:+.3}/{:+.3} rib {:+.3}/{:+.3} terr {:+.3}/{:+.3}",
+            s.pos[0], s.pos[1], s.d_axis, s.d_edge[0], s.d_edge[1], s.rib[0], s.rib[1], s.ter[0], s.ter[1]);
+    }
+}
+
+#[test]
+#[ignore]
+fn road_clearance() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let id = std::env::var("MEASURE_MAP").unwrap_or_else(|_| "casa".into());
+    let index = open_map(&root, &id).expect("open map");
+    let tm = index.meta.tile_size_m;
+    let mut geo: HashMap<(i32, i32), TileGeometry> = HashMap::new();
+    for &(x, y) in index.coords() {
+        geo.insert((x, y), index.tile_geometry(x, y).expect("tile_geometry"));
+    }
+    let spawn = find_spawn(&index, 500.0).expect("spawn").map(|s| [s.x, s.y]).unwrap_or([0.0, 0.0]);
+    let mut all: Vec<Station> = Vec::new();
+    let mut missing = 0usize;
+    for g in geo.values() {
+        let v = &g.roads.vertices;
+        // Vertices come in (left, center, right) triples per station; y is -z in the world.
+        let at = |k: usize| -> ([f64; 2], f64) {
+            let q = v[k];
+            ([q[0] as f64, -(q[2] as f64)], q[1] as f64)
+        };
+        for s in 0..v.len() / 3 {
+            let (pl, hl) = at(3 * s);
+            let (pc, hc) = at(3 * s + 1);
+            let (pr, hr) = at(3 * s + 2);
+            let (Some(tl), Some(tc), Some(tr)) = (terrain_at(&geo, tm, pl), terrain_at(&geo, tm, pc), terrain_at(&geo, tm, pr)) else {
+                missing += 1;
+                continue;
+            };
+            all.push(Station {
+                pos: pc,
+                d_axis: hc - tc,
+                d_edge: [hl - tl, hr - tr],
+                rib: [hl - hc, hr - hc],
+                ter: [tl - tc, tr - tc],
+            });
+        }
+    }
+    println!("map {id}: {} road stations, {missing} without terrain", all.len());
+    let dist = |s: &Station, c: [f64; 2]| (s.pos[0] - c[0]).hypot(s.pos[1] - c[1]);
+    for (name, c, r) in [("casa 300m", [0.0, 0.0], 300.0), ("casa 500m", [0.0, 0.0], 500.0), ("spawn 150m", spawn, 150.0)] {
+        let sel: Vec<&Station> = all.iter().filter(|s| dist(s, c) <= r).collect();
+        summarize(name, &sel);
+    }
+}
+
