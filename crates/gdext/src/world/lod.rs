@@ -46,9 +46,18 @@ pub struct Ring {
 /// Inner to outer: 25 m cells to 2 km, 50 m to 5 km, 100 m to 10 km. Half-sizes are multiples of
 /// the steps (and the 250 m tile), so the rings meet on grid lines.
 pub const RINGS: [Ring; 3] = [
-    Ring { half_m: 2000.0, step_m: 25.0 },
-    Ring { half_m: 5000.0, step_m: 50.0 },
-    Ring { half_m: 10000.0, step_m: 100.0 },
+    Ring {
+        half_m: 2000.0,
+        step_m: 25.0,
+    },
+    Ring {
+        half_m: 5000.0,
+        step_m: 50.0,
+    },
+    Ring {
+        half_m: 10000.0,
+        step_m: 100.0,
+    },
 ];
 /// The windows are recentered once the car is this far from their center, in meters
 /// (a quarter of the outer half-size).
@@ -79,12 +88,15 @@ pub fn build_ring(
     let m = n + 1;
     let x_at = |i: usize| center[0] - ring.half_m + i as f64 * ring.step_m;
     let y_at = |j: usize| center[1] - ring.half_m + j as f64 * ring.step_m;
-    let h: Vec<f32> = (0..m * m).map(|k| height(x_at(k % m), y_at(k / m))).collect();
+    let h: Vec<f32> = (0..m * m)
+        .map(|k| height(x_at(k % m), y_at(k / m)))
+        .collect();
 
     // Cells [inner_lo, inner_hi) on each axis are the inner window.
     let inner_lo = ((ring.half_m - inner_half_m) / ring.step_m).round() as usize;
     let inner_hi = n - inner_lo;
-    let inside_inner = |i: usize, j: usize| (inner_lo..inner_hi).contains(&i) && (inner_lo..inner_hi).contains(&j);
+    let inside_inner =
+        |i: usize, j: usize| (inner_lo..inner_hi).contains(&i) && (inner_lo..inner_hi).contains(&j);
     let present: Vec<bool> = (0..n * n)
         .map(|c| {
             let (i, j) = (c % n, c / n);
@@ -96,13 +108,25 @@ pub fn build_ring(
             if loaded.contains(&((xc / tile_m).floor() as i32, (yc / tile_m).floor() as i32)) {
                 return false;
             }
-            [j * m + i, j * m + i + 1, (j + 1) * m + i, (j + 1) * m + i + 1]
-                .iter()
-                .all(|&k| !h[k].is_nan())
+            [
+                j * m + i,
+                j * m + i + 1,
+                (j + 1) * m + i,
+                (j + 1) * m + i + 1,
+            ]
+            .iter()
+            .all(|&k| !h[k].is_nan())
         })
         .collect();
 
-    let mut mesh = MeshData { vertices: Vec::new(), normals: Vec::new(), colors: Vec::new(), uvs: Vec::new(), uv2: Vec::new(), indices: Vec::new() };
+    let mut mesh = MeshData {
+        vertices: Vec::new(),
+        normals: Vec::new(),
+        colors: Vec::new(),
+        uvs: Vec::new(),
+        uv2: Vec::new(),
+        indices: Vec::new(),
+    };
     for k in 0..m * m {
         let (i, j) = (k % m, k / m);
         let y = if h[k].is_nan() { 0.0 } else { h[k] };
@@ -111,7 +135,11 @@ pub fn build_ring(
     }
 
     let present_at = |i: isize, j: isize| {
-        i >= 0 && j >= 0 && (i as usize) < n && (j as usize) < n && present[j as usize * n + i as usize]
+        i >= 0
+            && j >= 0
+            && (i as usize) < n
+            && (j as usize) < n
+            && present[j as usize * n + i as usize]
     };
     for j in 0..n {
         for i in 0..n {
@@ -170,7 +198,9 @@ fn normal(h: &[f32], m: usize, i: usize, j: usize, step: f64) -> [f32; 3] {
     let (w, e) = (i.saturating_sub(1), (i + 1).min(m - 1));
     let (s, nn) = (j.saturating_sub(1), (j + 1).min(m - 1));
     let at = |a: usize, b: usize| h[b * m + a];
-    let finite = [at(w, j), at(e, j), at(i, s), at(i, nn)].iter().all(|v| v.is_finite());
+    let finite = [at(w, j), at(e, j), at(i, s), at(i, nn)]
+        .iter()
+        .all(|v| v.is_finite());
     let (dh_e, dh_n) = if finite {
         (
             (at(e, j) - at(w, j)) / ((e - w) as f64 * step) as f32,
@@ -187,10 +217,18 @@ fn normal(h: &[f32], m: usize, i: usize, j: usize, step: f64) -> [f32; 3] {
 /// Adds the triangle, with its winding chosen so that its front faces `want`. Godot front faces
 /// are clockwise seen from their normal, so the front normal is `-(b - a) x (c - a)`.
 fn push_facing(mesh: &mut MeshData, a: u32, b: u32, c: u32, want: [f32; 3]) {
-    let (pa, pb, pc) = (mesh.vertices[a as usize], mesh.vertices[b as usize], mesh.vertices[c as usize]);
+    let (pa, pb, pc) = (
+        mesh.vertices[a as usize],
+        mesh.vertices[b as usize],
+        mesh.vertices[c as usize],
+    );
     let u = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
     let v = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-    let cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    let cross = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
     let front = [-cross[0], -cross[1], -cross[2]];
     if front[0] * want[0] + front[1] * want[1] + front[2] * want[2] >= 0.0 {
         mesh.indices.extend([a, b, c]);
@@ -265,7 +303,12 @@ pub struct TerrainLod {
 
 impl TerrainLod {
     /// Starts the loader thread, which reads the Copernicus rasters of `<cache_root>/<id>/raw/copernicus`.
-    pub fn start(cache_root: &Path, id: &str, meta: &MapMeta, material: Gd<StandardMaterial3D>) -> Self {
+    pub fn start(
+        cache_root: &Path,
+        id: &str,
+        meta: &MapMeta,
+        material: Gd<StandardMaterial3D>,
+    ) -> Self {
         let dir = cache_root.join(id).join("raw").join("copernicus");
         let grid = MapGrid::from_meta(meta);
         let tile_m = meta.tile_size_m;
@@ -278,7 +321,10 @@ impl TerrainLod {
                 Ok(rasters) => rasters,
                 Err(_) if worker_cancel.load(Ordering::Relaxed) => return,
                 Err(e) => {
-                    let _ = res_tx.send(Err(format!("cannot read DEM for terrain LOD in {}: {e}", dir.display())));
+                    let _ = res_tx.send(Err(format!(
+                        "cannot read DEM for terrain LOD in {}: {e}",
+                        dir.display()
+                    )));
                     return;
                 }
             };
@@ -296,7 +342,10 @@ impl TerrainLod {
                     .filter(|m| !m.is_empty())
                     .map(Surface::from_mesh)
                     .collect();
-                let built = Built { surfaces, build_ms: t0.elapsed().as_secs_f64() * 1000.0 };
+                let built = Built {
+                    surfaces,
+                    build_ms: t0.elapsed().as_secs_f64() * 1000.0,
+                };
                 if res_tx.send(Ok(built)).is_err() {
                     break;
                 }
@@ -319,7 +368,11 @@ impl TerrainLod {
     /// Call once per frame with the car position and the loaded tiles. Requests a new build when
     /// the tiles or the window change, and returns the node of a finished build (the caller adds
     /// it and frees the previous one).
-    pub fn update(&mut self, car: [f64; 2], loaded: &HashSet<(i32, i32)>) -> Option<Gd<MeshInstance3D>> {
+    pub fn update(
+        &mut self,
+        car: [f64; 2],
+        loaded: &HashSet<(i32, i32)>,
+    ) -> Option<Gd<MeshInstance3D>> {
         let mut ready = None;
         match self.results.try_recv() {
             Ok(Ok(built)) => {
@@ -362,8 +415,14 @@ impl TerrainLod {
                 self.center = Some(snap(car));
             }
             self.hole = hole.clone();
-            let job = Job { center: self.center.unwrap_or(car), loaded: loaded.clone() };
-            let sent = self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok());
+            let job = Job {
+                center: self.center.unwrap_or(car),
+                loaded: loaded.clone(),
+            };
+            let sent = self
+                .jobs
+                .as_ref()
+                .is_some_and(|jobs| jobs.send(job).is_ok());
             if sent {
                 self.in_flight = true;
             } else {
@@ -389,7 +448,10 @@ impl Drop for TerrainLod {
 /// Snaps a point to the tile lattice (250 m, a multiple of every ring step).
 fn snap(p: [f64; 2]) -> [f64; 2] {
     const LATTICE_M: f64 = 250.0;
-    [(p[0] / LATTICE_M).round() * LATTICE_M, (p[1] / LATTICE_M).round() * LATTICE_M]
+    [
+        (p[0] / LATTICE_M).round() * LATTICE_M,
+        (p[1] / LATTICE_M).round() * LATTICE_M,
+    ]
 }
 
 /// Reads and smooths every GeoTIFF in `dir`. Stops with `Interrupted` once `cancel` is set.
@@ -405,7 +467,10 @@ fn load_rasters(dir: &Path, cancel: &AtomicBool) -> io::Result<Vec<Raster>> {
         }
     }
     if rasters.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "no .tif in the copernicus folder"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no .tif in the copernicus folder",
+        ));
     }
     Ok(rasters)
 }
@@ -428,7 +493,8 @@ fn build_node(surfaces: &[Surface], material: &Gd<StandardMaterial3D>) -> Gd<Mes
     let mut node = MeshInstance3D::new_alloc();
     node.set_mesh(&mesh);
     node.set_material_override(&material.clone().upcast::<Material>());
-    node.upcast_mut::<GeometryInstance3D>().set_cast_shadows_setting(ShadowCastingSetting::OFF);
+    node.upcast_mut::<GeometryInstance3D>()
+        .set_cast_shadows_setting(ShadowCastingSetting::OFF);
     node
 }
 
@@ -475,7 +541,13 @@ mod tests {
     fn triangles(mesh: &MeshData) -> Vec<[[f32; 3]; 3]> {
         mesh.indices
             .chunks(3)
-            .map(|t| [mesh.vertices[t[0] as usize], mesh.vertices[t[1] as usize], mesh.vertices[t[2] as usize]])
+            .map(|t| {
+                [
+                    mesh.vertices[t[0] as usize],
+                    mesh.vertices[t[1] as usize],
+                    mesh.vertices[t[2] as usize],
+                ]
+            })
             .collect()
     }
 
@@ -496,7 +568,10 @@ mod tests {
 
     #[test]
     fn full_ring_has_two_triangles_per_cell_and_skirts_on_the_edge() {
-        let ring = Ring { half_m: 100.0, step_m: 25.0 };
+        let ring = Ring {
+            half_m: 100.0,
+            step_m: 25.0,
+        };
         let mesh = build_ring(ring, 0.0, [0.0, 0.0], TILE, &HashSet::new(), &flat);
         let n = 8; // 200 m / 25 m
         assert_eq!(mesh.indices.len() / 3, 2 * n * n + 2 * 4 * n);
@@ -504,7 +579,10 @@ mod tests {
 
     #[test]
     fn loaded_tile_is_left_out_with_a_skirt_around_it() {
-        let ring = Ring { half_m: 2000.0, step_m: 25.0 };
+        let ring = Ring {
+            half_m: 2000.0,
+            step_m: 25.0,
+        };
         let loaded: HashSet<(i32, i32)> = [(0, 0)].into_iter().collect();
         let mesh = build_ring(ring, 0.0, [0.0, 0.0], TILE, &loaded, &flat);
         // Tile (0, 0) is 250 m, 10 cells of 25 m per side: 100 cells out, 40 new skirt edges.
@@ -514,7 +592,10 @@ mod tests {
 
     #[test]
     fn inner_window_is_left_out() {
-        let outer = Ring { half_m: 200.0, step_m: 50.0 };
+        let outer = Ring {
+            half_m: 200.0,
+            step_m: 50.0,
+        };
         let mesh = build_ring(outer, 100.0, [0.0, 0.0], TILE, &HashSet::new(), &flat);
         // 8x8 cells minus the 4x4 inside the inner window, plus skirts on both boundaries.
         assert_eq!(mesh.indices.len() / 3, 2 * (64 - 16) + 2 * (4 * 8 + 4 * 4));
@@ -522,10 +603,16 @@ mod tests {
 
     #[test]
     fn unknown_heights_leave_cells_out() {
-        let ring = Ring { half_m: 100.0, step_m: 50.0 };
+        let ring = Ring {
+            half_m: 100.0,
+            step_m: 50.0,
+        };
         let hole = |x: f64, _: f64| if x > 0.0 { f32::NAN } else { 0.0 };
         let mesh = build_ring(ring, 0.0, [0.0, 0.0], TILE, &HashSet::new(), &hole);
-        assert!(mesh.indices.iter().all(|&i| !mesh.vertices[i as usize][1].is_nan()));
+        assert!(mesh
+            .indices
+            .iter()
+            .all(|&i| !mesh.vertices[i as usize][1].is_nan()));
         // Corners at x <= 0 are known: two columns of cells (x in [-100, 0]), four rows. That is
         // 8 cells, and 12 skirt edges around them (4 west, 4 east, 2 south, 2 north).
         assert_eq!(mesh.indices.len() / 3, 2 * 8 + 2 * 12);
@@ -533,7 +620,10 @@ mod tests {
 
     #[test]
     fn front_faces_up_on_flat_ground() {
-        let ring = Ring { half_m: 100.0, step_m: 25.0 };
+        let ring = Ring {
+            half_m: 100.0,
+            step_m: 25.0,
+        };
         let mesh = build_ring(ring, 0.0, [0.0, 0.0], TILE, &HashSet::new(), &flat);
         for t in triangles(&mesh) {
             let (a, b, c) = (t[0], t[1], t[2]);
@@ -549,7 +639,10 @@ mod tests {
     fn normals_point_away_from_a_rise_and_up() {
         // Height rises to the east: the normal leans west (negative x), and is always up.
         let slope = |x: f64, _: f64| (x * 0.1) as f32;
-        let ring = Ring { half_m: 100.0, step_m: 25.0 };
+        let ring = Ring {
+            half_m: 100.0,
+            step_m: 25.0,
+        };
         let mesh = build_ring(ring, 0.0, [0.0, 0.0], TILE, &HashSet::new(), &slope);
         let mid = mesh.normals[2 * 9 + 2]; // interior corner
         assert!(mid[0] < 0.0 && mid[1] > 0.0);

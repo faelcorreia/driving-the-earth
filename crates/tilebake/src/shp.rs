@@ -44,7 +44,9 @@ pub fn dbf_numbers(path: &Path, name: &str) -> io::Result<Vec<f64>> {
         let d = b
             .get(pos..pos + 32)
             .ok_or_else(|| bad("dbf: truncated field table"))?;
-        let fname = String::from_utf8_lossy(&d[..11]).trim_end_matches('\0').to_string();
+        let fname = String::from_utf8_lossy(&d[..11])
+            .trim_end_matches('\0')
+            .to_string();
         let flen = d[16] as usize;
         if fname == name {
             field = Some((off, flen));
@@ -60,7 +62,12 @@ pub fn dbf_numbers(path: &Path, name: &str) -> io::Result<Vec<f64>> {
             .get(start..start + flen)
             .ok_or_else(|| bad("dbf: truncated record"))?;
         let text = String::from_utf8_lossy(s);
-        out.push(text.trim().replace(',', ".").parse::<f64>().unwrap_or(f64::NAN));
+        out.push(
+            text.trim()
+                .replace(',', ".")
+                .parse::<f64>()
+                .unwrap_or(f64::NAN),
+        );
     }
     Ok(out)
 }
@@ -89,10 +96,13 @@ pub fn read_contours(
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e),
         }
-        let len = usize::try_from(be_i32(&rec_hdr, 4)?).map_err(|_| bad("shp: bad record length"))? * 2;
+        let len =
+            usize::try_from(be_i32(&rec_hdr, 4)?).map_err(|_| bad("shp: bad record length"))? * 2;
         buf.resize(len, 0);
         f.read_exact(&mut buf)?;
-        let zi = *z.get(rec).ok_or_else(|| bad("shp: more records than dbf rows"))?;
+        let zi = *z
+            .get(rec)
+            .ok_or_else(|| bad("shp: more records than dbf rows"))?;
         rec += 1;
         let stype = le_i32(&buf, 0)?;
         if stype == 0 {
@@ -108,9 +118,11 @@ pub fn read_contours(
             return Err(bad("shp: truncated record"));
         }
         for p in 0..nparts {
-            let start = usize::try_from(le_i32(&buf, 44 + 4 * p)?).map_err(|_| bad("shp: bad part index"))?;
+            let start = usize::try_from(le_i32(&buf, 44 + 4 * p)?)
+                .map_err(|_| bad("shp: bad part index"))?;
             let end = if p + 1 < nparts {
-                usize::try_from(le_i32(&buf, 44 + 4 * (p + 1))?).map_err(|_| bad("shp: bad part index"))?
+                usize::try_from(le_i32(&buf, 44 + 4 * (p + 1))?)
+                    .map_err(|_| bad("shp: bad part index"))?
             } else {
                 npts
             };

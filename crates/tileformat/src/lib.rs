@@ -4,9 +4,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub mod units;
-pub mod terrain;
 pub mod far_lights;
+pub mod terrain;
+pub mod units;
 
 /// Ground classes of `Tile::ground` (one byte per cell of `units::GROUND_CELL_M`).
 pub const GROUND_GRASS: u8 = 0;
@@ -104,7 +104,13 @@ pub struct Polygon {
 impl Polygon {
     /// A real building from OSM: no generated data.
     pub fn real(points: Vec<[f64; 2]>) -> Polygon {
-        Polygon { points, generated: false, levels: 0, color_idx: 0, tint: 0 }
+        Polygon {
+            points,
+            generated: false,
+            levels: 0,
+            color_idx: 0,
+            tint: 0,
+        }
     }
 }
 
@@ -127,7 +133,9 @@ mod ground_rle {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let flat: Vec<u32> = Vec::deserialize(d)?;
         if flat.len() % 2 != 0 {
-            return Err(serde::de::Error::custom("ground runs must come in (value, count) pairs"));
+            return Err(serde::de::Error::custom(
+                "ground runs must come in (value, count) pairs",
+            ));
         }
         let mut out = Vec::new();
         for pair in flat.chunks(2) {
@@ -252,7 +260,18 @@ mod ground_rle_tests {
         ground[7] = GROUND_CONCRETE;
         ground[8] = GROUND_CONCRETE;
         ground[2499] = GROUND_WATER;
-        let tile = Tile { x: 1, y: -2, height: HeightGrid { cols: 1, rows: 1, values: vec![0.0] }, roads: vec![], buildings: vec![], ground: ground.clone() };
+        let tile = Tile {
+            x: 1,
+            y: -2,
+            height: HeightGrid {
+                cols: 1,
+                rows: 1,
+                values: vec![0.0],
+            },
+            roads: vec![],
+            buildings: vec![],
+            ground: ground.clone(),
+        };
         let json = serde_json::to_string(&tile).unwrap();
         // Runs: grass 7, concrete 2, grass 2490, water 1 -> 8 numbers, far below 2500 cells.
         assert!(json.contains("[0,7,1,2,0,2490,4,1]"), "{json}");

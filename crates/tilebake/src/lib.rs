@@ -92,7 +92,9 @@ fn radius_from_env() -> io::Result<Option<f64>> {
             if r > 0.0 && r.is_finite() {
                 Ok(Some(r))
             } else {
-                Err(other_err(format!("{RADIUS_ENV} must be a positive number of meters")))
+                Err(other_err(format!(
+                    "{RADIUS_ENV} must be a positive number of meters"
+                )))
             }
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
@@ -163,7 +165,10 @@ pub fn download_osm(cache_root: &Path, id: &str, name: &str, address: &str) -> i
             created_unix,
             complete: false,
         };
-        fs::write(&meta_path, serde_json::to_string_pretty(&meta).map_err(other_err)?)?;
+        fs::write(
+            &meta_path,
+            serde_json::to_string_pretty(&meta).map_err(other_err)?,
+        )?;
         (meta, false)
     };
 

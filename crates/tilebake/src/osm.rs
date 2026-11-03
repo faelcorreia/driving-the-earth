@@ -86,7 +86,10 @@ impl Downloader<'_> {
         for attempt in 1..=self.max_attempts {
             match self.client.post(query) {
                 Ok(body) => return Ok((body, retries)),
-                Err(e) if matches!(e.status, Some(429 | 502 | 503 | 504)) && attempt < self.max_attempts => {
+                Err(e)
+                    if matches!(e.status, Some(429 | 502 | 503 | 504))
+                        && attempt < self.max_attempts =>
+                {
                     eprintln!(
                         "tilebake: Overpass answered {} (attempt {attempt}/{}), retrying in {delay:?}",
                         e.message, self.max_attempts
@@ -221,7 +224,11 @@ pub fn download_blocks(
 }
 
 /// Downloads the OSM ways of the blocks of `meta` that are not in `dir` yet. Returns `(blocks, downloaded)`.
-pub fn download_missing_blocks(dir: &Path, meta: &MapMeta, dl: &Downloader) -> io::Result<(usize, usize)> {
+pub fn download_missing_blocks(
+    dir: &Path,
+    meta: &MapMeta,
+    dl: &Downloader,
+) -> io::Result<(usize, usize)> {
     let s = download_blocks(dir, meta, dl, "osm", &overpass_query, &check_elements)?;
     Ok((s.blocks, s.downloaded))
 }
@@ -233,7 +240,10 @@ pub fn visit_ways(dir: &Path, meta: &MapMeta, mut f: impl FnMut(&Value)) -> io::
     for (bx, by) in blocks_for(meta) {
         let path = dir.join(block_file_name(bx, by));
         let text = fs::read_to_string(&path).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: {e} (download the blocks first)", path.display()))
+            io::Error::new(
+                e.kind(),
+                format!("{}: {e} (download the blocks first)", path.display()),
+            )
         })?;
         let v: Value = serde_json::from_str(&text).map_err(other_err)?;
         let elements = v["elements"]
@@ -288,15 +298,20 @@ mod tests {
     impl OverpassClient for FakeClient {
         fn post(&self, query: &str) -> Result<String, HttpError> {
             self.queries.borrow_mut().push(query.to_string());
-            self.answers
-                .borrow_mut()
-                .pop()
-                .unwrap_or_else(|| Err(HttpError { status: None, message: "no more answers".into() }))
+            self.answers.borrow_mut().pop().unwrap_or_else(|| {
+                Err(HttpError {
+                    status: None,
+                    message: "no more answers".into(),
+                })
+            })
         }
     }
 
     fn http(status: u16) -> Result<String, HttpError> {
-        Err(HttpError { status: Some(status), message: format!("HTTP {status}") })
+        Err(HttpError {
+            status: Some(status),
+            message: format!("HTTP {status}"),
+        })
     }
 
     fn body(ids: &[u64]) -> String {
@@ -307,7 +322,10 @@ mod tests {
         format!(r#"{{"elements":[{}]}}"#, els.join(","))
     }
 
-    fn downloader<'a>(client: &'a dyn OverpassClient, sleep: &'a dyn Fn(Duration)) -> Downloader<'a> {
+    fn downloader<'a>(
+        client: &'a dyn OverpassClient,
+        sleep: &'a dyn Fn(Duration),
+    ) -> Downloader<'a> {
         Downloader {
             client,
             sleep,
@@ -318,7 +336,8 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("tilebake-osm-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("tilebake-osm-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -363,14 +382,19 @@ mod tests {
         dl.max_attempts = 5;
         assert_eq!(dl.post_with_retry("q").unwrap(), "ok");
         assert_eq!(client.queries.borrow().len(), 3);
-        assert_eq!(*waits.borrow(), vec![Duration::from_secs(5), Duration::from_secs(10)]);
+        assert_eq!(
+            *waits.borrow(),
+            vec![Duration::from_secs(5), Duration::from_secs(10)]
+        );
     }
 
     #[test]
     fn retry_gives_up_after_max_attempts() {
         let client = FakeClient::new(vec![http(429), http(429), http(429)]);
         let sleep = |_: Duration| {};
-        let err = downloader(&client, &sleep).post_with_retry("q").unwrap_err();
+        let err = downloader(&client, &sleep)
+            .post_with_retry("q")
+            .unwrap_err();
         assert!(err.to_string().contains("429"), "{err}");
         assert_eq!(client.queries.borrow().len(), 3);
     }
@@ -404,13 +428,16 @@ mod tests {
         let client = FakeClient::new(vec![Ok(body(&[2])), Ok(body(&[3])), Ok(body(&[4]))]);
         let waits = RefCell::new(Vec::new());
         let sleep = |d: Duration| waits.borrow_mut().push(d);
-        let (blocks, downloaded) = download_missing_blocks(&dir, &m, &downloader(&client, &sleep)).unwrap();
+        let (blocks, downloaded) =
+            download_missing_blocks(&dir, &m, &downloader(&client, &sleep)).unwrap();
         assert_eq!((blocks, downloaded), (4, 3));
         assert_eq!(client.queries.borrow().len(), 3);
         // Between two requests the wait is the gap minus the time already elapsed: never 0.
         let w = waits.borrow();
         assert_eq!(w.len(), 2);
-        assert!(w.iter().all(|d| *d > Duration::from_millis(900) && *d <= Duration::from_secs(1)));
+        assert!(w
+            .iter()
+            .all(|d| *d > Duration::from_millis(900) && *d <= Duration::from_secs(1)));
         assert!(!dir.join(format!("{}.part", block_file_name(0, 0))).exists());
         // Second run: nothing left to download.
         let client2 = FakeClient::new(vec![]);
@@ -457,7 +484,10 @@ mod tests {
         let dir = temp_dir("missing");
         fs::create_dir_all(&dir).unwrap();
         let err = visit_ways(&dir, &meta(1000.0), |_| {}).unwrap_err();
-        assert!(err.to_string().contains("download the blocks first"), "{err}");
+        assert!(
+            err.to_string().contains("download the blocks first"),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -88,7 +88,11 @@ pub fn gauss(values: &[f64], s: &[f64], sigma: f64) -> Vec<f64> {
         }
         // Weighted LS of v = a + b d; the centre value is a. Degenerate (one sample): the mean.
         let det = w0 * w2 - w1 * w1;
-        let a = if det.abs() > 1e-12 * w0 * w0 { (w2 * v0 - w1 * v1) / det } else { v0 / w0 };
+        let a = if det.abs() > 1e-12 * w0 * w0 {
+            (w2 * v0 - w1 * v1) / det
+        } else {
+            v0 / w0
+        };
         out.push(a);
     }
     out
@@ -120,7 +124,10 @@ fn cap_to(z: &mut [f64], t: &[f64]) {
 
 /// First pass: the way densified and smoothed in arc length over the final terrain.
 /// `terrain` gives the final terrain height at a point (None if unknown: no profile).
-pub fn smooth_way(points: &[[f64; 2]], terrain: &dyn Fn([f64; 2]) -> Option<f64>) -> Option<SmoothWay> {
+pub fn smooth_way(
+    points: &[[f64; 2]],
+    terrain: &dyn Fn([f64; 2]) -> Option<f64>,
+) -> Option<SmoothWay> {
     let pts = densify(points);
     if pts.len() < 2 {
         return None;
@@ -198,7 +205,11 @@ pub fn node_heights(
     acc.into_iter()
         .map(|(k, nd)| {
             let want = field(nd.p, terrain).unwrap_or(nd.t_sum / nd.n as f64);
-            let h = if nd.lo <= nd.hi { want.clamp(nd.lo, nd.hi) } else { 0.5 * (nd.lo + nd.hi) };
+            let h = if nd.lo <= nd.hi {
+                want.clamp(nd.lo, nd.hi)
+            } else {
+                0.5 * (nd.lo + nd.hi)
+            };
             (k, h)
         })
         .collect()
@@ -286,7 +297,9 @@ pub fn edge_heights(
             let right = field([p[0] + r[0] * half_w, p[1] + r[1] * half_w], terrain);
             let left = field([p[0] - r[0] * half_w, p[1] - r[1] * half_w], terrain);
             match (right, left) {
-                (Some(tr), Some(tl)) => ((tr - tl) / (2.0 * half_w)).clamp(-SLOPE_LIMIT, SLOPE_LIMIT),
+                (Some(tr), Some(tl)) => {
+                    ((tr - tl) / (2.0 * half_w)).clamp(-SLOPE_LIMIT, SLOPE_LIMIT)
+                }
                 _ => 0.0,
             }
         } else {
@@ -342,7 +355,11 @@ pub fn pinned_nodes(ways: &[Vec<[f64; 2]>]) -> HashSet<(i64, i64)> {
             *count.entry(node_key(*p)).or_insert(0) += 1;
         }
     }
-    count.into_iter().filter(|(_, c)| *c >= 2).map(|(k, _)| k).collect()
+    count
+        .into_iter()
+        .filter(|(_, c)| *c >= 2)
+        .map(|(k, _)| k)
+        .collect()
 }
 
 #[cfg(test)]
@@ -354,20 +371,27 @@ mod tests {
         let d = densify(&[[0.0, 0.0], [10.0, 0.0], [10.0, 1.0]]);
         assert!(d.contains(&[10.0, 0.0]) && d[0] == [0.0, 0.0] && d.last() == Some(&[10.0, 1.0]));
         for w in d.windows(2) {
-            assert!(((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt() <= STEP_M + 1e-9);
+            assert!(
+                ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt() <= STEP_M + 1e-9
+            );
         }
     }
 
     #[test]
     fn smoothing_removes_a_zigzag_and_keeps_a_ramp() {
         let s: Vec<f64> = (0..200).map(|i| i as f64 * 2.5).collect();
-        let zig: Vec<f64> = (0..200).map(|i| if i % 2 == 0 { 0.25 } else { -0.25 }).collect();
+        let zig: Vec<f64> = (0..200)
+            .map(|i| if i % 2 == 0 { 0.25 } else { -0.25 })
+            .collect();
         let out = gauss(&zig, &s, SIGMA_M);
         assert!(out[100].abs() < 0.01, "{}", out[100]);
         let ramp: Vec<f64> = s.iter().map(|x| 0.05 * x).collect();
         let out = gauss(&ramp, &s, SIGMA_M);
         assert!((out[100] - ramp[100]).abs() < 1e-6);
-        assert!((out[0] - ramp[0]).abs() < 1e-6 && (out[199] - ramp[199]).abs() < 1e-6, "ends");
+        assert!(
+            (out[0] - ramp[0]).abs() < 1e-6 && (out[199] - ramp[199]).abs() < 1e-6,
+            "ends"
+        );
     }
 
     #[test]
@@ -396,7 +420,10 @@ mod tests {
         let spike = |p: [f64; 2]| Some(10.0 + if p == [50.0, 0.0] { 2.0 } else { 0.0 });
         let a = smooth_way(&[[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]], &spike).unwrap();
         let b = smooth_way(&[[50.0, 0.0], [50.0, 50.0]], &spike).unwrap();
-        let pins = pinned_nodes(&[vec![[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]], vec![[50.0, 0.0], [50.0, 50.0]]]);
+        let pins = pinned_nodes(&[
+            vec![[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]],
+            vec![[50.0, 0.0], [50.0, 50.0]],
+        ]);
         let h = node_heights(&[Some(a), Some(b)], &pins, &spike);
         let node = node_key([50.0, 0.0]);
         assert!(h[&node] < 10.6, "{}", h[&node]);
@@ -409,7 +436,9 @@ mod tests {
     /// Two ways meeting at (50, 0): one along x, one north. A bump next to the north way makes
     /// their smoothed terrain differ at the node.
     fn junction_case() -> (Vec<SmoothWay>, HashMap<(i64, i64), f64>, (i64, i64)) {
-        let bump = |p: [f64; 2]| Some(10.0 + 1.5 * (-((p[0] - 50.0).powi(2) + (p[1] - 25.0).powi(2)) / 200.0).exp());
+        let bump = |p: [f64; 2]| {
+            Some(10.0 + 1.5 * (-((p[0] - 50.0).powi(2) + (p[1] - 25.0).powi(2)) / 200.0).exp())
+        };
         let a = vec![[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]];
         let b = vec![[50.0, 0.0], [50.0, 50.0]];
         let pins = pinned_nodes(&[a.clone(), b.clone()]);
@@ -426,8 +455,14 @@ mod tests {
         for sw in &ways {
             let z = pin_way(sw, &h);
             let i = sw.pts.iter().position(|&p| node_key(p) == node).unwrap();
-            assert!((z[i] as f64 - h[&node]).abs() < 1e-5, "pin is the shared height");
-            assert!(h[&node] >= sw.t[i] - FLOOR_BELOW_M - 1e-9 && h[&node] <= sw.t[i] + CAP_ABOVE_M + 1e-9);
+            assert!(
+                (z[i] as f64 - h[&node]).abs() < 1e-5,
+                "pin is the shared height"
+            );
+            assert!(
+                h[&node] >= sw.t[i] - FLOOR_BELOW_M - 1e-9
+                    && h[&node] <= sw.t[i] + CAP_ABOVE_M + 1e-9
+            );
             zs.push(z[i]);
         }
         assert!(zs.windows(2).all(|w| w[0] == w[1]), "{zs:?}");
@@ -439,13 +474,25 @@ mod tests {
         for sw in &ways {
             let z = fade_way(sw, &h);
             let corr: Vec<f64> = z.iter().zip(&sw.z).map(|(&zi, &si)| zi - si).collect();
-            let max_d = sw.pts.iter().enumerate().filter_map(|(i, &p)| h.get(&node_key(p)).map(|&v| v - sw.z[i])).fold(0.0, |m: f64, d| m.max(d.abs()));
+            let max_d = sw
+                .pts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &p)| h.get(&node_key(p)).map(|&v| v - sw.z[i]))
+                .fold(0.0, |m: f64, d| m.max(d.abs()));
             let bound = 1.5 * STEP_M * max_d / RAMP_MIN_M + 1e-6;
             for w in corr.windows(2) {
-                assert!((w[1] - w[0]).abs() <= bound, "{} > {bound}", (w[1] - w[0]).abs());
+                assert!(
+                    (w[1] - w[0]).abs() <= bound,
+                    "{} > {bound}",
+                    (w[1] - w[0]).abs()
+                );
             }
             for (zi, ti) in pin_way(sw, &h).iter().zip(&sw.t) {
-                assert!((*zi as f64) >= ti - FLOOR_BELOW_M - 1e-4 && (*zi as f64) <= ti + CAP_ABOVE_M + 1e-4);
+                assert!(
+                    (*zi as f64) >= ti - FLOOR_BELOW_M - 1e-4
+                        && (*zi as f64) <= ti + CAP_ABOVE_M + 1e-4
+                );
             }
         }
     }
@@ -457,10 +504,18 @@ mod tests {
         let z = vec![10.0f32; pts.len()];
         let (zl, zr) = edge_heights(&pts, &z, 3.0, &|p: [f64; 2]| Some(10.0 + 0.1 * p[1]));
         let mid = pts.len() / 2;
-        assert!((zl[mid] - 10.3).abs() < 1e-3 && (zr[mid] - 9.7).abs() < 1e-3, "{} {}", zl[mid], zr[mid]);
+        assert!(
+            (zl[mid] - 10.3).abs() < 1e-3 && (zr[mid] - 9.7).abs() < 1e-3,
+            "{} {}",
+            zl[mid],
+            zr[mid]
+        );
         let (zl, zr) = edge_heights(&pts, &z, 3.0, &|p: [f64; 2]| Some(10.0 + 0.5 * p[1]));
         let limit = 3.0 * SLOPE_LIMIT;
-        assert!((zl[mid] as f64 - (10.0 + limit)).abs() < 1e-3 && (zr[mid] as f64 - (10.0 - limit)).abs() < 1e-3);
+        assert!(
+            (zl[mid] as f64 - (10.0 + limit)).abs() < 1e-3
+                && (zr[mid] as f64 - (10.0 - limit)).abs() < 1e-3
+        );
     }
 
     #[test]
@@ -468,7 +523,10 @@ mod tests {
         let orig = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]];
         let z = [0.0f32, 1.0, 3.0];
         let zs = z_for_piece(&orig, &z, &[[5.0, 0.0], [10.0, 5.0]]);
-        assert!((zs[0] - 0.5).abs() < 1e-6 && (zs[1] - 2.0).abs() < 1e-6, "{zs:?}");
+        assert!(
+            (zs[0] - 0.5).abs() < 1e-6 && (zs[1] - 2.0).abs() < 1e-6,
+            "{zs:?}"
+        );
     }
 
     #[test]

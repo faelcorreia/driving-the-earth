@@ -38,7 +38,10 @@ pub fn areas_query(bbox: (f64, f64, f64, f64)) -> String {
         format!(r#"node["highway"~"^({SIGNALS})$"]{bb};"#),
         format!(r#"node["man_made"="street_lamp"]{bb};"#),
     ];
-    format!("[out:json][timeout:90];({});out body geom;", clauses.concat())
+    format!(
+        "[out:json][timeout:90];({});out body geom;",
+        clauses.concat()
+    )
 }
 
 /// Checks an Overpass body before it is written. Overpass answers a timed-out query with
@@ -47,14 +50,21 @@ pub fn check_areas_body(v: &Value) -> io::Result<()> {
     osm::check_elements(v)?;
     if let Some(remark) = v["remark"].as_str() {
         if remark.contains("runtime error") {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("partial Overpass answer: {remark}")));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("partial Overpass answer: {remark}"),
+            ));
         }
     }
     Ok(())
 }
 
 /// Downloads the area blocks of `meta` that are not in `dir` yet (`osm_areas` directory).
-pub fn download_missing_blocks(dir: &Path, meta: &MapMeta, dl: &Downloader) -> io::Result<BlockStats> {
+pub fn download_missing_blocks(
+    dir: &Path,
+    meta: &MapMeta,
+    dl: &Downloader,
+) -> io::Result<BlockStats> {
     osm::download_blocks(dir, meta, dl, "areas", &areas_query, &check_areas_body)
 }
 
@@ -70,7 +80,10 @@ pub fn category(e: &Value) -> &'static str {
             "tree"
         } else if tag("highway") == Some("street_lamp") || tag("man_made") == Some("street_lamp") {
             "lamp"
-        } else if matches!(tag("highway"), Some("traffic_signals" | "stop" | "give_way" | "crossing")) {
+        } else if matches!(
+            tag("highway"),
+            Some("traffic_signals" | "stop" | "give_way" | "crossing")
+        ) {
             "signal"
         } else {
             "other"
@@ -98,12 +111,19 @@ pub fn visit_elements(dir: &Path, meta: &MapMeta, mut f: impl FnMut(&Value)) -> 
     for (bx, by) in osm::blocks_for(meta) {
         let path = dir.join(osm::block_file_name(bx, by));
         let text = fs::read_to_string(&path).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: {e} (download the area blocks first)", path.display()))
+            io::Error::new(
+                e.kind(),
+                format!("{}: {e} (download the area blocks first)", path.display()),
+            )
         })?;
-        let v: Value = serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        let elements = v["elements"]
-            .as_array()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("{}: no 'elements'", path.display())))?;
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let elements = v["elements"].as_array().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("{}: no 'elements'", path.display()),
+            )
+        })?;
         for e in elements {
             if let (Some(t), Some(id)) = (e["type"].as_str(), e["id"].as_u64()) {
                 if !seen.insert((t.to_string(), id)) {
@@ -165,25 +185,36 @@ mod tests {
     impl FakeClient {
         fn new(mut answers: Vec<Result<String, HttpError>>) -> Self {
             answers.reverse();
-            FakeClient { answers: RefCell::new(answers), queries: RefCell::new(Vec::new()) }
+            FakeClient {
+                answers: RefCell::new(answers),
+                queries: RefCell::new(Vec::new()),
+            }
         }
     }
 
     impl OverpassClient for FakeClient {
         fn post(&self, query: &str) -> Result<String, HttpError> {
             self.queries.borrow_mut().push(query.to_string());
-            self.answers
-                .borrow_mut()
-                .pop()
-                .unwrap_or_else(|| Err(HttpError { status: None, message: "no more answers".into() }))
+            self.answers.borrow_mut().pop().unwrap_or_else(|| {
+                Err(HttpError {
+                    status: None,
+                    message: "no more answers".into(),
+                })
+            })
         }
     }
 
     fn http(status: u16) -> Result<String, HttpError> {
-        Err(HttpError { status: Some(status), message: format!("HTTP {status}") })
+        Err(HttpError {
+            status: Some(status),
+            message: format!("HTTP {status}"),
+        })
     }
 
-    fn downloader<'a>(client: &'a dyn OverpassClient, sleep: &'a dyn Fn(Duration)) -> Downloader<'a> {
+    fn downloader<'a>(
+        client: &'a dyn OverpassClient,
+        sleep: &'a dyn Fn(Duration),
+    ) -> Downloader<'a> {
         Downloader {
             client,
             sleep,
@@ -194,7 +225,8 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("tilebake-areas-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("tilebake-areas-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -215,7 +247,9 @@ mod tests {
         assert!(q.ends_with(");out body geom;"), "{q}");
         assert!(q.contains(r#"nwr["leisure"~"^(park|garden|pitch|playground|nature_reserve|recreation_ground)$"](-19.95,-43.95,-19.93,-43.92);"#));
         assert!(q.contains(r#"nwr["landuse"~"^(grass|"#) && q.contains("village_green)$\"]"));
-        assert!(q.contains(r#"nwr["natural"~"^(wood|scrub|water|wetland|grassland|bare_rock|tree_row)$"]"#));
+        assert!(q.contains(
+            r#"nwr["natural"~"^(wood|scrub|water|wetland|grassland|bare_rock|tree_row)$"]"#
+        ));
         assert!(q.contains(r#"way["waterway"~"^(river|stream|canal|drain|ditch)$"]"#));
         assert!(q.contains(r#"way["water"](-19.95"#) && q.contains(r#"relation["water"](-19.95"#));
         assert!(q.contains(r#"way["amenity"="parking"]"#));
@@ -247,14 +281,23 @@ mod tests {
         let (text, retries) = dl.post_with_retry_counted("q").unwrap();
         assert_eq!(text, body(&[1]));
         assert_eq!(retries, 2);
-        assert_eq!(*waits.borrow(), vec![Duration::from_secs(5), Duration::from_secs(10)]);
+        assert_eq!(
+            *waits.borrow(),
+            vec![Duration::from_secs(5), Duration::from_secs(10)]
+        );
     }
 
     #[test]
     fn download_writes_blocks_counts_retries_and_is_idempotent() {
         let dir = temp_dir("download");
         let m = meta(1000.0);
-        let client = FakeClient::new(vec![http(503), Ok(body(&[1])), Ok(body(&[2])), Ok(body(&[3])), Ok(body(&[4]))]);
+        let client = FakeClient::new(vec![
+            http(503),
+            Ok(body(&[1])),
+            Ok(body(&[2])),
+            Ok(body(&[3])),
+            Ok(body(&[4])),
+        ]);
         let sleep = |_: Duration| {};
         let stats = download_missing_blocks(&dir, &m, &downloader(&client, &sleep)).unwrap();
         assert_eq!(stats.blocks, 4);
@@ -277,7 +320,8 @@ mod tests {
     fn partial_answer_is_not_written() {
         let dir = temp_dir("partial");
         let m = meta(1000.0);
-        let partial = r#"{"elements":[],"remark":"runtime error: Query timed out in \"query\" at line 1"}"#;
+        let partial =
+            r#"{"elements":[],"remark":"runtime error: Query timed out in \"query\" at line 1"}"#;
         let client = FakeClient::new(vec![Ok(partial.into())]);
         let sleep = |_: Duration| {};
         let err = download_missing_blocks(&dir, &m, &downloader(&client, &sleep)).unwrap_err();
@@ -288,8 +332,14 @@ mod tests {
 
     #[test]
     fn categories_of_nodes_and_ways() {
-        let node = |tags: &str| serde_json::from_str::<Value>(&format!(r#"{{"type":"node","id":1,"tags":{{{tags}}}}}"#)).unwrap();
-        let way = |tags: &str| serde_json::from_str::<Value>(&format!(r#"{{"type":"way","id":1,"tags":{{{tags}}}}}"#)).unwrap();
+        let node = |tags: &str| {
+            serde_json::from_str::<Value>(&format!(r#"{{"type":"node","id":1,"tags":{{{tags}}}}}"#))
+                .unwrap()
+        };
+        let way = |tags: &str| {
+            serde_json::from_str::<Value>(&format!(r#"{{"type":"way","id":1,"tags":{{{tags}}}}}"#))
+                .unwrap()
+        };
         assert_eq!(category(&node(r#""natural":"tree""#)), "tree");
         assert_eq!(category(&node(r#""highway":"street_lamp""#)), "lamp");
         assert_eq!(category(&node(r#""man_made":"street_lamp""#)), "lamp");
@@ -299,7 +349,10 @@ mod tests {
         assert_eq!(category(&way(r#""leisure":"pitch""#)), "park");
         assert_eq!(category(&way(r#""natural":"water""#)), "water");
         assert_eq!(category(&way(r#""water":"lake""#)), "water");
-        assert_eq!(category(&way(r#""waterway":"river","name":"Ribeirão Arrudas""#)), "waterway");
+        assert_eq!(
+            category(&way(r#""waterway":"river","name":"Ribeirão Arrudas""#)),
+            "waterway"
+        );
         assert_eq!(category(&way(r#""landuse":"residential""#)), "landuse");
         assert_eq!(category(&way(r#""natural":"wood""#)), "natural");
         assert_eq!(category(&way(r#""amenity":"parking""#)), "parking");
@@ -338,7 +391,10 @@ mod tests {
         let dir = temp_dir("missing");
         fs::create_dir_all(&dir).unwrap();
         let err = visit_elements(&dir, &meta(1000.0), |_| {}).unwrap_err();
-        assert!(err.to_string().contains("download the area blocks first"), "{err}");
+        assert!(
+            err.to_string().contains("download the area blocks first"),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -38,7 +38,10 @@ fn main() {
         println!("category {c}: {n}");
     }
     // Ribeirão Arrudas: waterway ways named after it, with their node count.
-    let dir = Path::new(&root).join(&id).join("raw").join(osm_areas::DIR_NAME);
+    let dir = Path::new(&root)
+        .join(&id)
+        .join("raw")
+        .join(osm_areas::DIR_NAME);
     let mut arrudas = Vec::new();
     let res = osm_areas::visit_elements(&dir, &s.meta, |e| {
         let name = e["tags"]["name"].as_str().unwrap_or("");

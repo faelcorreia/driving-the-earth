@@ -20,7 +20,11 @@ pub struct Map {
 
 impl Map {
     pub fn new(meta: MapMeta, tiles: Vec<Tile>) -> Self {
-        let index = tiles.iter().enumerate().map(|(i, t)| ((t.x, t.y), i)).collect();
+        let index = tiles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| ((t.x, t.y), i))
+            .collect();
         Map { meta, tiles, index }
     }
 
@@ -39,9 +43,21 @@ impl Map {
         let around: Vec<&Tile> = self
             .tiles
             .iter()
-            .filter(|t| (t.x - tile.x).abs() <= 1 && (t.y - tile.y).abs() <= 1 && (t.x, t.y) != (tile.x, tile.y))
+            .filter(|t| {
+                (t.x - tile.x).abs() <= 1
+                    && (t.y - tile.y).abs() <= 1
+                    && (t.x, t.y) != (tile.x, tile.y)
+            })
             .collect();
-        tile_geometry_with(tile, size, &|x, y| self.height_at(x, y).unwrap_or_else(|| sample_height(tile, size, x, y)), &around)
+        tile_geometry_with(
+            tile,
+            size,
+            &|x, y| {
+                self.height_at(x, y)
+                    .unwrap_or_else(|| sample_height(tile, size, x, y))
+            },
+            &around,
+        )
     }
 }
 
@@ -63,9 +79,12 @@ pub struct MapIndex {
 /// Fails when the map is not complete (tilebake has not finished).
 pub fn open_map(cache_root: &Path, id: &str) -> io::Result<MapIndex> {
     let dir = cache_root.join(id);
-    let meta: MapMeta = serde_json::from_str(&fs::read_to_string(dir.join("meta.json"))?).map_err(invalid_data)?;
+    let meta: MapMeta =
+        serde_json::from_str(&fs::read_to_string(dir.join("meta.json"))?).map_err(invalid_data)?;
     if !meta.complete {
-        return Err(invalid_data(format!("map '{id}' is not complete, run tilebake first")));
+        return Err(invalid_data(format!(
+            "map '{id}' is not complete, run tilebake first"
+        )));
     }
     let mut coords = Vec::new();
     for entry in fs::read_dir(dir.join("tiles"))? {
@@ -73,7 +92,11 @@ pub fn open_map(cache_root: &Path, id: &str) -> io::Result<MapIndex> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Some(c) = path.file_stem().and_then(|s| s.to_str()).and_then(parse_coords) {
+        if let Some(c) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(parse_coords)
+        {
             coords.push(c);
         }
     }
@@ -90,7 +113,10 @@ fn parse_coords(stem: &str) -> Option<(i32, i32)> {
 fn check_tile(tile: &Tile) -> io::Result<()> {
     let n = tile.height.cols as usize;
     if n < 2 || tile.height.rows as usize != n || tile.height.values.len() != n * n {
-        return Err(invalid_data(format!("tile {} {} has a bad height grid", tile.x, tile.y)));
+        return Err(invalid_data(format!(
+            "tile {} {} has a bad height grid",
+            tile.x, tile.y
+        )));
     }
     Ok(())
 }

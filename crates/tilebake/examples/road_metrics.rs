@@ -167,12 +167,19 @@ fn node_counts(ways: &[Way]) -> HashMap<(i64, i64), usize> {
 fn seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let l2 = dx * dx + dy * dy;
-    let t = if l2 > 0.0 { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if l2 > 0.0 {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
 }
 
 fn dist_to_way(p: [f64; 2], w: &Way) -> f64 {
-    w.pts.windows(2).map(|s| seg_dist(p, s[0], s[1])).fold(f64::MAX, f64::min)
+    w.pts
+        .windows(2)
+        .map(|s| seg_dist(p, s[0], s[1]))
+        .fold(f64::MAX, f64::min)
 }
 
 /// Distance from `p` to the nearest tile line (m).
@@ -188,7 +195,10 @@ fn grid_h(tile: &Tile, tm: f64, p: [f64; 2]) -> f64 {
     let cell = tm / (n - 1) as f64;
     let fx = ((p[0] - tile.x as f64 * tm) / cell).clamp(0.0, (n - 1) as f64);
     let fy = ((p[1] - tile.y as f64 * tm) / cell).clamp(0.0, (n - 1) as f64);
-    let (j, i) = ((fx.floor() as usize).min(n - 2), (fy.floor() as usize).min(n - 2));
+    let (j, i) = (
+        (fx.floor() as usize).min(n - 2),
+        (fy.floor() as usize).min(n - 2),
+    );
     let (u, v) = (fx - j as f64, fy - i as f64);
     let at = |r: usize, c: usize| h.values[r * n + c] as f64;
     at(i, j) * (1.0 - u) * (1.0 - v)
@@ -230,7 +240,9 @@ fn report(
         .min_by(|a, b| a.0.total_cmp(&b.0));
     let way = best.map(|(_, k)| &ways[k]);
     let cross = ways.iter().enumerate().find(|(k, w)| {
-        Some(*k) != best.map(|b| b.1) && way.is_some_and(|m| w.layer != m.layer) && dist_to_way(p, w) < 4.0
+        Some(*k) != best.map(|b| b.1)
+            && way.is_some_and(|m| w.layer != m.layer)
+            && dist_to_way(p, w) < 4.0
     });
     let (dnode, vtx) = ways
         .iter()
@@ -241,7 +253,8 @@ fn report(
     let lo = i.saturating_sub(WIN);
     let hi = (i + WIN).min(s.len() - 1);
     let terr: Vec<f64> = (lo..=hi).map(|j| grid_h(tile, tm, s[j].p)).collect();
-    let trange = terr.iter().fold(f64::MIN, |a, b| a.max(*b)) - terr.iter().fold(f64::MAX, |a, b| a.min(*b));
+    let trange =
+        terr.iter().fold(f64::MIN, |a, b| a.max(*b)) - terr.iter().fold(f64::MAX, |a, b| a.min(*b));
     let t_here = grid_h(tile, tm, p);
     let d = st.z - t_here;
     let clamp = (d - 0.5).abs() < 0.01 || (d + 0.15).abs() < 0.01;
@@ -265,7 +278,9 @@ fn report(
         "ruido DEM"
     };
     let fmt_tag = |w: Option<&Way>, f: fn(&Way) -> String| w.map(f).unwrap_or_else(|| "-".into());
-    let cross_s = cross.map(|(_, w)| format!("{}@L{}", w.id, w.layer)).unwrap_or_else(|| "-".into());
+    let cross_s = cross
+        .map(|(_, w)| format!("{}@L{}", w.id, w.layer))
+        .unwrap_or_else(|| "-".into());
     println!(
         "[{label}] {val_txt} {} tile({},{}) hw={} at({:.1},{:.1}) i={} seam={:.1} dnode={:.2} shared={} way={} bridge={} tunnel={} layer={} junction={} cross={} trange={:.2}m z-T={:.1}cm -> {cause}",
         path.file_name().unwrap().to_string_lossy(),
@@ -288,7 +303,10 @@ fn report(
         d * 100.0,
     );
     let rel = |f: &dyn Fn(usize) -> f64, base: f64| -> String {
-        (lo..=hi).map(|j| format!("{:+.1}", (f(j) - base) * 100.0)).collect::<Vec<_>>().join(" ")
+        (lo..=hi)
+            .map(|j| format!("{:+.1}", (f(j) - base) * 100.0))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     println!("     z [cm] {}", rel(&|j| s[j].z, st.z));
     println!("     T [cm] {}", rel(&|j| grid_h(tile, tm, s[j].p), t_here));
@@ -300,9 +318,14 @@ fn report(
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_else(|| "casa".into());
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-    let dir: PathBuf = if Path::new(&arg).is_dir() { arg.into() } else { root.join(&arg) };
-    let meta: MapMeta = serde_json::from_str(&fs::read_to_string(dir.join("meta.json")).expect("meta.json"))
-        .expect("meta json");
+    let dir: PathBuf = if Path::new(&arg).is_dir() {
+        arg.into()
+    } else {
+        root.join(&arg)
+    };
+    let meta: MapMeta =
+        serde_json::from_str(&fs::read_to_string(dir.join("meta.json")).expect("meta.json"))
+            .expect("meta json");
     let tm = meta.tile_size_m;
     let mut pitch = (vec![], vec![]); // (straight, curve)
     let mut kink = (0.0f64, 0usize);
@@ -338,10 +361,20 @@ fn main() {
                 } else {
                     pitch.0.push(dp);
                 }
-                pitches.push(Hit { val: dp, path: path.clone(), road: ri, i });
+                pitches.push(Hit {
+                    val: dp,
+                    path: path.clone(),
+                    road: ri,
+                    i,
+                });
                 let k2 = (hs[i + 1] - 2.0 * hs[i] + hs[i - 1]).abs();
                 kink = (kink.0.max(k2), kink.1 + 1);
-                kinks.push(Hit { val: k2, path: path.clone(), road: ri, i });
+                kinks.push(Hit {
+                    val: k2,
+                    path: path.clone(),
+                    road: ri,
+                    i,
+                });
             }
             for i in 10..s.len() - 10 {
                 if !near(s[i].p) {
@@ -361,7 +394,9 @@ fn main() {
                     let t = turn_deg(&s, i, 6);
                     let d = s[i].p[0].hypot(s[i].p[1]);
                     if t > 20.0 && d <= CURVE_SEARCH_M {
-                        let seg: Vec<f64> = (i - 4..=i + 4).map(|j| (hs[j + 1] - hs[j]) / STEP).collect();
+                        let seg: Vec<f64> = (i - 4..=i + 4)
+                            .map(|j| (hs[j + 1] - hs[j]) / STEP)
+                            .collect();
                         first_curve = Some((d, t, seg));
                         break;
                     }
@@ -371,16 +406,35 @@ fn main() {
     }
     let (mut ps, mut pc) = (pitch.0, pitch.1);
     println!("road pieces with profile: {pieces} (without z: {without_z})");
-    println!("pitch 2.5 m steps, straight: max {:.3} p95 {:.3} deg ({} samples)", ps.iter().cloned().fold(0.0, f64::max), pct(&mut ps, 0.95), ps.len());
-    println!("pitch 2.5 m steps, curve:    max {:.3} p95 {:.3} deg ({} samples)", pc.iter().cloned().fold(0.0, f64::max), pct(&mut pc, 0.95), pc.len());
-    println!("height kink (2nd difference, 2.5 m): max {:.2} cm", kink.0 * 100.0);
-    println!("lumps (height - 20 m mean): straight std {:.1} mm, curve std {:.1} mm", std(&lumps.0), std(&lumps.1));
+    println!(
+        "pitch 2.5 m steps, straight: max {:.3} p95 {:.3} deg ({} samples)",
+        ps.iter().cloned().fold(0.0, f64::max),
+        pct(&mut ps, 0.95),
+        ps.len()
+    );
+    println!(
+        "pitch 2.5 m steps, curve:    max {:.3} p95 {:.3} deg ({} samples)",
+        pc.iter().cloned().fold(0.0, f64::max),
+        pct(&mut pc, 0.95),
+        pc.len()
+    );
+    println!(
+        "height kink (2nd difference, 2.5 m): max {:.2} cm",
+        kink.0 * 100.0
+    );
+    println!(
+        "lumps (height - 20 m mean): straight std {:.1} mm, curve std {:.1} mm",
+        std(&lumps.0),
+        std(&lumps.1)
+    );
     match first_curve {
         Some((d, t, seg)) => println!(
             "curve with turn {:.1} deg at {:.0} m from home: slope steps (%) {:?}",
             t,
             d,
-            seg.iter().map(|g| (g * 1000.0).round() / 10.0).collect::<Vec<_>>()
+            seg.iter()
+                .map(|g| (g * 1000.0).round() / 10.0)
+                .collect::<Vec<_>>()
         ),
         None => println!("no curve with turn > 20 deg within {CURVE_SEARCH_M} m"),
     }
@@ -395,7 +449,9 @@ fn main() {
             if out.len() >= TOP {
                 break;
             }
-            if out.iter().any(|o| o.path == h.path && o.road == h.road && (o.i as i64 - h.i as i64).abs() <= 5) {
+            if out.iter().any(|o| {
+                o.path == h.path && o.road == h.road && (o.i as i64 - h.i as i64).abs() <= 5
+            }) {
                 continue;
             }
             out.push(h);
@@ -406,13 +462,32 @@ fn main() {
     let top_p = select(pitches);
     let mut tally: Vec<(&str, usize, usize)> = CAUSES.iter().map(|c| (*c, 0, 0)).collect();
     for (label, list, is_kink) in [("K", &top_k, true), ("P", &top_p, false)] {
-        println!("--- worst {} ({}) ---", if is_kink { "kinks" } else { "pitches" }, list.len());
+        println!(
+            "--- worst {} ({}) ---",
+            if is_kink { "kinks" } else { "pitches" },
+            list.len()
+        );
         for (rank, h) in list.iter().enumerate() {
             let tile = read_tile(&h.path).expect("tile");
             let road = &tile.roads[h.road];
             let s = resample(road);
-            let val_txt = if is_kink { format!("{:.2}cm", h.val * 100.0) } else { format!("{:.2}deg", h.val) };
-            let cause = report(&format!("{label}{:02}", rank + 1), &val_txt, &h.path, &tile, road, &s, h.i, tm, &ways, &nodes);
+            let val_txt = if is_kink {
+                format!("{:.2}cm", h.val * 100.0)
+            } else {
+                format!("{:.2}deg", h.val)
+            };
+            let cause = report(
+                &format!("{label}{:02}", rank + 1),
+                &val_txt,
+                &h.path,
+                &tile,
+                road,
+                &s,
+                h.i,
+                tm,
+                &ways,
+                &nodes,
+            );
             let idx = CAUSES.iter().position(|c| *c == cause).unwrap();
             if is_kink {
                 tally[idx].1 += 1;
@@ -423,6 +498,10 @@ fn main() {
     }
     println!("--- causes (of the 15 worst): kinks | pitches ---");
     for (c, k, p) in tally {
-        println!("  {c:<18} {k:2} ({:3.0}%) | {p:2} ({:3.0}%)", k as f64 * 100.0 / top_k.len().max(1) as f64, p as f64 * 100.0 / top_p.len().max(1) as f64);
+        println!(
+            "  {c:<18} {k:2} ({:3.0}%) | {p:2} ({:3.0}%)",
+            k as f64 * 100.0 / top_k.len().max(1) as f64,
+            p as f64 * 100.0 / top_p.len().max(1) as f64
+        );
     }
 }

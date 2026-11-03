@@ -82,5 +82,4 @@ mod tests {
         assert!((at(10, 10)[0] - mix(GRASS_RGB[0], CEMENT_RGB[0])).abs() < 1e-6);
         assert!((at(20, 20)[0] - GRASS_RGB[0]).abs() < 1e-6);
     }
-
 }

@@ -8,15 +8,14 @@
 //! list, side, lot index along the road, block id). Blocks are used only when they fit inside
 //! the window; a block that touches the window border is skipped (huge blocks get no lots).
 use tileformat::units::lots::{
-    ACCESS_SERVICE_MIN_M, EMPTY_LOT_PERMILLE, FOOTPRINT_MARGIN_M, FRONT_SETBACK_MAX_M, LOT_D_MAX_M, LOT_D_MIN_M,
-    LOT_W_MAX_M, LOT_W_MIN_M, SIDE_SETBACK_MAX_M, TALL_MAIN_PERMILLE, TALL_PERMILLE,
+    ACCESS_SERVICE_MIN_M, EMPTY_LOT_PERMILLE, FOOTPRINT_MARGIN_M, FRONT_SETBACK_MAX_M, LOT_D_MAX_M,
+    LOT_D_MIN_M, LOT_W_MAX_M, LOT_W_MIN_M, SIDE_SETBACK_MAX_M, TALL_MAIN_PERMILLE, TALL_PERMILLE,
 };
 use tileformat::units::{GROUND_CELL_M, GROUND_N, MODULE_M, SIDEWALK_M, TILE_M};
 use tileformat::{
     road_width_m, Polygon, Polyline, GROUND_CONCRETE, GROUND_GRASS, GROUND_PARK, GROUND_SIDEWALK,
     GROUND_WATER,
 };
-
 
 /// Cells per side of the 3 x 3 tile window, and of one tile.
 const TILE_CELLS: usize = (TILE_M / MODULE_M) as usize;
@@ -142,7 +141,9 @@ fn inside_ring(p: [f64; 2], ring: &[[f64; 2]]) -> bool {
     let mut inside = false;
     for k in 0..ring.len() {
         let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
-        if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
+        if (a[1] > p[1]) != (b[1] > p[1])
+            && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+        {
             inside = !inside;
         }
     }
@@ -249,7 +250,10 @@ fn paint_ring(r: &mut Raster, ring: &[[f64; 2]], margin: f64, inside: u8, near: 
         lo = [lo[0].min(p[0]), lo[1].min(p[1])];
         hi = [hi[0].max(p[0]), hi[1].max(p[1])];
     }
-    let (i0, i1, j0, j1) = r.span([lo[0] - margin, lo[1] - margin], [hi[0] + margin, hi[1] + margin]);
+    let (i0, i1, j0, j1) = r.span(
+        [lo[0] - margin, lo[1] - margin],
+        [hi[0] + margin, hi[1] + margin],
+    );
     for j in j0..=j1 {
         for i in i0..=i1 {
             let c = r.center(i, j);
@@ -264,7 +268,10 @@ fn paint_ring(r: &mut Raster, ring: &[[f64; 2]], margin: f64, inside: u8, near: 
 }
 
 fn rasterize(win: &Window) -> Raster {
-    let origin = [(win.tile.0 as f64 - 1.0) * TILE_M, (win.tile.1 as f64 - 1.0) * TILE_M];
+    let origin = [
+        (win.tile.0 as f64 - 1.0) * TILE_M,
+        (win.tile.1 as f64 - 1.0) * TILE_M,
+    ];
     let mut r = Raster {
         flags: vec![0; WIN_N * WIN_N],
         label: vec![0; WIN_N * WIN_N],
@@ -273,7 +280,11 @@ fn rasterize(win: &Window) -> Raster {
     for (_, road) in &win.roads {
         // Every road blocks the lots over its own width; only urban roads add the sidewalk band.
         let hw = road_width_m(&road.highway) / 2.0;
-        let reach = if is_urban(&road.highway, polyline_len(&road.points)) { hw + SIDEWALK_M } else { hw };
+        let reach = if is_urban(&road.highway, polyline_len(&road.points)) {
+            hw + SIDEWALK_M
+        } else {
+            hw
+        };
         paint_band(&mut r, &road.points, hw, reach);
     }
     for ring in &win.footprints {
@@ -360,7 +371,11 @@ fn point_at(pts: &[[f64; 2]], acc: &[f64], s: f64) -> ([f64; 2], [f64; 2]) {
     }
     let (a, b) = (pts[k], pts[k + 1]);
     let len = acc[k + 1] - acc[k];
-    let t = if len > 0.0 { ((s - acc[k]) / len).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if len > 0.0 {
+        ((s - acc[k]) / len).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
     let d = [b[0] - a[0], b[1] - a[1]];
     let dl = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-12);
@@ -430,7 +445,11 @@ fn building(lot: &Lot) -> Option<Polygon> {
     let left = snap(g.unit() * SIDE_SETBACK_MAX_M);
     let right = snap(g.unit() * SIDE_SETBACK_MAX_M);
     let back = snap(g.unit() * SIDE_SETBACK_MAX_M);
-    let tall_p = if lot.main { TALL_MAIN_PERMILLE } else { TALL_PERMILLE };
+    let tall_p = if lot.main {
+        TALL_MAIN_PERMILLE
+    } else {
+        TALL_PERMILLE
+    };
     let levels = if g.next_u64() % 1000 < tall_p {
         (4 + (g.unit() * 5.0) as u8).min(8)
     } else {
@@ -445,9 +464,17 @@ fn building(lot: &Lot) -> Option<Polygon> {
         return None;
     }
     // Corners rounded to 1 mm: far below a module, and it keeps the tile JSON small.
-    let r3 = |p: [f64; 2]| [(p[0] * 1000.0).round() / 1000.0, (p[1] * 1000.0).round() / 1000.0];
+    let r3 = |p: [f64; 2]| {
+        [
+            (p[0] * 1000.0).round() / 1000.0,
+            (p[1] * 1000.0).round() / 1000.0,
+        ]
+    };
     Some(Polygon {
-        points: [at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)].into_iter().map(r3).collect(),
+        points: [at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)]
+            .into_iter()
+            .map(r3)
+            .collect(),
         generated: true,
         levels,
         color_idx,
@@ -509,7 +536,10 @@ pub fn bake_window(win: &Window) -> Output {
     let buildings = lots
         .iter()
         .filter(|lot| {
-            let c = add(add(lot.origin, scale(lot.u, lot.w / 2.0)), scale(lot.v, lot.d / 2.0));
+            let c = add(
+                add(lot.origin, scale(lot.u, lot.w / 2.0)),
+                scale(lot.v, lot.d / 2.0),
+            );
             c[0] >= tx0 && c[0] < tx0 + TILE_M && c[1] >= ty0 && c[1] < ty0 + TILE_M
         })
         .filter_map(building)
@@ -562,7 +592,13 @@ mod tests {
     }
 
     fn street(points: &[[f64; 2]]) -> Polyline {
-        Polyline { highway: "residential".into(), points: points.to_vec(), z: vec![], zl: vec![], zr: vec![] }
+        Polyline {
+            highway: "residential".into(),
+            points: points.to_vec(),
+            z: vec![],
+            zl: vec![],
+            zr: vec![],
+        }
     }
 
     fn roads() -> Vec<Polyline> {
@@ -601,18 +637,31 @@ mod tests {
         let mut win = synthetic(&rs, &FOOT);
         win.areas = vec![(AreaKind::Park, &park[..])];
         let r = rasterize(&win);
-        assert!(r.flags.iter().any(|f| f & F_PARK != 0), "park was not rasterized");
+        assert!(
+            r.flags.iter().any(|f| f & F_PARK != 0),
+            "park was not rasterized"
+        );
         let out = bake_window(&win);
         for b in &out.buildings {
-            let (lo, hi) = b.points.iter().fold(([f64::MAX; 2], [f64::MIN; 2]), |(l, h), p| {
-                ([l[0].min(p[0]), l[1].min(p[1])], [h[0].max(p[0]), h[1].max(p[1])])
-            });
+            let (lo, hi) = b
+                .points
+                .iter()
+                .fold(([f64::MAX; 2], [f64::MIN; 2]), |(l, h), p| {
+                    (
+                        [l[0].min(p[0]), l[1].min(p[1])],
+                        [h[0].max(p[0]), h[1].max(p[1])],
+                    )
+                });
             let (i0, i1, j0, j1) = r.span(lo, hi);
             for j in j0..=j1 {
                 for i in i0..=i1 {
                     let c = r.center(i, j);
                     if inside_ring(c, &b.points) {
-                        assert_eq!(r.flags[Raster::idx(i, j)] & BLOCKING, 0, "building over blocked cell {c:?}");
+                        assert_eq!(
+                            r.flags[Raster::idx(i, j)] & BLOCKING,
+                            0,
+                            "building over blocked cell {c:?}"
+                        );
                     }
                 }
             }
@@ -627,7 +676,11 @@ mod tests {
             for k in 0..4 {
                 let q = edge_len(b, k) / MODULE_M;
                 // 1 mm rounding of the corners moves an edge by at most 2 mm.
-                assert!((q - q.round()).abs() * MODULE_M < 2e-3, "edge {} m", edge_len(b, k));
+                assert!(
+                    (q - q.round()).abs() * MODULE_M < 2e-3,
+                    "edge {} m",
+                    edge_len(b, k)
+                );
             }
             assert!((1..=8).contains(&b.levels) && b.generated && b.color_idx <= 3);
         }
@@ -651,12 +704,22 @@ mod tests {
             street(&[[470.0, -100.0], [470.0, 300.0]]),
         ];
         let all: Vec<(usize, &Polyline)> = rs.iter().enumerate().collect();
-        let mk = |t: (i32, i32)| Window { tile: t, roads: all.clone(), footprints: vec![], areas: vec![], water: vec![] };
+        let mk = |t: (i32, i32)| Window {
+            tile: t,
+            roads: all.clone(),
+            footprints: vec![],
+            areas: vec![],
+            water: vec![],
+        };
         let left = bake_window(&mk((0, 0)));
         let right = bake_window(&mk((1, 0)));
         let mut seen = std::collections::HashSet::new();
         for b in left.buildings.iter().chain(right.buildings.iter()) {
-            let key: Vec<(i64, i64)> = b.points.iter().map(|p| ((p[0] * 1000.0) as i64, (p[1] * 1000.0) as i64)).collect();
+            let key: Vec<(i64, i64)> = b
+                .points
+                .iter()
+                .map(|p| ((p[0] * 1000.0) as i64, (p[1] * 1000.0) as i64))
+                .collect();
             assert!(seen.insert(key), "a lot was repeated");
         }
         assert!(!left.buildings.is_empty() && !right.buildings.is_empty());

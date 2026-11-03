@@ -53,7 +53,9 @@ static HOME: OnceLock<Home> = OnceLock::new();
 /// The home of this build, read once per process from the environment and the repository root.
 pub fn home() -> &'static Home {
     HOME.get_or_init(|| {
-        let file_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(HOME_FILE);
+        let file_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(HOME_FILE);
         let file = match fs::read_to_string(&file_path) {
             Ok(text) => Some(text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -67,17 +69,29 @@ pub fn home() -> &'static Home {
 pub fn resolve(env: Option<&str>, file: Option<&str>) -> Home {
     if let Some(text) = env.filter(|t| !t.trim().is_empty()) {
         let (lat_deg, lon_deg) = parse_env(text).unwrap_or_else(|e| panic!("{HOME_ENV}: {e}"));
-        return Home { lat_deg, lon_deg, street: None, source: Source::Env };
+        return Home {
+            lat_deg,
+            lon_deg,
+            street: None,
+            source: Source::Env,
+        };
     }
     if let Some(text) = file {
         return parse_file(text).unwrap_or_else(|e| panic!("{HOME_FILE}: {e}"));
     }
-    Home { lat_deg: DEFAULT_LAT_DEG, lon_deg: DEFAULT_LON_DEG, street: None, source: Source::Default }
+    Home {
+        lat_deg: DEFAULT_LAT_DEG,
+        lon_deg: DEFAULT_LON_DEG,
+        street: None,
+        source: Source::Default,
+    }
 }
 
 /// Parses `"lat,lon"` in degrees.
 pub fn parse_env(text: &str) -> Result<(f64, f64), String> {
-    let (lat, lon) = text.split_once(',').ok_or("expected \"lat,lon\" in degrees")?;
+    let (lat, lon) = text
+        .split_once(',')
+        .ok_or("expected \"lat,lon\" in degrees")?;
     let lat: f64 = lat.trim().parse().map_err(|e| format!("latitude: {e}"))?;
     let lon: f64 = lon.trim().parse().map_err(|e| format!("longitude: {e}"))?;
     check_range(lat, lon)
@@ -87,7 +101,12 @@ pub fn parse_env(text: &str) -> Result<(f64, f64), String> {
 pub fn parse_file(text: &str) -> Result<Home, String> {
     let f: FileHome = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let (lat_deg, lon_deg) = check_range(f.lat, f.lon)?;
-    Ok(Home { lat_deg, lon_deg, street: f.street, source: Source::File })
+    Ok(Home {
+        lat_deg,
+        lon_deg,
+        street: f.street,
+        source: Source::File,
+    })
 }
 
 fn check_range(lat: f64, lon: f64) -> Result<(f64, f64), String> {
@@ -116,7 +135,10 @@ mod tests {
     fn env_wins_over_file_and_blank_env_is_ignored() {
         let file = r#"{"lat": 1.5, "lon": -2.5, "street": "Rua Exemplo"}"#;
         let h = resolve(Some("-3.25, -4.75"), Some(file));
-        assert_eq!((h.source, h.lat_deg, h.lon_deg), (Source::Env, -3.25, -4.75));
+        assert_eq!(
+            (h.source, h.lat_deg, h.lon_deg),
+            (Source::Env, -3.25, -4.75)
+        );
         assert_eq!(h.street, None);
         let h = resolve(Some("  "), Some(file));
         assert_eq!((h.source, h.lat_deg, h.lon_deg), (Source::File, 1.5, -2.5));
