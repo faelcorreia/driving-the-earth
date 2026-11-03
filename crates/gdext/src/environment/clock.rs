@@ -42,6 +42,13 @@ const LAMP_OFF_ABOVE: f64 = 0.50;
 const LAMP_GLOBALS: [&str; 3] = ["lamp_on_time", "lamp_state", "lamp_now"];
 /// Cobertura de nuvens do céu (ponto de extensão; sem nuvens por enquanto).
 const CLOUD_COVER: f32 = 0.0;
+/// Global de shader com a cor da neblina na direção do olhar (lida por far_lights.gdshader).
+const HAZE_GLOBAL: &str = "haze_color";
+/// Curva da neblina de profundidade: fração^2, então perto de 6 km quase não há véu e a 10 km
+/// o fim do mapa fica opaco.
+const FOG_DEPTH_CURVE: f32 = 2.0;
+/// Saturação da luz ambiente em relação ao cinza médio do céu (0 neutro, 1 cor do céu).
+const AMBIENT_SAT: f32 = 0.35;
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
@@ -214,11 +221,15 @@ impl EnvironmentClock {
         let mut env = Environment::new_gd();
         env.set_background(BgMode::SKY);
         env.set_sky(&sky);
-        env.set_ambient_source(AmbientSource::SKY);
-        env.set_tonemapper(ToneMapper::AGX);
+        // Luz ambiente de cor própria (quase neutra, ver `apply_visuals`), não o céu azul: as
+        // sombras do sol baixo não saem azul-saturadas.
+        env.set_ambient_source(AmbientSource::COLOR);
+        // ACES mantém o petróleo e o laranja do céu; o AgX os acinzentava.
+        env.set_tonemapper(ToneMapper::ACES);
         // Sem a neblina tingindo o céu: o fundo é o shader; a neblina de terreno segue o céu
         // na direção do olhar (ver `apply_visuals`), então a costura no horizonte fica coerente.
         env.set_fog_sky_affect(0.0);
+        env.set_fog_depth_curve(FOG_DEPTH_CURVE);
         world_env.set_environment(&env);
         self.env = Some(env);
         self.sky_mat = Some(sky_mat);
@@ -294,6 +305,11 @@ impl EnvironmentClock {
             // A neblina de profundidade (lod.rs) segue o céu na direção do olhar da câmera.
             let fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
             env.set_fog_light_color(Color::from_rgb(fog[0], fog[1], fog[2]));
+            RenderingServer::singleton()
+                .global_shader_parameter_set(HAZE_GLOBAL, &rgb_variant(fog));
+            let gray = (look.mid[0] + look.mid[1] + look.mid[2]) / 3.0;
+            let amb = look.mid.map(|c| gray + (c - gray) * AMBIENT_SAT);
+            env.set_ambient_light_color(Color::from_rgb(amb[0], amb[1], amb[2]));
             env.set_ambient_light_energy((AMBIENT_MIN + (1.0 - AMBIENT_MIN) * self.light) as f32);
         }
     }
@@ -330,6 +346,11 @@ impl INode for EnvironmentClock {
                 &Variant::from(-1.0f32),
             );
         }
+        RenderingServer::singleton().global_shader_parameter_add(
+            HAZE_GLOBAL,
+            GlobalShaderParameterType::VEC3,
+            &Vector3::new(0.62, 0.82, 0.98).to_variant(),
+        );
         self.setup_lights();
         self.setup_environment();
         if let Some(old) = self.replaced_sun.take() {

@@ -29,6 +29,8 @@ const JD_UNIX_EPOCH: f64 = 2440587.5;
 const JD_J2000: f64 = 2451545.0;
 /// Obliquidade da eclíptica em J2000, graus.
 const OBLIQUITY_J2000_DEG: f64 = 23.439291;
+/// Fração do laranja do ocaso que aparece fora do lado do sol (espelha `WARM_HAZE` do shader).
+const WARM_HAZE: f32 = 0.35;
 
 /// Cor linear RGB, cada canal em 0..1.
 pub type Rgb = [f32; 3];
@@ -364,6 +366,9 @@ pub fn sky_color(look: &SkyLook, sun_dir: [f32; 3], eye: [f32; 3]) -> Rgb {
     let band = smooth(0.0, 0.08, eye[1]) * (1.0 - smooth(0.1, 0.35, eye[1]));
     c = lerp3(c, look.glow, look.glow_strength * side * low);
     c = lerp3(c, look.glow_hi, look.glow_strength * side * band * 0.8);
+    // Calor suave também fora do lado do sol, perto do horizonte (zero do lado oposto).
+    let wide = ((sun_h[0] * eye_h[0] + sun_h[1] * eye_h[1]) * 0.5 + 0.5).clamp(0.0, 1.0);
+    c = lerp3(c, look.glow, look.glow_strength * wide * low * WARM_HAZE);
     // Halo: espalhamento para a frente em volta do sol.
     let cs = (eye[0] * sun_dir[0] + eye[1] * sun_dir[1] + eye[2] * sun_dir[2]).max(0.0);
     let halo = look.halo_strength * cs.powi(6) * 0.5;

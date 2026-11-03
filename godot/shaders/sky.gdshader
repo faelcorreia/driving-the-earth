@@ -27,6 +27,8 @@ uniform float cloud_cover = 0.0;
 
 // Raio angular do disco do sol e da lua (~0,27 grau, 0,0047 rad) em 1 - cos(θ), ~θ²/2.
 const float DISK_R2 = 1.08e-5;
+// Fração do laranja do ocaso que aparece fora do lado do sol (mesma constante em sky.rs).
+const float WARM_HAZE = 0.35;
 
 float hash13(vec3 p) {
 	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
@@ -45,6 +47,9 @@ vec3 sky_base(vec3 e) {
 	float band = smoothstep(0.0, 0.08, e.y) * (1.0 - smoothstep(0.1, 0.35, e.y));
 	c = mix(c, glow, glow_strength * side * low);
 	c = mix(c, glow_hi, glow_strength * side * band * 0.8);
+	// Calor suave também fora do lado do sol, perto do horizonte (zero do lado oposto).
+	float wide = clamp(dot(sun_h, eye_h) * 0.5 + 0.5, 0.0, 1.0);
+	c = mix(c, glow, glow_strength * wide * low * WARM_HAZE);
 
 	float cs = max(dot(e, sun_dir), 0.0);
 	c += glow_hi * halo_strength * pow(cs, 6.0) * 0.5;

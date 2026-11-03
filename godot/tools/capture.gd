@@ -3,17 +3,18 @@ extends SceneTree
 ## Captura visual da cena M1 (V1). Uso:
 ##   godot --path godot -s tools/capture.gd -- --map casa-10km --times 17:45,18:10 --out <dir>
 ## Opcionais: --start 17:42 (hora local em que o relógio começa), --settle 30 (s reais de espera
-## com o mundo parado, antes do primeiro horário).
+## com o mundo parado, antes do primeiro horário), --az 160 (ou lista 160,250: uma foto da
+## câmera por azimute), --fast 60 (velocidade do avanço do relógio), --moon 1 (foto apontada
+## para o disco da lua). Horário anterior ao --start é lido como do dia seguinte (ex.: 04:30).
 ##
 ## Para cada horário: o relógio anda em tempo acelerado até o horário e para (speed 0). Então
-## salva dois PNGs:
+## salva PNGs:
 ##   <HHMM>_spawn180.png: câmera de seguimento do carro (rumo do spawn).
-##   <HHMM>_serra160.png: só a câmera, parada no carro, olhando az 160° (serra).
+##   <HHMM>_az<AZ>.png: só a câmera, parada no carro, olhando o azimute AZ (serra).
+##   <HHMM>_moon.png: só a câmera, olhando para a direção do nó Moon (se --moon 1).
 ## O horário real do quadro é registrado pelo próprio script (game_s acumula delta x speed).
 
 const SIZE := Vector2i(1280, 720)
-const SERRA_AZ_DEG := 160.0
-const FAST_SPEED := 60.0
 const EYE_HEIGHT_M := 1.2
 const SETTLE_FRAMES := 60
 
@@ -29,6 +30,9 @@ func _parse_args() -> Dictionary:
 		"out": "",
 		"start": "17:42",
 		"settle": "30",
+		"az": "160",
+		"fast": "60",
+		"moon": "0",
 	}
 	var args := OS.get_cmdline_user_args()
 	var i := 0
@@ -107,19 +111,27 @@ func run() -> void:
 	var car := car_cam.get_parent() as Node3D
 
 	var start_min := _hm_to_min(opts["start"])
+	var fast := float(opts["fast"])
+	var azimuths: Array = opts["az"].split(",", false)
+	var moon_light := clock.find_child("Moon", false, false) as Node3D
 	var game_s := 0.0
 	for hm: String in opts["times"].split(",", false):
-		var target_s := (_hm_to_min(hm) - start_min) * 60.0
+		var target_min := _hm_to_min(hm)
+		if target_min < start_min:
+			target_min += 1440.0
+		var target_s := (target_min - start_min) * 60.0
 		if target_s < game_s:
 			push_warning("capture: %s is behind the clock, skipped" % hm)
 			continue
-		clock.set("speed", FAST_SPEED)
+		clock.set("speed", fast)
 		while game_s < target_s:
 			await process_frame
-			game_s += root.get_process_delta_time() * FAST_SPEED
+			game_s += root.get_process_delta_time() * fast
 		clock.set("speed", 0.0)
 		var actual := _min_to_hm(start_min + game_s / 60.0)
-		print("capture: target %s, clock at %s" % [hm, actual])
+		# Direção da lua: o nó Moon aponta do observador para a lua (basis.z, ver clock.rs orient).
+		var moon_dir := moon_light.global_transform.basis.z if moon_light != null else Vector3.FORWARD
+		print("capture: target %s, clock at %s, moon alt %.1f deg" % [hm, actual, rad_to_deg(asin(moon_dir.y))])
 
 		var tag := hm.replace(":", "")
 
@@ -130,16 +142,27 @@ func run() -> void:
 			await process_frame
 		await _snap(out_dir.path_join("%s_spawn180.png" % tag))
 
-		# (b) só a câmera, na altura dos olhos, olhando az 160° (serra).
+		# (b) só a câmera, na altura dos olhos, olhando cada azimute pedido (serra).
 		car_cam.call("set_active", false)
 		car_cam.current = true
 		var eye := car.global_position + Vector3.UP * EYE_HEIGHT_M
-		var h := deg_to_rad(SERRA_AZ_DEG)
-		var dir := Vector3(sin(h), 0.0, -cos(h))
-		car_cam.global_position = eye
-		car_cam.look_at(eye + dir * 100.0, Vector3.UP)
-		for i in 5:
-			await process_frame
-		await _snap(out_dir.path_join("%s_serra160.png" % tag))
+		for az: String in azimuths:
+			var h := deg_to_rad(az.to_float())
+			var dir := Vector3(sin(h), 0.0, -cos(h))
+			car_cam.global_position = eye
+			car_cam.look_at(eye + dir * 100.0, Vector3.UP)
+			for i in 5:
+				await process_frame
+			print("capture: shooting az %s" % az)
+			await _snap(out_dir.path_join("%s_az%s.png" % [tag, az]))
+			print("capture: az %s done" % az)
+
+		# (c) a lua, se pedida: a câmera aponta para o disco (mesmo que esteja abaixo do horizonte).
+		if opts["moon"] == "1" and moon_light != null:
+			car_cam.global_position = eye
+			car_cam.look_at(eye + moon_dir * 100.0, Vector3.UP)
+			for i in 5:
+				await process_frame
+			await _snap(out_dir.path_join("%s_moon.png" % tag))
 
 	quit(0)

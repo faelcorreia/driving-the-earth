@@ -11,7 +11,8 @@ global uniform float lamp_now;
 
 uniform vec3 color_sodium : source_color = vec3(1.0, 0.72, 0.35);
 uniform vec3 color_warm : source_color = vec3(1.0, 0.9, 0.75);
-uniform vec3 fog_color : source_color = vec3(0.62, 0.82, 0.98);
+// Cor da neblina na direção do olhar, atualizada a cada quadro pelo relógio (environment/clock.rs).
+global uniform vec3 haze_color;
 uniform float fog_begin = 5000.0;
 uniform float fog_end = 10000.0;
 uniform float fade_begin = 600.0;
@@ -49,7 +50,7 @@ void vertex() {
 	float fog = smoothstep(fog_begin, fog_end, d);
 	glow = lit * flicker * fade * (1.0 - fog);
 	// Far lights take the colour of the haze as they fade into it.
-	tint = mix(mix(color_sodium, color_warm, INSTANCE_CUSTOM.g), fog_color, fog * 0.5);
+	tint = mix(mix(color_sodium, color_warm, INSTANCE_CUSTOM.g), haze_color, fog * 0.5);
 }
 
 void fragment() {

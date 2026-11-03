@@ -8,7 +8,7 @@ use godot::prelude::*;
 use super::array_mesh;
 use crate::geometry::MeshData;
 use crate::world::far_lights::{lit_count, FarLoad};
-use crate::world::lod::{FOG_BEGIN_M, FOG_COLOR, FOG_END_M};
+use crate::world::lod::{FOG_BEGIN_M, FOG_END_M};
 
 /// Fade of the distant lights near the car, in meters: none within `FADE_BEGIN_M`, full beyond
 /// `FADE_END_M` (closer than that, real buildings and lamps stand there).
@@ -42,7 +42,6 @@ impl DistantLights {
         let rgb = |c: (f32, f32, f32)| Vector3::new(c.0, c.1, c.2).to_variant();
         mat.set_shader_parameter("color_sodium", &rgb(SODIUM_RGB));
         mat.set_shader_parameter("color_warm", &rgb(WARM_RGB));
-        mat.set_shader_parameter("fog_color", &rgb(FOG_COLOR));
         mat.set_shader_parameter("fog_begin", &FOG_BEGIN_M.to_variant());
         mat.set_shader_parameter("fog_end", &FOG_END_M.to_variant());
         mat.set_shader_parameter("fade_begin", &FADE_BEGIN_M.to_variant());
