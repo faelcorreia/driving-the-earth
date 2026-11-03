@@ -10,6 +10,7 @@ pub mod clip;
 pub mod dem;
 pub mod lots;
 pub mod osm;
+pub mod osm_areas;
 pub mod profile;
 pub mod region;
 pub mod shp;
@@ -194,5 +195,62 @@ pub fn download_osm(cache_root: &Path, id: &str, name: &str, address: &str) -> i
         blocks,
         blocks_downloaded,
         osm_bytes: dir_bytes(&osm_dir)?,
+    })
+}
+
+/// Result of `download_osm_areas`: metadata, block counts and the elements of the layer.
+#[derive(Debug)]
+pub struct AreasSummary {
+    pub meta: MapMeta,
+    /// Blocks that cover the baked tiles.
+    pub blocks: usize,
+    /// Blocks downloaded in this run.
+    pub blocks_downloaded: usize,
+    /// Retries after 429, 502, 503 or 504 in this run.
+    pub retries: u32,
+    /// Bytes of the blocks written in this run.
+    pub bytes_written: u64,
+    /// Size of `raw/osm_areas/` after the run, in bytes.
+    pub areas_bytes: u64,
+    /// Elements per category and per OSM type, over all the blocks.
+    pub counts: osm_areas::AreaCounts,
+}
+
+/// Downloads the areas, nature and street infrastructure layer (`osm_areas`) for an existing
+/// cache entry: `cache_root/<id>/meta.json` gives the center, radius and block grid. Writes
+/// `cache_root/<id>/raw/osm_areas/<bx>_<by>.json` and does not touch `raw/osm/`.
+///
+/// Blocks already on disk are not queried again, so an interrupted run continues where it stopped.
+pub fn download_osm_areas(cache_root: &Path, id: &str) -> io::Result<AreasSummary> {
+    let dir = cache_root.join(id);
+    let meta_path = dir.join("meta.json");
+    if !meta_path.exists() {
+        return Err(other_err(format!(
+            "{} is missing: run download_osm for this id first",
+            meta_path.display()
+        )));
+    }
+    let file = fs::File::open(&meta_path)?;
+    let meta: MapMeta = serde_json::from_reader(io::BufReader::new(file)).map_err(other_err)?;
+    let areas_dir = dir.join("raw").join(osm_areas::DIR_NAME);
+    let sleep = |d: Duration| std::thread::sleep(d);
+    let client = osm::UreqOverpass;
+    let dl = osm::Downloader {
+        client: &client,
+        sleep: &sleep,
+        min_gap: osm::MIN_GAP,
+        max_attempts: osm::MAX_ATTEMPTS,
+        backoff_base: osm::BACKOFF_BASE,
+    };
+    let stats = osm_areas::download_missing_blocks(&areas_dir, &meta, &dl)?;
+    let counts = osm_areas::count_elements(&areas_dir, &meta)?;
+    Ok(AreasSummary {
+        meta,
+        blocks: stats.blocks,
+        blocks_downloaded: stats.downloaded,
+        retries: stats.retries,
+        bytes_written: stats.bytes_written,
+        areas_bytes: dir_bytes(&areas_dir)?,
+        counts,
     })
 }

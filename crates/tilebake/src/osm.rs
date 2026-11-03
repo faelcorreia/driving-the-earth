@@ -76,10 +76,16 @@ pub struct Downloader<'a> {
 impl Downloader<'_> {
     /// Posts `query`, retrying with doubling backoff on 429, 502, 503 and 504. Other errors fail at once.
     pub fn post_with_retry(&self, query: &str) -> io::Result<String> {
+        self.post_with_retry_counted(query).map(|(body, _)| body)
+    }
+
+    /// Like `post_with_retry`, and also returns how many retries were needed.
+    pub fn post_with_retry_counted(&self, query: &str) -> io::Result<(String, u32)> {
         let mut delay = self.backoff_base;
+        let mut retries = 0;
         for attempt in 1..=self.max_attempts {
             match self.client.post(query) {
-                Ok(body) => return Ok(body),
+                Ok(body) => return Ok((body, retries)),
                 Err(e) if matches!(e.status, Some(429 | 502 | 503 | 504)) && attempt < self.max_attempts => {
                     eprintln!(
                         "tilebake: Overpass answered {} (attempt {attempt}/{}), retrying in {delay:?}",
@@ -87,12 +93,26 @@ impl Downloader<'_> {
                     );
                     (self.sleep)(delay);
                     delay *= 2;
+                    retries += 1;
                 }
                 Err(e) => return Err(other_err(format!("Overpass request failed: {}", e.message))),
             }
         }
         Err(other_err("Overpass: max_attempts is zero"))
     }
+}
+
+/// What one run of `download_blocks` did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BlockStats {
+    /// Blocks that cover the tiles.
+    pub blocks: usize,
+    /// Blocks downloaded in this run (the others were already on disk).
+    pub downloaded: usize,
+    /// Retries after 429, 502, 503 or 504, over all the blocks of this run.
+    pub retries: u32,
+    /// Bytes of the blocks written in this run.
+    pub bytes_written: u64,
 }
 
 /// Block indices `(bx, by)` whose area touches the covering tiles of `meta`.
@@ -139,13 +159,33 @@ pub fn block_bbox(grid: &MapGrid, bx: i32, by: i32) -> (f64, f64, f64, f64) {
     (south, west, north, east)
 }
 
-/// Downloads the blocks of `meta` that are not in `dir` yet. Each block is written to a
-/// `.part` file first and renamed when complete. Returns `(blocks, downloaded)`.
-pub fn download_missing_blocks(dir: &Path, meta: &MapMeta, dl: &Downloader) -> io::Result<(usize, usize)> {
+/// Check of an Overpass body before it is written: it must have an `elements` array.
+pub fn check_elements(v: &Value) -> io::Result<()> {
+    if v["elements"].is_array() {
+        Ok(())
+    } else {
+        Err(other_err("Overpass response has no 'elements'"))
+    }
+}
+
+/// Downloads the blocks of `meta` that are not in `dir` yet, one query per block built by
+/// `query_for` from the block's bbox. Each block is checked by `check` and written to a
+/// `.part` file first, renamed when complete. `layer` names the data in the log lines.
+pub fn download_blocks(
+    dir: &Path,
+    meta: &MapMeta,
+    dl: &Downloader,
+    layer: &str,
+    query_for: &dyn Fn((f64, f64, f64, f64)) -> String,
+    check: &dyn Fn(&Value) -> io::Result<()>,
+) -> io::Result<BlockStats> {
     fs::create_dir_all(dir)?;
     let grid = MapGrid::from_meta(meta);
     let blocks = blocks_for(meta);
-    let mut downloaded = 0;
+    let mut stats = BlockStats {
+        blocks: blocks.len(),
+        ..BlockStats::default()
+    };
     let mut last_start: Option<Instant> = None;
     for &(bx, by) in &blocks {
         let name = block_file_name(bx, by);
@@ -159,21 +199,31 @@ pub fn download_missing_blocks(dir: &Path, meta: &MapMeta, dl: &Downloader) -> i
                 (dl.sleep)(dl.min_gap - elapsed);
             }
         }
-        let query = overpass_query(block_bbox(&grid, bx, by));
+        let query = query_for(block_bbox(&grid, bx, by));
         last_start = Some(Instant::now());
-        let body = dl.post_with_retry(&query)?;
+        let (body, retries) = dl.post_with_retry_counted(&query)?;
+        stats.retries += retries;
         // Validate before writing, so a bad body never ends up in the cache.
         let v: Value = serde_json::from_str(&body).map_err(other_err)?;
-        if !v["elements"].is_array() {
-            return Err(other_err(format!("Overpass response for block {name} has no 'elements'")));
-        }
+        check(&v).map_err(|e| other_err(format!("{layer} block {name}: {e}")))?;
         let part = dir.join(format!("{name}.part"));
-        fs::write(&part, body)?;
+        fs::write(&part, &body)?;
         fs::rename(&part, &path)?;
-        downloaded += 1;
-        eprintln!("tilebake: block {name} downloaded ({} of {})", downloaded, blocks.len());
+        stats.downloaded += 1;
+        stats.bytes_written += body.len() as u64;
+        eprintln!(
+            "tilebake: {layer} block {name} downloaded ({} of {}, retries {retries})",
+            stats.downloaded,
+            blocks.len()
+        );
     }
-    Ok((blocks.len(), downloaded))
+    Ok(stats)
+}
+
+/// Downloads the OSM ways of the blocks of `meta` that are not in `dir` yet. Returns `(blocks, downloaded)`.
+pub fn download_missing_blocks(dir: &Path, meta: &MapMeta, dl: &Downloader) -> io::Result<(usize, usize)> {
+    let s = download_blocks(dir, meta, dl, "osm", &overpass_query, &check_elements)?;
+    Ok((s.blocks, s.downloaded))
 }
 
 /// Calls `f` once for each way of the blocks of `meta` (blocks read in order). A way that
