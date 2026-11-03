@@ -1,6 +1,6 @@
 extends Camera3D
 
-## Visão em primeira pessoa, na posição dos olhos do motorista (lado esquerdo do Uno).
+## Visão em primeira pessoa, na posição dos olhos do motorista (lado esquerdo do carro).
 ## Filha do carro: segue a carroceria sem código por frame. Olhar livre com o mouse, com limites.
 ## Não roda `_process` nem `_physics_process`: yaw e pitch mudam só nos eventos de mouse.
 ## Ligada e desligada pelo carro (set_active).
