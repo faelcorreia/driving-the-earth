@@ -10,6 +10,7 @@
 use tileformat::units::{ROAD_BLEND_M, TERRAIN_FINE_CELL_M, TILE_M};
 use tileformat::Tile;
 
+use super::profile_smooth::smooth_profile;
 use super::terrain::sample_height;
 use tileformat::{road_width_m, Polyline};
 
@@ -101,7 +102,9 @@ impl Field {
         if n < 2 || road.z.len() != n {
             return;
         }
-        let has_edges = road.zl.len() == n && road.zr.len() == n;
+        // The profile the field samples is the runtime-smoothed one (same points, same stations).
+        let (z_all, zl_all, zr_all) = smooth_profile(&road.points, &road.z, &road.zl, &road.zr, &road.highway);
+        let has_edges = zl_all.len() == n && zr_all.len() == n;
         let half = road_width_m(&road.highway) / 2.0;
         let flat = flat_zone_m(half);
         self.reach = self.reach.max(flat + ROAD_BLEND_M);
@@ -112,9 +115,9 @@ impl Field {
                 continue;
             }
             let (z, zl, zr) = if has_edges {
-                ([road.z[k], road.z[k + 1]], [road.zl[k], road.zl[k + 1]], [road.zr[k], road.zr[k + 1]])
+                ([z_all[k], z_all[k + 1]], [zl_all[k], zl_all[k + 1]], [zr_all[k], zr_all[k + 1]])
             } else {
-                let z = [road.z[k], road.z[k + 1]];
+                let z = [z_all[k], z_all[k + 1]];
                 (z, z, z)
             };
             let seg = Seg {

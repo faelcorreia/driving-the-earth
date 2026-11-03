@@ -44,6 +44,21 @@ const _: () = assert!(TERRAIN_CELL_M % TERRAIN_FINE_CELL_M == 0.0, "a terrain ce
 const _: () = assert!(GROUND_CELL_M % TERRAIN_FINE_CELL_M == 0.0, "a ground cell holds whole fine cells");
 const _: () = assert!(TERRAIN_FINE_N == 101, "the fine grid is 101 vertices per side");
 
+/// Longitudinal profile of a road, smoothed at runtime (S1). Distances in meters.
+pub mod profile {
+    use super::ROAD_STATION_M;
+
+    /// Largest deviation of a sampled height from its straight ramp that counts as noise.
+    pub const NOISE_TOL_M: f64 = 0.15;
+    /// Shortest ramp (straight piece between two vertical curves) of the smoothed profile.
+    pub const MIN_RAMP_M: f64 = 20.0;
+    /// Length of a vertical curve is a whole number of this step (rounded up).
+    pub const CURVE_STEP_M: f64 = 20.0;
+
+    const _: () = assert!(CURVE_STEP_M % ROAD_STATION_M == 0.0, "curves are whole road stations");
+    const _: () = assert!(MIN_RAMP_M >= CURVE_STEP_M, "a ramp holds at least one curve step");
+}
+
 /// Lot rules of the generated buildings (B0). Distances in meters; the drawn values are snapped
 /// to `MODULE_M`, so every lot edge is a whole number of modules.
 pub mod lots {
