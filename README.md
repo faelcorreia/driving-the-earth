@@ -25,9 +25,20 @@ trailer line is `AI Generated` when AI wrote the change. Never commit personal d
 exact home coordinates, `home.local.json`, `cache/`).
 
 ## Data and attribution
+This is a free, open-source (MIT), non-profit project. It aims to be a well-functioning terrain and
+driving simulation engine grounded in Brazilian reality.
+
 - Map data © OpenStreetMap contributors, ODbL: https://www.openstreetmap.org/copyright
 - Elevation: Copernicus GLO-30 DEM (© DLR/ESA, Copernicus license).
-- Regional terrain packages may derive from municipal open data (e.g. PBH); check each source's license before redistributing baked data.
+- Terrain for Belo Horizonte derives from contour lines (1 m and 5 m) published by Prefeitura de
+  Belo Horizonte / Prodabel (IDE-BHGeo, Decreto 17.209/2019), modified: resampled to a 10 m height
+  grid. The source data is not redistributed in this repository. Check each source's license before
+  redistributing baked data.
+
+## Disclaimer
+The data and simulation in this project must not be used for real-world decisions (navigation,
+engineering, safety, legal or any other). Even though it tries to be as close to reality as possible,
+it is subject to errors. Contributions that reduce those errors are always welcome.
 
 ## License
 MIT (code). See `LICENSE`. Data sources keep their own licenses.
