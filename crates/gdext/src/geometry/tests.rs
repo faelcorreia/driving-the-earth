@@ -1,7 +1,7 @@
 //! Geometry unit tests: terrain grid, road ribbons and junctions on synthetic tiles.
 //! Helpers `grid`, `tile`, `hill` and `ribbon_height` are shared with `world::tests`.
-use super::*;
 use super::junction::BORDER_OVERLAP_M;
+use super::*;
 use tileformat::{road_width_m, HeightGrid, Polyline};
 
 pub(crate) fn grid(cols: u32, f: impl Fn(f64, f64) -> f32) -> HeightGrid {
@@ -46,7 +46,16 @@ fn sample_height_follows_the_mesh_diagonal() {
     // One cell (2x2 samples, 10 m): only the north-east corner is high.
     // The mesh splits the cell from north-east to south-west, so the south-west
     // half is flat and the point (5, 5) is at 0 m (bilinear would give 2.5 m).
-    let t = tile(0, 0, HeightGrid { cols: 2, rows: 2, values: vec![0.0, 0.0, 0.0, 10.0] }, Vec::new());
+    let t = tile(
+        0,
+        0,
+        HeightGrid {
+            cols: 2,
+            rows: 2,
+            values: vec![0.0, 0.0, 0.0, 10.0],
+        },
+        Vec::new(),
+    );
     assert!((sample_height(&t, 10.0, 5.0, 5.0)).abs() < 1e-5);
     // In the north-east half: d + ... = 4 m at (7, 7).
     assert!((sample_height(&t, 10.0, 7.0, 7.0) - 4.0).abs() < 1e-4);
@@ -71,7 +80,8 @@ pub(crate) fn ribbon_height(mesh: &MeshData, x: f64, y: f64) -> Option<f64> {
                 [v[0] as f64, v[1] as f64, -(v[2] as f64)]
             })
             .collect();
-        let det = (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
+        let det =
+            (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
         if det.abs() < 1e-12 {
             continue;
         }
@@ -90,11 +100,19 @@ pub(crate) fn ribbon_height(mesh: &MeshData, x: f64, y: f64) -> Option<f64> {
 fn road_never_goes_under_the_terrain() {
     // A bendy road over a hill: the strip is sampled between nodes, so it must stay
     // above the drawn terrain everywhere, not only at the nodes.
-    let road = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
+    let road = Polyline {
+        z: Vec::new(),
+        zl: Vec::new(),
+        zr: Vec::new(),
         highway: "residential".into(),
         points: vec![[60.0, 100.0], [120.0, 128.0], [190.0, 150.0], [200.0, 60.0]],
     };
-    let t = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![road.clone()]);
+    let t = tile(
+        0,
+        0,
+        grid(26, |u, v| hill(u * 250.0, v * 250.0)),
+        vec![road.clone()],
+    );
     let g = tile_geometry(&t, 250.0);
     let mut checked = 0;
     for k in 0..road.points.len() - 1 {
@@ -107,11 +125,16 @@ fn road_never_goes_under_the_terrain() {
                 // Stay off the nodes of the polyline: the bend is covered by the miter.
                 let x = p[0] + dx * t_ + -dy / len * side;
                 let y = p[1] + dy * t_ + dx / len * side;
-                let Some(strip) = ribbon_height(&g.roads, x, y) else { continue };
+                let Some(strip) = ribbon_height(&g.roads, x, y) else {
+                    continue;
+                };
                 let terrain = sample_height(&t, 250.0, x, y) as f64;
                 // ROAD_LIFT_M covers the curvature between stations, but this synthetic hill is much
                 // steeper than real terrain, so allow a few centimeters.
-                assert!(strip >= terrain - 0.05, "road under terrain at ({x:.2}, {y:.2}): {strip} < {terrain}");
+                assert!(
+                    strip >= terrain - 0.05,
+                    "road under terrain at ({x:.2}, {y:.2}): {strip} < {terrain}"
+                );
                 checked += 1;
             }
         }
@@ -125,7 +148,9 @@ fn road_with_profile_follows_its_heights() {
     let road = Polyline {
         highway: "residential".into(),
         points: vec![[60.0, 125.0], [190.0, 125.0]],
-        z: vec![0.0, 10.0], zl: Vec::new(), zr: Vec::new(),
+        z: vec![0.0, 10.0],
+        zl: Vec::new(),
+        zr: Vec::new(),
     };
     let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
     let g = tile_geometry(&t, 250.0);
@@ -147,22 +172,35 @@ fn terrain_under_a_profiled_road_follows_its_profile() {
     let road = Polyline {
         highway: "residential".into(),
         points: vec![[0.0, 125.0], [250.0, 125.0]],
-        z: vec![0.0, 0.0], zl: Vec::new(), zr: Vec::new(),
+        z: vec![0.0, 0.0],
+        zl: Vec::new(),
+        zr: Vec::new(),
     };
     let raw = tile(0, 0, grid(26, crest), Vec::new());
     let with = tile(0, 0, grid(26, crest), vec![road.clone()]);
     let plain = tile_geometry(&raw, 250.0);
     let g = tile_geometry(&with, 250.0);
-    assert_eq!(g.terrain.indices, plain.terrain.indices, "triangles must not change");
+    assert_eq!(
+        g.terrain.indices, plain.terrain.indices,
+        "triangles must not change"
+    );
     let mut on_axis = 0;
     for (v, w) in g.terrain.vertices.iter().zip(&plain.terrain.vertices) {
         let (x, y) = (v[0] as f64, -(v[2] as f64));
         let dist = (y - 125.0).abs();
         if dist <= 3.0 {
-            assert!(v[1].abs() < 1e-4, "vertex ({x:.1}, {y:.1}) is {} off the profile", v[1]);
+            assert!(
+                v[1].abs() < 1e-4,
+                "vertex ({x:.1}, {y:.1}) is {} off the profile",
+                v[1]
+            );
             on_axis += 1;
-        } else if dist > 7.5 + TERRAIN_FINE_CELL_M {  // flat zone of a 6 m road: flat_zone_m(3.0)
-            assert_eq!(v[1], w[1], "vertex outside the band changed at ({x:.1}, {y:.1})");
+        } else if dist > 7.5 + TERRAIN_FINE_CELL_M {
+            // flat zone of a 6 m road: flat_zone_m(3.0)
+            assert_eq!(
+                v[1], w[1],
+                "vertex outside the band changed at ({x:.1}, {y:.1})"
+            );
         }
     }
     assert!(on_axis > 0);
@@ -174,28 +212,58 @@ fn road_ends_meet_across_tiles() {
     // Their end vertices are the same point, with the same height from both tiles.
     // Grid values are global heights: tile (0, 0) spans x in [0, 250], tile (1, 0) in [250, 500].
     let left = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![]);
-    let right = tile(1, 0, grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)), vec![]);
+    let right = tile(
+        1,
+        0,
+        grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)),
+        vec![],
+    );
     for y in [0.0, 60.0, 125.0, 200.0] {
         let a = sample_height(&left, 250.0, 250.0, y);
         let b = sample_height(&right, 250.0, 250.0, y);
-        assert!((a - b).abs() < 1e-4, "edge height differs at y={y}: {a} vs {b}");
+        assert!(
+            (a - b).abs() < 1e-4,
+            "edge height differs at y={y}: {a} vs {b}"
+        );
     }
     // The strip of each tile ends on the shared border line.
-    let piece = |x0: f64, x1: f64| Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
+    let piece = |x0: f64, x1: f64| Polyline {
+        z: Vec::new(),
+        zl: Vec::new(),
+        zr: Vec::new(),
         highway: "residential".into(),
         points: vec![[x0, 125.0], [x1, 125.0]],
     };
-    let gl = tile_geometry(&tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![piece(100.0, 250.0)]), 250.0);
+    let gl = tile_geometry(
+        &tile(
+            0,
+            0,
+            grid(26, |u, v| hill(u * 250.0, v * 250.0)),
+            vec![piece(100.0, 250.0)],
+        ),
+        250.0,
+    );
     let gr = tile_geometry(
-        &tile(1, 0, grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)), vec![piece(250.0, 400.0)]),
+        &tile(
+            1,
+            0,
+            grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)),
+            vec![piece(250.0, 400.0)],
+        ),
         250.0,
     );
     let edge_x = |m: &MeshData| {
-        m.vertices.iter().filter(|v| (v[0] - 250.0).abs() < 1e-4).map(|v| (v[1], v[2])).collect::<Vec<_>>()
+        m.vertices
+            .iter()
+            .filter(|v| (v[0] - 250.0).abs() < 1e-4)
+            .map(|v| (v[1], v[2]))
+            .collect::<Vec<_>>()
     };
     assert!(!edge_x(&gl.roads).is_empty() && !edge_x(&gr.roads).is_empty());
     for (y1, z1) in edge_x(&gl.roads) {
-        assert!(edge_x(&gr.roads).iter().any(|&(y2, z2)| (y1 - y2).abs() < 1e-4 && (z1 - z2).abs() < 1e-4));
+        assert!(edge_x(&gr.roads)
+            .iter()
+            .any(|&(y2, z2)| (y1 - y2).abs() < 1e-4 && (z1 - z2).abs() < 1e-4));
     }
 }
 
@@ -210,21 +278,43 @@ fn road_height_is_continuous_across_the_tile_border() {
         .enumerate()
         .map(|(k, p)| (0.04 * (p[0] - 150.0) + if k % 2 == 0 { 0.08 } else { -0.08 }) as f32)
         .collect();
-    let (smooth, _, _) = super::profile_smooth::smooth_profile(&points, &z, &[], &[], "residential");
-    let road = Polyline { highway: "residential".into(), points, z, zl: Vec::new(), zr: Vec::new() };
+    let (smooth, _, _) =
+        super::profile_smooth::smooth_profile(&points, &z, &[], &[], "residential");
+    let road = Polyline {
+        highway: "residential".into(),
+        points,
+        z,
+        zl: Vec::new(),
+        zr: Vec::new(),
+    };
     let half = road_width_m("residential") / 2.0;
-    let t0 = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![road]);
-    let t1 = tile(1, 0, grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)), Vec::new());
+    let t0 = tile(
+        0,
+        0,
+        grid(26, |u, v| hill(u * 250.0, v * 250.0)),
+        vec![road],
+    );
+    let t1 = tile(
+        1,
+        0,
+        grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)),
+        Vec::new(),
+    );
     let g0 = tile_geometry_with(&t0, 250.0, &|x, y| sample_height(&t0, 250.0, x, y), &[&t1]);
     let g1 = tile_geometry_with(&t1, 250.0, &|x, y| sample_height(&t1, 250.0, x, y), &[&t0]);
 
     // Ribbon of the owning tile follows the smoothed profile on both sides of the border.
     for x in (160..=340).step_by(5) {
         let x = x as f64;
-        let Some(strip) = ribbon_height(&g0.roads, x, 125.0) else { continue };
+        let Some(strip) = ribbon_height(&g0.roads, x, 125.0) else {
+            continue;
+        };
         let k = ((x - 150.0) / 2.5).round() as usize;
         let want = smooth[k] as f64 + ROAD_LIFT_M as f64;
-        assert!((strip - want).abs() <= 0.02, "ribbon {strip:.3} off the profile {want:.3} at x={x}");
+        assert!(
+            (strip - want).abs() <= 0.02,
+            "ribbon {strip:.3} off the profile {want:.3} at x={x}"
+        );
     }
     // The border itself: the owning tile's ribbon and the neighbor's terrain agree there.
     let on_border = ribbon_height(&g0.roads, 250.0, 125.0).expect("ribbon on the border");
@@ -240,10 +330,16 @@ fn road_height_is_continuous_across_the_tile_border() {
         }
         if let Some(strip) = ribbon_height(&g0.roads, x, y) {
             checked += 1;
-            assert!(h - strip <= 0.02, "terrain {h:.3} above the ribbon {strip:.3} at ({x:.1}, {y:.1})");
+            assert!(
+                h - strip <= 0.02,
+                "terrain {h:.3} above the ribbon {strip:.3} at ({x:.1}, {y:.1})"
+            );
         }
     }
-    assert!(checked > 0, "no neighbor terrain vertex under the ribbon past the border");
+    assert!(
+        checked > 0,
+        "no neighbor terrain vertex under the ribbon past the border"
+    );
 }
 
 #[test]
@@ -262,8 +358,12 @@ fn terrain_is_a_grid_with_front_faces_up() {
     assert_eq!(g.terrain.indices.len(), 2 * 8 * 8 * 3);
     assert!(g.terrain.indices.iter().all(|&i| (i as usize) < 81));
     for tri in g.terrain.indices.chunks(3) {
-        let p: Vec<[f32; 3]> = tri.iter().map(|&i| g.terrain.vertices[i as usize]).collect();
-        let cross_y = (p[1][2] - p[0][2]) * (p[2][0] - p[0][0]) - (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]);
+        let p: Vec<[f32; 3]> = tri
+            .iter()
+            .map(|&i| g.terrain.vertices[i as usize])
+            .collect();
+        let cross_y =
+            (p[1][2] - p[0][2]) * (p[2][0] - p[0][0]) - (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]);
         assert!(cross_y < 0.0, "triangle {tri:?} is back-facing for Godot");
     }
 }
@@ -291,7 +391,10 @@ fn terrain_world_axes_match_godot() {
 
 #[test]
 fn road_becomes_front_up_ribbon_on_terrain() {
-    let road = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
+    let road = Polyline {
+        z: Vec::new(),
+        zl: Vec::new(),
+        zr: Vec::new(),
         highway: "residential".into(),
         points: vec![[0.0, 10.0], [20.0, 10.0]],
     };
@@ -302,7 +405,10 @@ fn road_becomes_front_up_ribbon_on_terrain() {
     let (lo, hi) = (BORDER_OVERLAP_M as f32, 20.0 + BORDER_OVERLAP_M as f32);
     assert!(xs.iter().any(|x| (x + lo).abs() < 1e-4));
     assert!(xs.iter().any(|x| (x - hi).abs() < 1e-4));
-    assert_eq!(g.roads.indices.len() / 3, (g.roads.vertices.len() / 3 - 1) * 4);
+    assert_eq!(
+        g.roads.indices.len() / 3,
+        (g.roads.vertices.len() / 3 - 1) * 4
+    );
     for v in &g.roads.vertices {
         assert!((v[1] - (50.0 + ROAD_LIFT_M)).abs() < 1e-4);
     }
@@ -312,7 +418,8 @@ fn road_becomes_front_up_ribbon_on_terrain() {
     assert!(zs.iter().any(|z| (z + 7.0).abs() < 1e-4));
     for tri in g.roads.indices.chunks(3) {
         let p: Vec<[f32; 3]> = tri.iter().map(|&i| g.roads.vertices[i as usize]).collect();
-        let cross_y = (p[1][2] - p[0][2]) * (p[2][0] - p[0][0]) - (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]);
+        let cross_y =
+            (p[1][2] - p[0][2]) * (p[2][0] - p[0][0]) - (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]);
         assert!(cross_y < 0.0);
     }
 }
@@ -326,8 +433,20 @@ fn road_becomes_front_up_ribbon_on_terrain() {
 fn road_end_on_crossed_road_leaves_no_wedge() {
     let s = std::f64::consts::FRAC_1_SQRT_2;
     let end = [125.0, 125.0];
-    let a = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(), highway: "primary".into(), points: vec![[end[0] - 80.0 * s, end[1] - 80.0 * s], end] };
-    let b = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(), highway: "residential".into(), points: vec![[0.0, 125.0], [250.0, 125.0]] };
+    let a = Polyline {
+        z: Vec::new(),
+        zl: Vec::new(),
+        zr: Vec::new(),
+        highway: "primary".into(),
+        points: vec![[end[0] - 80.0 * s, end[1] - 80.0 * s], end],
+    };
+    let b = Polyline {
+        z: Vec::new(),
+        zl: Vec::new(),
+        zr: Vec::new(),
+        highway: "residential".into(),
+        points: vec![[0.0, 125.0], [250.0, 125.0]],
+    };
     let t = tile(0, 0, grid(26, |_, _| 50.0), vec![a, b]);
     let g = tile_geometry(&t, 250.0);
     let (half_a, half_b) = (6.0, 3.0);
@@ -348,9 +467,13 @@ fn road_end_on_crossed_road_leaves_no_wedge() {
             }
         }
     }
-    assert!(missing.is_empty(), "{} uncovered points, e.g. {:?}", missing.len(), missing.first());
+    assert!(
+        missing.is_empty(),
+        "{} uncovered points, e.g. {:?}",
+        missing.len(),
+        missing.first()
+    );
 }
-
 
 /// FNV-1a over the raw bytes of the terrain and road meshes (vertices, normals, indices).
 fn mesh_hash(mesh: &MeshData) -> u64 {
@@ -360,7 +483,12 @@ fn mesh_hash(mesh: &MeshData) -> u64 {
             h = (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3);
         }
     };
-    for v in mesh.vertices.iter().flatten().chain(mesh.normals.iter().flatten()) {
+    for v in mesh
+        .vertices
+        .iter()
+        .flatten()
+        .chain(mesh.normals.iter().flatten())
+    {
         feed(&v.to_le_bytes());
     }
     for i in &mesh.indices {
@@ -374,7 +502,8 @@ fn mesh_hash(mesh: &MeshData) -> u64 {
 /// terrain colors are new (from the ground cover); the roads have none.
 #[test]
 fn reference_tile_geometry_is_unchanged() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/casa/tiles/0_0.json");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/casa/tiles/0_0.json");
     let Ok(tile) = tileformat::read_tile(&path) else {
         eprintln!("skipped: {} not found", path.display());
         return;
@@ -382,7 +511,11 @@ fn reference_tile_geometry_is_unchanged() {
     let g = tile_geometry(&tile, 250.0);
     assert!(g.roads.colors.is_empty());
     assert_eq!(g.terrain.colors.len(), g.terrain.vertices.len());
-    println!("terrain {:016x} roads {:016x}", mesh_hash(&g.terrain), mesh_hash(&g.roads));
+    println!(
+        "terrain {:016x} roads {:016x}",
+        mesh_hash(&g.terrain),
+        mesh_hash(&g.roads)
+    );
     assert_eq!(mesh_hash(&g.terrain), REFERENCE_TERRAIN_HASH);
     assert_eq!(mesh_hash(&g.roads), REFERENCE_ROADS_HASH);
 }
@@ -399,7 +532,10 @@ fn tile_without_roads_is_the_grid_on_the_fine_vertices() {
     let n = 101;
     assert_eq!(g.terrain.vertices.len(), n * n);
     for (k, v) in g.terrain.vertices.iter().enumerate() {
-        let (x, y) = ((k % n) as f64 * TERRAIN_FINE_CELL_M, (k / n) as f64 * TERRAIN_FINE_CELL_M);
+        let (x, y) = (
+            (k % n) as f64 * TERRAIN_FINE_CELL_M,
+            (k / n) as f64 * TERRAIN_FINE_CELL_M,
+        );
         assert_eq!(v[1], sample_height(&t, 250.0, x, y), "vertex {k}");
     }
 }
@@ -414,7 +550,9 @@ fn worst_vertex_above_ribbon(g: &TileGeometry, y0: f64, half: f64) -> Option<(f6
         if (y - y0).abs() > half {
             continue;
         }
-        let Some(strip) = ribbon_height(&g.roads, x, y) else { continue };
+        let Some(strip) = ribbon_height(&g.roads, x, y) else {
+            continue;
+        };
         let excess = h - strip;
         if worst.map_or(true, |w| excess > w.0) {
             worst = Some((excess, x, y));
@@ -428,7 +566,11 @@ fn worst_vertex_above_ribbon(g: &TileGeometry, y0: f64, half: f64) -> Option<(f6
 fn no_terrain_vertex_above_the_ribbon_in_the_corridor() {
     // Hill across the road, profile flat (below the hill crest), and profile ramping over the hill.
     let half = road_width_m("residential") / 2.0;
-    for (name, z) in [("flat", vec![0.0f32, 0.0]), ("ramp", vec![-2.0f32, 6.0]), ("fill", vec![9.0f32, 9.0])] {
+    for (name, z) in [
+        ("flat", vec![0.0f32, 0.0]),
+        ("ramp", vec![-2.0f32, 6.0]),
+        ("fill", vec![9.0f32, 9.0]),
+    ] {
         let road = Polyline {
             highway: "residential".into(),
             // Runs past both tile edges: a road that ends on an edge dips toward the grid in its
@@ -438,11 +580,19 @@ fn no_terrain_vertex_above_the_ribbon_in_the_corridor() {
             zl: Vec::new(),
             zr: Vec::new(),
         };
-        let t = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![road]);
+        let t = tile(
+            0,
+            0,
+            grid(26, |u, v| hill(u * 250.0, v * 250.0)),
+            vec![road],
+        );
         let g = tile_geometry(&t, 250.0);
         let (excess, x, y) = worst_vertex_above_ribbon(&g, 125.0, half).expect("corridor vertices");
         eprintln!("{name}: worst vertex above ribbon {excess:.4} m at ({x:.1}, {y:.1})");
-        assert!(excess <= 0.0, "{name}: terrain vertex {excess:.4} m above the ribbon at ({x:.1}, {y:.1})");
+        assert!(
+            excess <= 0.0,
+            "{name}: terrain vertex {excess:.4} m above the ribbon at ({x:.1}, {y:.1})"
+        );
     }
 }
 
@@ -450,11 +600,18 @@ fn no_terrain_vertex_above_the_ribbon_in_the_corridor() {
 #[test]
 #[ignore]
 fn tile_geometry_timing() {
-    let roads: Vec<Polyline> = (0..4).map(|k| Polyline {
-        highway: "residential".into(),
-        points: vec![[-20.0, 40.0 + 55.0 * k as f64], [270.0, 60.0 + 55.0 * k as f64]],
-        z: vec![-2.0, 6.0], zl: Vec::new(), zr: Vec::new(),
-    }).collect();
+    let roads: Vec<Polyline> = (0..4)
+        .map(|k| Polyline {
+            highway: "residential".into(),
+            points: vec![
+                [-20.0, 40.0 + 55.0 * k as f64],
+                [270.0, 60.0 + 55.0 * k as f64],
+            ],
+            z: vec![-2.0, 6.0],
+            zl: Vec::new(),
+            zr: Vec::new(),
+        })
+        .collect();
     let t = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), roads);
     let mut times = Vec::new();
     let mut tris = 0;
@@ -475,11 +632,20 @@ fn tile_geometry_timing() {
 fn probe_many_point_profile_on_axis() {
     let n = 117;
     let points: Vec<[f64; 2]> = (0..n).map(|k| [-20.0 + 2.5 * k as f64, 125.0]).collect();
-    let z: Vec<f32> = points.iter().enumerate().map(|(k, p)| {
-        (0.04 * (p[0] - 125.0) + if k % 2 == 0 { 0.08 } else { -0.08 }) as f32
-    }).collect();
-    let (smooth, _, _) = super::profile_smooth::smooth_profile(&points, &z, &[], &[], "residential");
-    let road = Polyline { highway: "residential".into(), points: points.clone(), z: z.clone(), zl: Vec::new(), zr: Vec::new() };
+    let z: Vec<f32> = points
+        .iter()
+        .enumerate()
+        .map(|(k, p)| (0.04 * (p[0] - 125.0) + if k % 2 == 0 { 0.08 } else { -0.08 }) as f32)
+        .collect();
+    let (smooth, _, _) =
+        super::profile_smooth::smooth_profile(&points, &z, &[], &[], "residential");
+    let road = Polyline {
+        highway: "residential".into(),
+        points: points.clone(),
+        z: z.clone(),
+        zl: Vec::new(),
+        zr: Vec::new(),
+    };
     let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
     let g = tile_geometry(&t, 250.0);
     let mut worst = (0.0f64, 0.0f64, 0.0f64);
@@ -490,10 +656,21 @@ fn probe_many_point_profile_on_axis() {
         let want = smooth[k] as f64 + ROAD_LIFT_M as f64;
         let err = (strip - want).abs();
         eprintln!("x={x} ribbon={strip:.3} want={want:.3}");
-        if err > worst.0 { worst = (err, x, strip); }
+        if err > worst.0 {
+            worst = (err, x, strip);
+        }
     }
-    eprintln!("probe worst error {:.4} m at x={} (ribbon {:.4})", worst.0, worst.1, worst.2);
-    assert!(worst.0 <= 0.02, "axis off the smoothed profile by {:.4} m at x={} (ribbon {:.4})", worst.0, worst.1, worst.2);
+    eprintln!(
+        "probe worst error {:.4} m at x={} (ribbon {:.4})",
+        worst.0, worst.1, worst.2
+    );
+    assert!(
+        worst.0 <= 0.02,
+        "axis off the smoothed profile by {:.4} m at x={} (ribbon {:.4})",
+        worst.0,
+        worst.1,
+        worst.2
+    );
 }
 
 /// Diagnostic on the real baked map `casa-10km`, tile (-1, -2) (run with `--ignored --nocapture`):
@@ -504,11 +681,21 @@ fn real_tile_terrain_stays_under_the_ribbons() {
     let root = std::path::Path::new("/mnt/Data/Codes/driving-the-earth/cache");
     let index = crate::world::open_map(root, "casa-10km").expect("baked map 'casa-10km'");
     let m = index.meta.tile_size_m;
+    let (cx, cy): (i32, i32) = std::env::var("TILE")
+        .ok()
+        .and_then(|v| {
+            let (a, b) = v.split_once(',')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        })
+        .unwrap_or((-1, -2));
     let block: Vec<Tile> = (-1..=1)
-        .flat_map(|dy| (-1..=1).map(move |dx| (-1 + dx, -2 + dy)))
+        .flat_map(|dy| (-1..=1).map(move |dx| (cx + dx, cy + dy)))
         .filter_map(|(x, y)| index.read_tile_at(x, y).ok())
         .collect();
-    let center = block.iter().find(|t| t.x == -1 && t.y == -2).expect("tile (-1, -2)");
+    let center = block
+        .iter()
+        .find(|t| t.x == cx && t.y == cy)
+        .expect("center tile");
     let geo: Vec<TileGeometry> = block
         .iter()
         .map(|t| {
@@ -520,7 +707,10 @@ fn real_tile_terrain_stays_under_the_ribbons() {
     let (mut worst, mut checked) = (f64::NEG_INFINITY, 0usize);
     for v in &g.terrain.vertices {
         let (x, y, h) = (v[0] as f64, -(v[2] as f64), v[1] as f64);
-        let strips: Vec<f64> = geo.iter().filter_map(|k| ribbon_height(&k.roads, x, y)).collect();
+        let strips: Vec<f64> = geo
+            .iter()
+            .filter_map(|k| ribbon_height(&k.roads, x, y))
+            .collect();
         if strips.is_empty() {
             continue;
         }
@@ -530,8 +720,17 @@ fn real_tile_terrain_stays_under_the_ribbons() {
         if excess > worst {
             worst = excess;
         }
+        if excess > 0.02 {
+            println!("leak x={x:.2} y={y:.2} h={h:.3} excess={excess:.3}");
+        }
     }
     println!("checked={checked} worst_excess={worst:.4} m");
-    assert!(checked > 0, "no terrain vertex under a ribbon in tile (-1, -2)");
-    assert!(worst <= 0.02, "terrain {worst:.4} m above the ribbon in tile (-1, -2)");
+    assert!(
+        checked > 0,
+        "no terrain vertex under a ribbon in tile (-1, -2)"
+    );
+    assert!(
+        worst <= 0.02,
+        "terrain {worst:.4} m above the ribbon in tile (-1, -2)"
+    );
 }
