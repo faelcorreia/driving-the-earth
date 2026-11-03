@@ -14,6 +14,9 @@ use crate::geometry::MeshData;
 pub(crate) fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
     let mut mat = StandardMaterial3D::new_gd();
     mat.set_albedo(Color::from_rgb(color.0, color.1, color.2));
+    // Per-vertex colors (when a mesh has them) multiply the albedo; without them the vertex color
+    // is white and the look is the albedo, as before.
+    mat.set_flag(godot::classes::base_material_3d::Flags::ALBEDO_FROM_VERTEX_COLOR, true);
     mat
 }
 
@@ -56,11 +59,15 @@ pub(crate) fn array_mesh(data: &MeshData) -> Gd<ArrayMesh> {
     let vertices: PackedVector3Array = data.vertices.iter().map(|&p| vec3(p)).collect();
     let normals: PackedVector3Array = data.normals.iter().map(|&p| vec3(p)).collect();
     let indices: PackedInt32Array = data.indices.iter().map(|&i| i as i32).collect();
+    let colors: PackedColorArray = data.colors.iter().map(|c| Color::from_rgba(c[0], c[1], c[2], c[3])).collect();
 
     let mut arrays = VarArray::new();
     arrays.resize(ArrayType::MAX.ord() as usize, &Variant::nil());
     arrays.set(ArrayType::VERTEX.ord() as usize, &vertices.to_variant());
     arrays.set(ArrayType::NORMAL.ord() as usize, &normals.to_variant());
+    if !colors.is_empty() {
+        arrays.set(ArrayType::COLOR.ord() as usize, &colors.to_variant());
+    }
     arrays.set(ArrayType::INDEX.ord() as usize, &indices.to_variant());
 
     let mut mesh = ArrayMesh::new_gd();

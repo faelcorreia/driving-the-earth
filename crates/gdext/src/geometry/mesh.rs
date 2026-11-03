@@ -6,6 +6,9 @@
 pub struct MeshData {
     pub vertices: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// RGBA per vertex, sRGB-like values in 0..1. Empty means the mesh has no color channel and
+    /// the material's own albedo is used as before.
+    pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 

@@ -307,3 +307,39 @@ fn road_end_on_crossed_road_leaves_no_wedge() {
     assert!(missing.is_empty(), "{} uncovered points, e.g. {:?}", missing.len(), missing.first());
 }
 
+
+/// FNV-1a over the raw bytes of the terrain and road meshes (vertices, normals, indices).
+fn mesh_hash(mesh: &MeshData) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            h = (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    for v in mesh.vertices.iter().flatten().chain(mesh.normals.iter().flatten()) {
+        feed(&v.to_le_bytes());
+    }
+    for i in &mesh.indices {
+        feed(&i.to_le_bytes());
+    }
+    h
+}
+
+/// Regression: the terrain and road meshes of the reference tile (`cache/casa` tile 0,0) are
+/// byte-identical to the ones before the color channel (no colors: the channel is empty).
+#[test]
+fn reference_tile_geometry_is_unchanged_without_colors() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/casa/tiles/0_0.json");
+    let Ok(tile) = tileformat::read_tile(&path) else {
+        eprintln!("skipped: {} not found", path.display());
+        return;
+    };
+    let g = tile_geometry(&tile, 250.0);
+    assert!(g.terrain.colors.is_empty() && g.roads.colors.is_empty());
+    println!("terrain {:016x} roads {:016x}", mesh_hash(&g.terrain), mesh_hash(&g.roads));
+    assert_eq!(mesh_hash(&g.terrain), REFERENCE_TERRAIN_HASH);
+    assert_eq!(mesh_hash(&g.roads), REFERENCE_ROADS_HASH);
+}
+
+const REFERENCE_TERRAIN_HASH: u64 = 0x84e8_aac5_74f1_597e;
+const REFERENCE_ROADS_HASH: u64 = 0xe0743e9d4b222c16;
