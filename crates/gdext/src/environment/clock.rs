@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use godot::classes::directional_light_3d::ShadowMode;
 use godot::classes::environment::{AmbientSource, BgMode, ToneMapper};
 use godot::classes::light_3d::Param;
+use godot::classes::rendering_server::GlobalShaderParameterType;
+use godot::classes::RenderingServer;
 use godot::classes::{
     DirectionalLight3D, Environment, INode, InputEvent, Node, ProceduralSkyMaterial, Sky,
     WorldEnvironment,
@@ -32,6 +34,12 @@ const SHADOW_MAX_DISTANCE_M: f32 = 300.0;
 const AMBIENT_MIN: f64 = 0.3;
 /// Multiplicador do clima (futuro); 1 = céu limpo.
 const WEATHER_FACTOR: f64 = 1.0;
+/// Limiar de luz dos postes: acendem ao cair abaixo de `LAMP_ON_BELOW`, apagam acima de `LAMP_OFF_ABOVE`.
+const LAMP_ON_BELOW: f64 = 0.40;
+const LAMP_OFF_ABOVE: f64 = 0.50;
+/// Globais de shader dos postes: instante do acendimento (s de jogo desde o início, -1 apagado),
+/// estado (1 aceso, 0 apagado) e o instante de jogo atual (s desde o início).
+const LAMP_GLOBALS: [&str; 3] = ["lamp_on_time", "lamp_state", "lamp_now"];
 /// Cor do chão embaixo do horizonte do céu.
 const GROUND_BOTTOM: Color = Color::from_rgb(0.12, 0.13, 0.16);
 
@@ -88,6 +96,11 @@ pub struct EnvironmentClock {
     bank: ThresholdBank,
     listeners: Vec<Box<dyn FnMut(&Crossing)>>,
     log_timer: f64,
+    /// `sim_unix` at the start: game time in the lamp globals counts from here.
+    origin_unix: f64,
+    /// Game seconds since the start when the street lamps came on; `None` while they are off.
+    lamp_on_since: Option<f64>,
+    lamps_primed: bool,
 }
 
 #[godot_api]
@@ -123,6 +136,21 @@ impl EnvironmentClock {
     #[allow(dead_code)] // API for consumers in later slices
     pub fn light(&self) -> f64 {
         self.light
+    }
+
+    /// Game seconds since the start, and when the street lamps came on (if they are on).
+    pub fn lamp_clock(&self) -> (f64, Option<f64>) {
+        (self.sim_unix - self.origin_unix, self.lamp_on_since)
+    }
+
+    /// Pushes the lamp state to the shader globals.
+    fn push_lamp_state(&self) {
+        let (on_time, state) = match self.lamp_on_since {
+            Some(t) => (t as f32, 1.0f32),
+            None => (-1.0f32, 0.0f32),
+        };
+        set_global(LAMP_GLOBALS[0], on_time);
+        set_global(LAMP_GLOBALS[1], state);
     }
 
     fn start_unix(&self) -> f64 {
@@ -266,6 +294,14 @@ impl INode for EnvironmentClock {
         } else {
             self.start_unix()
         };
+        self.origin_unix = self.sim_unix;
+        for name in LAMP_GLOBALS {
+            RenderingServer::singleton().global_shader_parameter_add(
+                name,
+                GlobalShaderParameterType::FLOAT,
+                &Variant::from(-1.0f32),
+            );
+        }
         self.setup_lights();
         self.setup_environment();
         if let Some(old) = self.replaced_sun.take() {
@@ -277,8 +313,8 @@ impl INode for EnvironmentClock {
         // Limiar de postes: acendem em 0,40 e apagam em 0,50 (histerese).
         self.bank.add(LightThreshold {
             name: "street_lamps".into(),
-            on_below: 0.40,
-            off_above: 0.50,
+            on_below: LAMP_ON_BELOW,
+            off_above: LAMP_OFF_ABOVE,
         });
         godot_print!(
             "environment: start {} (local), speed {}x, real_time {}",
@@ -300,7 +336,24 @@ impl INode for EnvironmentClock {
         self.light = sky::light_level(sun.altitude_deg, &moon, WEATHER_FACTOR);
         self.apply_visuals(sun, moon);
 
+        let now = self.sim_unix - self.origin_unix;
+        set_global(LAMP_GLOBALS[2], now as f32);
+        // The first sample sets the threshold state without a signal: a clock that starts at night
+        // turns the lamps on right away.
+        if !self.lamps_primed {
+            self.lamps_primed = true;
+            if self.light < LAMP_ON_BELOW {
+                self.lamp_on_since = Some(now);
+            }
+            self.push_lamp_state();
+        }
+
         for crossing in self.bank.update(self.light) {
+            if crossing.name == "street_lamps" {
+                self.lamp_on_since = crossing.descending.then_some(now);
+                self.push_lamp_state();
+                godot_print!("environment: street lamps {} at {:.0} s", if crossing.descending { "on" } else { "off" }, now);
+            }
             godot_print!(
                 "environment: light threshold '{}' crossed, descending={} (light {:.3})",
                 crossing.name,
@@ -320,10 +373,11 @@ impl INode for EnvironmentClock {
         if self.log_timer >= LOG_PERIOD_S {
             self.log_timer = 0.0;
             godot_print!(
-                "environment: local {} sun_alt {:.2} deg light {:.3}",
+                "environment: local {} sun_alt {:.2} deg light {:.3} street_lamps {}",
                 self.local_clock(),
                 self.sun_alt_deg,
-                self.light
+                self.light,
+                if self.lamp_on_since.is_some() { "on" } else { "off" }
             );
         }
     }
@@ -338,4 +392,9 @@ impl INode for EnvironmentClock {
             self.change_speed(next);
         }
     }
+}
+
+/// Sets a float shader global.
+fn set_global(name: &str, value: f32) {
+    RenderingServer::singleton().global_shader_parameter_set(name, &Variant::from(value));
 }
