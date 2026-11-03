@@ -2,7 +2,7 @@
 //! Helpers `grid`, `tile`, `hill` and `ribbon_height` are shared with `world::tests`.
 use super::*;
 use super::junction::BORDER_OVERLAP_M;
-use tileformat::{HeightGrid, Polyline};
+use tileformat::{road_width_m, HeightGrid, Polyline};
 
 pub(crate) fn grid(cols: u32, f: impl Fn(f64, f64) -> f32) -> HeightGrid {
     let last = (cols - 1) as f64;
@@ -160,7 +160,7 @@ fn terrain_under_a_profiled_road_follows_its_profile() {
         if dist <= 3.0 {
             assert!(v[1].abs() < 1e-4, "vertex ({x:.1}, {y:.1}) is {} off the profile", v[1]);
             on_axis += 1;
-        } else if dist > 3.0 + TERRAIN_FINE_CELL_M {
+        } else if dist > 7.5 + TERRAIN_FINE_CELL_M {  // flat zone of a 6 m road: flat_zone_m(3.0)
             assert_eq!(v[1], w[1], "vertex outside the band changed at ({x:.1}, {y:.1})");
         }
     }
@@ -354,4 +354,69 @@ fn tile_without_roads_is_the_grid_on_the_fine_vertices() {
         let (x, y) = ((k % n) as f64 * TERRAIN_FINE_CELL_M, (k / n) as f64 * TERRAIN_FINE_CELL_M);
         assert_eq!(v[1], sample_height(&t, 250.0, x, y), "vertex {k}");
     }
+}
+
+/// Largest `terrain vertex - ribbon` over the terrain vertices inside the road's corridor
+/// (`|offset| <= half`) of a straight road along x at y = 125. `None` when no vertex has a ribbon.
+#[cfg(test)]
+fn worst_vertex_above_ribbon(g: &TileGeometry, y0: f64, half: f64) -> Option<(f64, f64, f64)> {
+    let mut worst: Option<(f64, f64, f64)> = None;
+    for v in &g.terrain.vertices {
+        let (x, y, h) = (v[0] as f64, -(v[2] as f64), v[1] as f64);
+        if (y - y0).abs() > half {
+            continue;
+        }
+        let Some(strip) = ribbon_height(&g.roads, x, y) else { continue };
+        let excess = h - strip;
+        if worst.map_or(true, |w| excess > w.0) {
+            worst = Some((excess, x, y));
+            eprintln!("  vertex h={h:.3} ribbon={strip:.3} at ({x:.2}, {y:.2})");
+        }
+    }
+    worst
+}
+
+#[test]
+fn no_terrain_vertex_above_the_ribbon_in_the_corridor() {
+    // Hill across the road, profile flat (below the hill crest), and profile ramping over the hill.
+    let half = road_width_m("residential") / 2.0;
+    for (name, z) in [("flat", vec![0.0f32, 0.0]), ("ramp", vec![-2.0f32, 6.0]), ("fill", vec![9.0f32, 9.0])] {
+        let road = Polyline {
+            highway: "residential".into(),
+            // Runs past both tile edges: a road that ends on an edge dips toward the grid in its
+            // end cap, which is not a corridor case.
+            points: vec![[-20.0, 125.0], [270.0, 125.0]],
+            z,
+            zl: Vec::new(),
+            zr: Vec::new(),
+        };
+        let t = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![road]);
+        let g = tile_geometry(&t, 250.0);
+        let (excess, x, y) = worst_vertex_above_ribbon(&g, 125.0, half).expect("corridor vertices");
+        eprintln!("{name}: worst vertex above ribbon {excess:.4} m at ({x:.1}, {y:.1})");
+        assert!(excess <= 0.0, "{name}: terrain vertex {excess:.4} m above the ribbon at ({x:.1}, {y:.1})");
+    }
+}
+
+/// Release-only measurement: `cargo test --release -p driving_the_earth_ext tile_geometry_timing -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn tile_geometry_timing() {
+    let roads: Vec<Polyline> = (0..4).map(|k| Polyline {
+        highway: "residential".into(),
+        points: vec![[-20.0, 40.0 + 55.0 * k as f64], [270.0, 60.0 + 55.0 * k as f64]],
+        z: vec![-2.0, 6.0], zl: Vec::new(), zr: Vec::new(),
+    }).collect();
+    let t = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), roads);
+    let mut times = Vec::new();
+    let mut tris = 0;
+    for _ in 0..200 {
+        let start = std::time::Instant::now();
+        let g = tile_geometry(&t, 250.0);
+        times.push(start.elapsed().as_secs_f64() * 1e3);
+        tris = g.terrain.indices.len() / 3 + g.roads.indices.len() / 3;
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p90 = times[times.len() * 9 / 10];
+    eprintln!("tile_geometry p90 {p90:.3} ms, tri {tris}");
 }

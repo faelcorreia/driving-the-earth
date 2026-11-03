@@ -7,7 +7,7 @@
 //! linear across to `zl` and `zr` on the edges. Over the next `ROAD_BLEND_M` it blends from the
 //! edge height to the grid. Where corridors overlap, the lowest candidate wins, so a terrain
 //! vertex never rises above a ribbon in a corridor. Roads with no profile do not change the grid.
-use tileformat::units::{ROAD_BLEND_M, TILE_M};
+use tileformat::units::{ROAD_BLEND_M, TERRAIN_FINE_CELL_M, TILE_M};
 use tileformat::Tile;
 
 use super::terrain::sample_height;
@@ -18,6 +18,13 @@ use super::vec2::unit_normal;
 /// Side of a bucket of the segment index, in meters.
 const BUCKET_M: f64 = 10.0;
 
+/// Half-width of the flat zone of a road: the ribbon edge plus one blend cell, rounded up to
+/// whole fine cells. Every grid vertex that a ribbon triangle touches then takes the profile
+/// height, so the ribbon edge never sits on a triangle lowered by the grid beyond it.
+pub(super) fn flat_zone_m(half: f64) -> f64 {
+    ((half + ROAD_BLEND_M) / TERRAIN_FINE_CELL_M).ceil() * TERRAIN_FINE_CELL_M
+}
+
 /// One segment of a road with a profile, with the profile at its two ends.
 struct Seg {
     a: [f64; 2],
@@ -26,6 +33,8 @@ struct Seg {
     /// Unit normal pointing to the left edge (the side the ribbon calls `left`).
     nrm: [f64; 2],
     half: f64,
+    /// Half-width of the flat zone (`flat_zone_m`); the blend starts beyond it.
+    flat: f64,
     z: [f32; 2],
     zl: [f32; 2],
     zr: [f32; 2],
@@ -39,7 +48,7 @@ impl Seg {
         let t = ((p[0] * self.dir[0] + p[1] * self.dir[1]) / self.len).clamp(0.0, 1.0);
         let (qx, qy) = (p[0] - self.dir[0] * self.len * t, p[1] - self.dir[1] * self.len * t);
         let dist = qx.hypot(qy);
-        if dist > self.half + ROAD_BLEND_M {
+        if dist > self.flat + ROAD_BLEND_M {
             return None;
         }
         let s = (qx * self.nrm[0] + qy * self.nrm[1]).clamp(-self.half, self.half);
@@ -48,10 +57,10 @@ impl Seg {
         let (zc, zl, zr) = (at(self.z), at(self.zl), at(self.zr));
         let k = (s / self.half) as f32;
         let edge = if k >= 0.0 { zc + (zl - zc) * k } else { zc + (zr - zc) * -k };
-        if dist <= self.half {
+        if dist <= self.flat {
             Some(edge)
         } else {
-            let u = ((dist - self.half) / ROAD_BLEND_M).clamp(0.0, 1.0) as f32;
+            let u = ((dist - self.flat) / ROAD_BLEND_M).clamp(0.0, 1.0) as f32;
             Some(edge + (g - edge) * u)
         }
     }
@@ -94,7 +103,8 @@ impl Field {
         }
         let has_edges = road.zl.len() == n && road.zr.len() == n;
         let half = road_width_m(&road.highway) / 2.0;
-        self.reach = self.reach.max(half + ROAD_BLEND_M);
+        let flat = flat_zone_m(half);
+        self.reach = self.reach.max(flat + ROAD_BLEND_M);
         for k in 0..n - 1 {
             let (a, b) = (road.points[k], road.points[k + 1]);
             let len = (b[0] - a[0]).hypot(b[1] - a[1]);
@@ -113,11 +123,12 @@ impl Field {
                 len,
                 nrm: unit_normal(a, b),
                 half,
+                flat,
                 z,
                 zl,
                 zr,
             };
-            let reach = half + ROAD_BLEND_M;
+            let reach = flat + ROAD_BLEND_M;
             let (c0, r0) = self.cell(a[0].min(b[0]) - reach, a[1].min(b[1]) - reach);
             let (c1, r1) = self.cell(a[0].max(b[0]) + reach, a[1].max(b[1]) + reach);
             let idx = self.segs.len() as u32;
@@ -184,7 +195,7 @@ impl Surface {
         }
         let mut best = vec![f32::INFINITY; n * n];
         for seg in &field.segs {
-            let reach = seg.half + ROAD_BLEND_M;
+            let reach = seg.flat + ROAD_BLEND_M;
             let x0 = seg.a[0].min(seg.a[0] + seg.dir[0] * seg.len) - reach;
             let x1 = seg.a[0].max(seg.a[0] + seg.dir[0] * seg.len) + reach;
             let y0 = seg.a[1].min(seg.a[1] + seg.dir[1] * seg.len) - reach;
