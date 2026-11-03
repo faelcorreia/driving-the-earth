@@ -606,11 +606,11 @@ mod tests {
     #[test]
     fn same_name_on_one_stretch_is_written_once_and_distant_repeats_stay() {
         // Two pieces of one street cut at a tile border: 120 m apart on the map.
-        let first = cand("Rua São Mateus", 3, 200.0, [100.0, 100.0], [0.0, 0.0]);
-        let second = cand("Rua São Mateus", 3, 150.0, [500.0, 100.0], [120.0, 0.0]);
+        let first = cand("Rua Exemplo", 3, 200.0, [100.0, 100.0], [0.0, 0.0]);
+        let second = cand("Rua Exemplo", 3, 150.0, [500.0, 100.0], [120.0, 0.0]);
         assert_eq!(select_labels(&[first.clone(), second]).len(), 1);
         // Another stretch of the same name, 1000 m away, keeps its own name.
-        let far = cand("Rua São Mateus", 3, 150.0, [900.0, 400.0], [1000.0, 0.0]);
+        let far = cand("Rua Exemplo", 3, 150.0, [900.0, 400.0], [1000.0, 0.0]);
         assert_eq!(select_labels(&[first, far]).len(), 2);
     }
 
