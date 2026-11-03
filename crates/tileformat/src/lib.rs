@@ -212,7 +212,7 @@ mod tests {
             },
             roads: vec![Polyline {
                 highway: "residential".into(),
-                name: "Rua São Mateus".into(),
+                name: "Rua Exemplo".into(),
                 points: vec![[-43.9123456789, -19.9234567891], [-43.9, -19.92]],
                 z: Vec::new(),
                 zl: Vec::new(),
@@ -264,9 +264,9 @@ mod tests {
     fn road_name_round_trips_and_is_omitted_when_empty() {
         let mut tile = sample_tile();
         let text = serde_json::to_string(&tile).unwrap();
-        assert!(text.contains("\"name\":\"Rua São Mateus\""), "{text}");
+        assert!(text.contains("\"name\":\"Rua Exemplo\""), "{text}");
         let back: Tile = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.roads[0].name, "Rua São Mateus");
+        assert_eq!(back.roads[0].name, "Rua Exemplo");
         tile.roads[0].name.clear();
         let text = serde_json::to_string(&tile).unwrap();
         assert!(!text.contains("name"), "{text}");
