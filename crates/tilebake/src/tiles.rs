@@ -8,6 +8,7 @@ use tileformat::{MapMeta, Polygon, Polyline, Tile};
 
 use crate::clip::{clip_polygon, clip_polyline, Rect};
 use crate::dem::{download_dem, read_smoothed_dem, tile_heights, MapGrid, Raster};
+use crate::region::{apply_regions, Region};
 
 fn invalid_data<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
@@ -125,11 +126,13 @@ pub fn build_tile(
     grid: &MapGrid,
     roads: &[Polyline],
     buildings: &[Polygon],
+    regions: &[Region],
     x: i32,
     y: i32,
 ) -> io::Result<(Tile, usize, usize)> {
     let rect = tile_rect(x, y, grid.tile_m);
-    let height = tile_heights(raster, grid, x, y)?;
+    let mut height = tile_heights(raster, grid, x, y)?;
+    apply_regions(&mut height, grid, regions, rect.x0, rect.y0);
     let mut tile_roads = Vec::new();
     for road in roads {
         for points in clip_polyline(&road.points, rect) {
@@ -157,6 +160,11 @@ pub fn build_tile(
     Ok((tile, counts.0, counts.1))
 }
 
+/// Regional packages listed in `index.json` of the packages folder (see `region::regions_dir`).
+pub fn load_regions(cache_root: &Path) -> io::Result<Vec<Region>> {
+    crate::region::load_indexed(&crate::region::regions_dir(cache_root))
+}
+
 /// Bakes all the tiles covering the radius from the raw data in `cache_root/<id>/raw/`,
 /// writes them to `cache_root/<id>/tiles/`, and then sets `meta.complete = true`.
 /// Needs `meta.json` and `raw/overpass.json`; downloads the DEM tile only if it is missing.
@@ -171,6 +179,7 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
 
     let (tif, _) = download_dem(cache_root, id, meta.center_lat, meta.center_lon)?;
     let raster = read_smoothed_dem(&tif)?;
+    let regions = load_regions(cache_root)?;
 
     let mut summary = BakeSummary {
         tiles: 0,
@@ -178,7 +187,7 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
         building_pieces: 0,
     };
     for (x, y) in covering_tiles(meta.radius_m, meta.tile_size_m) {
-        let (tile, r, b) = build_tile(&raster, &grid, &roads, &buildings, x, y)?;
+        let (tile, r, b) = build_tile(&raster, &grid, &roads, &buildings, &regions, x, y)?;
         tileformat::write_tile(cache_root, id, &tile)?;
         summary.tiles += 1;
         summary.road_pieces += r;
@@ -297,7 +306,7 @@ mod tests {
         let (roads, buildings) = parse_ways(OSM, &grid).unwrap();
         // Tile (0, 0): the road (x in [0, ~1046]) is cut to [0, 250] in x; the building
         // (x in [0, ~105], y in [0, ~56]) lies inside the tile and is kept whole.
-        let (tile, nr, nb) = build_tile(&raster, &grid, &roads, &buildings, 0, 0).unwrap();
+        let (tile, nr, nb) = build_tile(&raster, &grid, &roads, &buildings, &[], 0, 0).unwrap();
         assert_eq!((tile.x, tile.y), (0, 0));
         assert_eq!((tile.height.cols, tile.height.rows), (26, 26));
         assert!(tile.height.values.iter().all(|v| (*v - 100.0).abs() < 1e-3));
@@ -311,7 +320,7 @@ mod tests {
             assert!(p[1] >= -1e-9 && p[1] <= 250.0 + 1e-9);
         }
         // Tile (5, 0) starts at x = 1250 m, east of the road end (~1046 m): nothing there.
-        let (empty, nr, nb) = build_tile(&raster, &grid, &roads, &buildings, 5, 0).unwrap();
+        let (empty, nr, nb) = build_tile(&raster, &grid, &roads, &buildings, &[], 5, 0).unwrap();
         assert!(empty.roads.is_empty() && empty.buildings.is_empty());
         assert_eq!((nr, nb), (0, 0));
     }

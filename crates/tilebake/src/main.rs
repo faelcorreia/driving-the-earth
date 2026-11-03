@@ -2,6 +2,29 @@
 use std::path::Path;
 
 fn main() {
+    // `tilebake region <source-dir>`: builds the regional package described by <source-dir>/region.json
+    // (contour shapefiles next to it) into cache/regions/<id>/ and adds the id to cache/regions/index.json.
+    if std::env::args().nth(1).as_deref() == Some("region") {
+        let Some(source) = std::env::args_os().nth(2) else {
+            eprintln!("usage: tilebake region <source-dir>   (source-dir holds region.json and the .shp/.dbf files)");
+            std::process::exit(2);
+        };
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let base = tilebake::region::regions_dir(&cache);
+        match tilebake::region::build_from_shapefiles(Path::new(&source), &base) {
+            Ok(r) => println!(
+                "package {} written to {} ({} polygon vertices); index updated",
+                r.manifest.id,
+                base.join(&r.manifest.id).display(),
+                r.manifest.polygon_lonlat.len()
+            ),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let address = match std::env::var("TILEBAKE_ADDRESS") {
         Ok(e) if !e.trim().is_empty() => e,
         _ => {

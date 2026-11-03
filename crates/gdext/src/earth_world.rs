@@ -82,7 +82,7 @@ impl INode3D for EarthWorld {
         match spawn_car(position, yaw) {
             Some(car) => self.base_mut().add_child(&car),
             None => {
-                godot_error!("cannot instantiate res://car.tscn");
+                godot_error!("cannot instantiate res://tr4/tr4.tscn");
             }
         }
     }
@@ -96,7 +96,7 @@ fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
 
 /// Instantiates the car at `position`, turned by `yaw` about +Y.
 fn spawn_car(position: Vector3, yaw: f32) -> Option<Gd<Node3D>> {
-    let scene: Gd<PackedScene> = try_load("res://car.tscn").ok()?;
+    let scene: Gd<PackedScene> = try_load("res://tr4/tr4.tscn").ok()?;
     let mut car = scene.instantiate()?.try_cast::<Node3D>().ok()?;
     car.set_position(position);
     car.set_rotation(Vector3::new(0.0, yaw, 0.0));
