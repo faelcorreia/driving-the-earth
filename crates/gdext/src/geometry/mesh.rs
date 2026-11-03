@@ -30,6 +30,8 @@ pub struct TileGeometry {
     pub roads: MeshData,
     /// All buildings of the tile, one mesh (solid, with per-vertex colors).
     pub buildings: MeshData,
+    /// Street lamps of the tile (poles, heads and light pools are drawn from these), in order.
+    pub lamps: Vec<super::lamps::LampPost>,
 }
 
 /// Local `(x, y)` plus height to Godot world space.

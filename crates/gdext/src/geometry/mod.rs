@@ -6,7 +6,7 @@
 mod building;
 mod ground;
 mod junction;
-mod lamps;
+pub mod lamps;
 mod mesh;
 mod road;
 mod terrain;
@@ -82,5 +82,6 @@ pub fn tile_geometry_with(tile: &Tile, tile_m: f64, ground: &dyn Fn(f64, f64) ->
     }
 
     let buildings = building_mesh(tile, ground);
-    TileGeometry { terrain, roads, buildings }
+    let lamps = lamps::lamp_posts(tile, ground);
+    TileGeometry { terrain, roads, buildings, lamps }
 }

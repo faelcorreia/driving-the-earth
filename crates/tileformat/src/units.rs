@@ -85,6 +85,21 @@ pub mod lamps {
     pub const LAMP_CROSSING_CLEAR_M: f64 = 8.0;
     /// Service roads get lamps only when longer than this.
     pub const LAMP_SERVICE_MIN_M: f64 = 60.0;
+    /// Half-width of the pole (a thin six-sided prism).
+    pub const LAMP_POLE_RADIUS_M: f64 = 0.08;
+    /// Lamp head: length along the arm, width across it, height.
+    pub const LAMP_HEAD_LEN_M: f64 = 0.5;
+    pub const LAMP_HEAD_WIDTH_M: f64 = 0.3;
+    pub const LAMP_HEAD_HEIGHT_M: f64 = 0.15;
+    /// Radius of the light pool on the ground under the lamp.
+    pub const LAMP_GLOW_RADIUS_M: f64 = 9.0;
+    /// The light pool sits this far above the sampled terrain (no z-fighting).
+    pub const LAMP_GLOW_LIFT_M: f64 = 0.05;
+    /// Largest delay of a lamp after the threshold crossing, in game minutes (inclusive).
+    pub const LAMP_STAGGER_MAX_MIN: u32 = 6;
+    /// Real light: range of each light and the largest distance from the car to a lit lamp.
+    pub const LAMP_REAL_RANGE_M: f64 = 18.0;
+    pub const LAMP_REAL_REACH_M: f64 = 60.0;
 
     const _: () = assert!(LAMP_SPACING_M % ROAD_STATION_M == 0.0, "lamps sit on road stations");
     const _: () = assert!(LAMP_ARM_M > 0.0 && LAMP_HEIGHT_M > 0.0 && LAMP_SIDE_OFFSET_M >= 0.0);

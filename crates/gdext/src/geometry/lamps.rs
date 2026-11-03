@@ -5,12 +5,119 @@
 //! `LAMP_ARM_M` over the carriageway; nothing inside a building footprint and nothing closer
 //! than `LAMP_CROSSING_CLEAR_M` to another road axis of the tile.
 
-use tileformat::units::lamps::{LAMP_CROSSING_CLEAR_M, LAMP_SERVICE_MIN_M, LAMP_SIDE_OFFSET_M, LAMP_SPACING_M};
+use super::mesh::{normalize, push_up_facing, world, MeshData};
+use tileformat::units::lamps::{
+    LAMP_ARM_M, LAMP_CROSSING_CLEAR_M, LAMP_GLOW_LIFT_M, LAMP_GLOW_RADIUS_M, LAMP_HEAD_HEIGHT_M,
+    LAMP_HEAD_LEN_M, LAMP_HEAD_WIDTH_M, LAMP_HEIGHT_M, LAMP_POLE_RADIUS_M, LAMP_SERVICE_MIN_M,
+    LAMP_SIDE_OFFSET_M, LAMP_SPACING_M,
+};
 use tileformat::{road_width_m, Polygon, Polyline, Tile};
+
+/// A lamp placed in Godot world space: pole base on the sampled terrain and the arm direction as
+/// the angle of a turn about +Y (the arm points along the model's +X before the turn).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LampPost {
+    pub id: u64,
+    pub base: [f32; 3],
+    pub turn: f32,
+}
+
+/// Places the lamps of a tile on the terrain given by `ground(x, y)` (local meters, height in m).
+pub fn lamp_posts(tile: &Tile, ground: &dyn Fn(f64, f64) -> f32) -> Vec<LampPost> {
+    lamps_of_tile(tile)
+        .into_iter()
+        .map(|lamp| {
+            LampPost {
+                id: lamp.id,
+                base: world(lamp.base[0], lamp.base[1], ground(lamp.base[0], lamp.base[1])),
+                turn: lamp.arm_dir[1].atan2(lamp.arm_dir[0]) as f32,
+            }
+        })
+        .collect()
+}
+
+/// Thickness of the arm, in meters.
+const ARM_THICK_M: f64 = 0.1;
+
+/// Pole (six-sided, `LAMP_HEIGHT_M` tall) and arm, in model space: base at the origin, arm along +X.
+pub fn pole_model() -> MeshData {
+    let r = LAMP_POLE_RADIUS_M;
+    let h = LAMP_HEIGHT_M;
+    let mut m = MeshData::default();
+    let ring = |y: f64| -> Vec<[f64; 3]> {
+        (0..6)
+            .map(|k| {
+                let a = k as f64 * std::f64::consts::TAU / 6.0;
+                [r * a.cos(), y, r * a.sin()]
+            })
+            .collect()
+    };
+    let (bot, top) = (ring(0.0), ring(h));
+    for k in 0..6 {
+        let n = (k + 1) % 6;
+        push_quad(&mut m, [bot[k], bot[n], top[n], top[k]]);
+    }
+    push_box(&mut m, [0.0, h - ARM_THICK_M, -ARM_THICK_M / 2.0], [LAMP_ARM_M, h, ARM_THICK_M / 2.0]);
+    m
+}
+
+/// Lamp housing at the end of the arm, in the same model space as `pole_model`.
+pub fn head_model() -> MeshData {
+    let mut m = MeshData::default();
+    push_box(
+        &mut m,
+        [LAMP_ARM_M - LAMP_HEAD_LEN_M / 2.0, LAMP_HEIGHT_M - LAMP_HEAD_HEIGHT_M, -LAMP_HEAD_WIDTH_M / 2.0],
+        [LAMP_ARM_M + LAMP_HEAD_LEN_M / 2.0, LAMP_HEIGHT_M, LAMP_HEAD_WIDTH_M / 2.0],
+    );
+    m
+}
+
+/// Flat square of light on the ground under the arm (+Y up), in model space: side `2 * LAMP_GLOW_RADIUS_M`.
+/// The shader fades it radially from its vertices.
+pub fn glow_model() -> MeshData {
+    let (c, r) = (LAMP_ARM_M, LAMP_GLOW_RADIUS_M);
+    let y = LAMP_GLOW_LIFT_M;
+    let mut m = MeshData::default();
+    push_quad(&mut m, [[c - r, y, -r], [c + r, y, -r], [c + r, y, r], [c - r, y, r]]);
+    m
+}
+
+fn push_quad(m: &mut MeshData, p: [[f64; 3]; 4]) {
+    let base = m.vertices.len() as u32;
+    let n = normal_of(p[0], p[1], p[2]);
+    for v in p {
+        m.vertices.push([v[0] as f32, v[1] as f32, v[2] as f32]);
+        m.normals.push(n);
+    }
+    push_up_facing(m, base, base + 1, base + 2);
+    push_up_facing(m, base, base + 2, base + 3);
+}
+
+/// Axis-aligned box `[min, max]`, flat-shaded, outward winding (both sides face out; the lamp
+/// material is double-sided).
+fn push_box(m: &mut MeshData, min: [f64; 3], max: [f64; 3]) {
+    let c = |i: usize, j: usize, k: usize| [[min[0], max[0]][i], [min[1], max[1]][j], [min[2], max[2]][k]];
+    let faces = [
+        [c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0)],
+        [c(0, 0, 1), c(0, 1, 1), c(1, 1, 1), c(1, 0, 1)],
+        [c(0, 0, 0), c(0, 0, 1), c(1, 0, 1), c(1, 0, 0)],
+        [c(0, 1, 0), c(1, 1, 0), c(1, 1, 1), c(0, 1, 1)],
+        [c(0, 0, 0), c(0, 1, 0), c(0, 1, 1), c(0, 0, 1)],
+        [c(1, 0, 0), c(1, 0, 1), c(1, 1, 1), c(1, 1, 0)],
+    ];
+    for f in faces {
+        push_quad(m, f);
+    }
+}
+
+fn normal_of(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f32; 3] {
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    normalize([u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]])
+}
 
 /// One street lamp: the pole base on the ground and the unit direction of its arm.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)] // no consumer until the lamp render step (L1)
 pub struct Lamp {
     /// Stable id: a hash of the road key and the lamp index along it.
     pub id: u64,
@@ -29,7 +136,6 @@ pub fn is_lamp_road(highway: &str, length_m: f64) -> bool {
 }
 
 /// Lamps of every road of the tile. The road index is the key that seeds the ids.
-#[allow(dead_code)] // no consumer until the lamp render step (L1)
 pub fn lamps_of_tile(tile: &Tile) -> Vec<Lamp> {
     let mut out = Vec::new();
     for (idx, road) in tile.roads.iter().enumerate() {
@@ -242,5 +348,48 @@ mod tests {
         let b = [square(10.0, 0.0, 25.0, 10.0)];
         let fewer = lamps_of_road(7, &r, &[], &b);
         assert!(fewer.iter().all(|l| a.iter().any(|x| x.id == l.id)));
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn turn_points_the_model_arm_along_the_arm_direction() {
+        // Model arm is +X; a turn by theta maps it to (cos theta, 0, -sin theta) in Godot space.
+        for dir in [[1.0f64, 0.0], [0.0, 1.0], [-0.6, 0.8], [0.0, -1.0]] {
+            let turn = dir[1].atan2(dir[0]);
+            // Godot direction of the turned arm: (cos turn, 0, -sin turn) must equal (dir.x, 0, -dir.y).
+            assert!((turn.cos() - dir[0]).abs() < 1e-9);
+            assert!((-turn.sin() + dir[1]).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn models_have_triangles_within_budget() {
+        let pole = pole_model();
+        let head = head_model();
+        let glow = glow_model();
+        let tris = |m: &MeshData| m.indices.len() / 3;
+        assert!(tris(&pole) >= 24 && tris(&pole) <= 40, "pole {}", tris(&pole));
+        assert_eq!(tris(&head), 12);
+        assert_eq!(tris(&glow), 2);
+    }
+
+    #[test]
+    fn arm_tip_and_glow_center_sit_over_the_base() {
+        // The head is centered on the arm end at pole height.
+        let head = head_model();
+        let mut max_x = f32::MIN;
+        for v in &head.vertices {
+            max_x = max_x.max(v[0]);
+        }
+        assert!((max_x as f64 - (LAMP_ARM_M + LAMP_HEAD_LEN_M / 2.0)).abs() < 1e-6);
+        let glow = glow_model();
+        let xs: Vec<f32> = glow.vertices.iter().map(|v| v[0]).collect();
+        let cx = (xs.iter().cloned().fold(f32::MIN, f32::max) + xs.iter().cloned().fold(f32::MAX, f32::min)) / 2.0;
+        assert!((cx as f64 - LAMP_ARM_M).abs() < 1e-6);
+        assert!(glow.vertices.iter().all(|v| (v[1] as f64 - LAMP_GLOW_LIFT_M).abs() < 1e-6));
     }
 }
