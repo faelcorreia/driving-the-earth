@@ -15,11 +15,11 @@ use godot::classes::{
 use godot::prelude::*;
 
 use super::sky::{self, Crossing, LightThreshold, ThresholdBank};
+use super::time_panel::TimePanel;
+use super::time_ui::{self, Shortcut, Speed, FAST_SPEED};
 
 /// Passo de tempo do atalho de depuração `[` e `]`, em segundos de jogo.
 const DEBUG_STEP_S: f64 = 15.0 * 60.0;
-/// Velocidade do relógio ao alternar com `\` (ou no padrão).
-const FAST_SPEED: f64 = 60.0;
 /// Período do log de hora e luz, em segundos reais.
 const LOG_PERIOD_S: f64 = 5.0;
 /// Energia da luz direta do sol ao meio-dia (Godot usa ~1 como padrão).
@@ -65,8 +65,13 @@ pub struct EnvironmentClock {
     #[init(val = 15)]
     #[export]
     start_day: i64,
-    /// Começa `start_minutes_before_sunset` antes do ocaso do dia inicial; senão, na hora abaixo.
+    /// Começa na hora real do sistema (Belo Horizonte). Tem prioridade sobre a data inicial abaixo.
     #[init(val = true)]
+    #[export]
+    start_at_now: bool,
+    /// Com `start_at_now` falso: começa `start_minutes_before_sunset` antes do ocaso do dia inicial;
+    /// senão, na hora abaixo.
+    #[init(val = false)]
     #[export]
     start_at_sunset: bool,
     #[init(val = 30.0)]
@@ -76,7 +81,7 @@ pub struct EnvironmentClock {
     #[export]
     start_hour_local: f64,
     /// Segundos de jogo por segundo real. 1 = tempo real; 0 = fixo.
-    #[init(val = FAST_SPEED)]
+    #[init(val = 1.0)]
     #[export]
     speed: f64,
     /// Segue a hora do sistema, em vez de avançar com `speed`.
@@ -108,6 +113,8 @@ pub struct EnvironmentClock {
     /// Game seconds since the start when the street lamps came on; `None` while they are off.
     lamp_on_since: Option<f64>,
     lamps_primed: bool,
+    /// Painel de hora (tecla T), criado em `ready`.
+    panel: Option<TimePanel>,
 }
 
 #[godot_api]
@@ -116,6 +123,41 @@ impl EnvironmentClock {
     /// false when it rose above `off_above`.
     #[signal]
     fn light_threshold_crossed(name: GString, descending: bool);
+
+    /// Botão "Aplicar" do painel de hora: lê data e hora dos campos.
+    #[func]
+    fn on_set_pressed(&mut self) {
+        self.apply_typed_time();
+    }
+
+    /// Enter em um campo do painel de hora: o mesmo que "Aplicar".
+    #[func]
+    fn on_text_submitted(&mut self, _text: GString) {
+        self.apply_typed_time();
+    }
+
+    #[func]
+    fn on_now_pressed(&mut self) {
+        self.jump(Shortcut::Now);
+    }
+
+    #[func]
+    fn on_sunrise_pressed(&mut self) {
+        self.jump(Shortcut::Sunrise);
+    }
+
+    #[func]
+    fn on_sunset_pressed(&mut self) {
+        self.jump(Shortcut::Sunset);
+    }
+
+    /// Seletor de velocidade do painel: índice em `Speed::ALL`.
+    #[func]
+    fn on_speed_selected(&mut self, index: i64) {
+        if let Some(speed) = usize::try_from(index).ok().and_then(|i| Speed::ALL.get(i)) {
+            self.change_speed(speed.multiplier());
+        }
+    }
 }
 
 impl EnvironmentClock {
@@ -328,12 +370,69 @@ impl EnvironmentClock {
         self.real_time = false;
         godot_print!("environment: speed {speed}x");
     }
+
+    /// Põe o relógio em `unix` (sai do tempo real; a velocidade fica como está) e atualiza o painel.
+    fn set_game_time(&mut self, unix: f64) {
+        self.sim_unix = unix;
+        self.real_time = false;
+        godot_print!("environment: time set to {} (local)", self.local_clock());
+        let (sim, speed) = (self.sim_unix, self.speed);
+        if let Some(panel) = self.panel.as_mut() {
+            panel.show_fields(sim);
+            panel.update(sim, speed);
+        }
+    }
+
+    /// Atalho do painel: agora, nascer ou pôr do sol.
+    fn jump(&mut self, shortcut: Shortcut) {
+        match time_ui::shortcut_target(shortcut, self.sim_unix, Self::system_unix()) {
+            Some(target) => self.set_game_time(target),
+            None => {
+                if let Some(panel) = self.panel.as_mut() {
+                    panel.show_error(true);
+                }
+            }
+        }
+    }
+
+    /// Aplica a data e a hora digitadas no painel; se alguma não for válida, mostra o erro.
+    fn apply_typed_time(&mut self) {
+        let Some((date, hour)) = self.panel.as_ref().map(|p| p.typed()) else {
+            return;
+        };
+        match (time_ui::parse_date(&date), time_ui::parse_time(&hour)) {
+            (Some((y, m, d)), Some(h)) => self.set_game_time(sky::local_to_unix(y, m, d, h)),
+            _ => {
+                if let Some(panel) = self.panel.as_mut() {
+                    panel.show_error(true);
+                }
+            }
+        }
+    }
+
+    /// Abre ou fecha o painel de hora. Ao abrir, os campos mostram a hora do jogo.
+    fn toggle_time_panel(&mut self) {
+        let (sim, speed) = (self.sim_unix, self.speed);
+        let Some(panel) = self.panel.as_mut() else {
+            return;
+        };
+        let open = !panel.is_open();
+        if open {
+            panel.show_fields(sim);
+            panel.update(sim, speed);
+        }
+        panel.set_open(open);
+        godot_print!(
+            "environment: time panel {}",
+            if open { "open" } else { "closed" }
+        );
+    }
 }
 
 #[godot_api]
 impl INode for EnvironmentClock {
     fn ready(&mut self) {
-        self.sim_unix = if self.real_time {
+        self.sim_unix = if self.real_time || self.start_at_now {
             Self::system_unix()
         } else {
             self.start_unix()
@@ -353,6 +452,9 @@ impl INode for EnvironmentClock {
         );
         self.setup_lights();
         self.setup_environment();
+        let panel = TimePanel::build(&self.to_gd());
+        self.base_mut().add_child(&panel.root().upcast::<Node>());
+        self.panel = Some(panel);
         if let Some(old) = self.replaced_sun.take() {
             let mut old = old;
             old.queue_free();
@@ -385,6 +487,12 @@ impl INode for EnvironmentClock {
         self.light = sky::light_level(sun.altitude_deg, &moon, WEATHER_FACTOR);
         let eye = self.camera_forward();
         self.apply_visuals(sun, moon, eye);
+        let (sim, speed) = (self.sim_unix, self.speed);
+        if self.panel.as_mut().is_some_and(|p| p.tick(delta)) {
+            if let Some(panel) = self.panel.as_mut() {
+                panel.update(sim, speed);
+            }
+        }
 
         let now = self.sim_unix - self.origin_unix;
         set_global(LAMP_GLOBALS[2], now as f32);
@@ -448,6 +556,11 @@ impl INode for EnvironmentClock {
         } else if event.is_action_pressed("env_speed_toggle") {
             let next = if self.speed > 0.0 { 0.0 } else { FAST_SPEED };
             self.change_speed(next);
+        } else if event.is_action_pressed("env_time_panel")
+            || (event.is_action_pressed("ui_cancel")
+                && self.panel.as_ref().is_some_and(|p| p.is_open()))
+        {
+            self.toggle_time_panel();
         }
     }
 }

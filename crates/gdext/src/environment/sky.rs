@@ -63,6 +63,26 @@ pub fn local_hour(unix_s: f64) -> f64 {
     (unix_s + LOCAL_UTC_OFFSET_S).rem_euclid(SECONDS_PER_DAY) / 3600.0
 }
 
+/// Data civil local (ano, mês, dia) de um instante Unix em Belo Horizonte.
+pub fn local_date(unix_s: f64) -> (i64, u32, u32) {
+    let days = ((unix_s + LOCAL_UTC_OFFSET_S) / SECONDS_PER_DAY).floor() as i64;
+    civil_from_days(days)
+}
+
+/// Data civil (ano, mês, dia) de `days` desde 1970-01-01 (inverso de `days_from_civil`).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
 /// Dias desde 1970-01-01 de uma data do calendário gregoriano (algoritmo de H. Hinnant).
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
@@ -144,20 +164,40 @@ pub fn moon(unix_s: f64) -> MoonState {
 /// Primeiro instante, a partir de `from_unix` e em até 24 h, em que o sol cruza para baixo
 /// a altitude de nascer/pôr (`SUN_RISE_ALT_DEG`). Varredura de 1 min, depois bisseção.
 pub fn next_sunset(from_unix: f64) -> Option<f64> {
+    next_horizon_crossing(from_unix, false)
+}
+
+/// Primeiro instante, a partir de `from_unix` e em até 24 h, em que o sol cruza para cima
+/// a altitude de nascer/pôr (`SUN_RISE_ALT_DEG`).
+pub fn next_sunrise(from_unix: f64) -> Option<f64> {
+    next_horizon_crossing(from_unix, true)
+}
+
+/// Primeiro cruzamento da altitude de nascer/pôr após `from_unix`: para cima se `rising`,
+/// senão para baixo. Varredura de 1 min, depois bisseção.
+fn next_horizon_crossing(from_unix: f64, rising: bool) -> Option<f64> {
     let thr = SUN_RISE_ALT_DEG;
+    // A crossing ends on the side the search looks for: above the threshold if rising, below if not.
+    let crosses = |alt: f64, prev_alt: f64| {
+        if rising {
+            prev_alt < thr && alt >= thr
+        } else {
+            prev_alt >= thr && alt < thr
+        }
+    };
     let mut prev = from_unix;
     let mut prev_alt = sun(prev).altitude_deg;
     for i in 1..=24 * 60 {
         let t = from_unix + 60.0 * i as f64;
         let alt = sun(t).altitude_deg;
-        if prev_alt >= thr && alt < thr {
+        if crosses(alt, prev_alt) {
             let (mut lo, mut hi) = (prev, t);
             for _ in 0..30 {
                 let mid = 0.5 * (lo + hi);
-                if sun(mid).altitude_deg >= thr {
-                    lo = mid;
-                } else {
+                if (sun(mid).altitude_deg >= thr) == rising {
                     hi = mid;
+                } else {
+                    lo = mid;
                 }
             }
             return Some(0.5 * (lo + hi));

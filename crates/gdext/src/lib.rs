@@ -6,6 +6,7 @@ mod geometry;
 #[cfg(test)]
 mod measure;
 mod render;
+mod ui_text;
 mod world;
 
 struct DriveEarthExt;
