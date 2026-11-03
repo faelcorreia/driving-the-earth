@@ -201,3 +201,41 @@ fn road_clearance() {
         summarize(name, &sel);
     }
 }
+
+/// P1 breakdown on real tiles: opening the neighborhood (file reads) against `Map::tile_geometry`
+/// with it already open. Run: `cargo test --release -p driving_the_earth_ext tile_perf_real -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn tile_perf_real() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let id = std::env::var("MEASURE_MAP").unwrap_or_else(|_| "casa-10km".into());
+    let index = open_map(&root, &id).expect("open map");
+    let reps = 30;
+    for (x, y) in [(-1, -2), (0, 0), (-2, -1)] {
+        let (mut open, mut map_ms) = (Vec::new(), Vec::new());
+        let mut tris = 0;
+        for _ in 0..reps {
+            let t0 = Instant::now();
+            let map = index.neighborhood(x, y).expect("neighborhood");
+            open.push(t0.elapsed().as_secs_f64() * 1e3);
+            let center = map
+                .tiles
+                .iter()
+                .find(|t| (t.x, t.y) == (x, y))
+                .expect("center");
+            let t1 = Instant::now();
+            let g = map.tile_geometry(center);
+            map_ms.push(t1.elapsed().as_secs_f64() * 1e3);
+            tris = g.terrain.indices.len() / 3
+                + g.roads.indices.len() / 3
+                + g.buildings.indices.len() / 3;
+        }
+        println!(
+            "tile ({x},{y}) tri {tris} | open p50 {:.2} p90 {:.2} | Map::tile_geometry p50 {:.2} p90 {:.2}",
+            pct(&mut open.clone(), 0.5),
+            pct(&mut open, 0.9),
+            pct(&mut map_ms.clone(), 0.5),
+            pct(&mut map_ms, 0.9)
+        );
+    }
+}

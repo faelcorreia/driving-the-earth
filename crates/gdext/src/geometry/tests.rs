@@ -745,3 +745,49 @@ fn real_tile_terrain_stays_under_the_ribbons() {
         "terrain {worst:.4} m above the ribbon in tile (-1, -2)"
     );
 }
+
+/// P1: the ribbon mesh against its profile, on the axis and on both edges, within 2 cm. A road
+/// with a grade (linear legs) and a cross slope of 5 cm per edge on flat ground. The edge
+/// height is linear across the half width (`zl`/`zr` at the edges, `z` on the axis).
+#[test]
+fn ribbon_mesh_matches_profile_on_axis_and_edges_within_2cm() {
+    let y0 = 125.0;
+    let road = Polyline {
+        name: String::new(),
+        highway: "residential".into(),
+        points: vec![[30.0, y0], [100.0, y0], [220.0, y0]],
+        z: vec![0.0, 0.7, 1.4],
+        zl: vec![0.05, 0.75, 1.45],
+        zr: vec![-0.05, 0.65, 1.35],
+    };
+    let half = tileformat::road_width_m(&road.highway) / 2.0;
+    let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
+    let g = tile_geometry(&t, 250.0);
+    let lift = ROAD_LIFT_M as f64;
+    let axis_z = |x: f64| {
+        if x <= 100.0 {
+            (x - 30.0) / 70.0 * 0.7
+        } else {
+            0.7 + (x - 100.0) / 120.0 * 0.7
+        }
+    };
+    let (mut checked, mut worst) = (0, 0.0f64);
+    for x in (40..=210).step_by(5) {
+        let x = x as f64;
+        for (s, offset) in [(0.0, 0.0), (0.8 * half, 0.05), (-0.8 * half, -0.05)] {
+            let Some(h) = ribbon_height(&g.roads, x, y0 + s) else {
+                continue;
+            };
+            // `offset` is the edge's cross slope; the lateral share of it is |s| / half.
+            let want = axis_z(x) + offset * (s.abs() / half) + lift;
+            checked += 1;
+            worst = worst.max((h - want).abs());
+        }
+    }
+    println!("ribbon vs profile: {checked} points, worst {worst:.4} m");
+    assert!(checked > 100, "only {checked} points checked");
+    assert!(
+        worst <= 0.02,
+        "worst deviation {worst:.4} m > 0.02 m over {checked} points"
+    );
+}
