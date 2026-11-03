@@ -118,7 +118,7 @@ pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: 
             ring.pop();
         }
         if ring.len() >= 3 {
-            buildings.push(Polygon { points: ring });
+            buildings.push(Polygon::real(ring));
         }
     }
 }
@@ -195,7 +195,7 @@ pub fn build_tile_from(
     for b in buildings {
         let points = clip_polygon(&b.points, rect);
         if points.len() >= 3 {
-            tile_buildings.push(Polygon { points });
+            tile_buildings.push(Polygon::real(points));
         }
     }
     let counts = (tile_roads.len(), tile_buildings.len());
@@ -205,6 +205,7 @@ pub fn build_tile_from(
         height,
         roads: tile_roads,
         buildings: tile_buildings,
+        ground: Vec::new(),
     };
     (tile, counts.0, counts.1)
 }

@@ -24,7 +24,7 @@ const RADIUS_ENV: &str = "TILEBAKE_RADIUS_M";
 /// Collection radius around the home, in meters, when `TILEBAKE_RADIUS_M` is not set.
 pub const DEFAULT_RADIUS_M: f64 = 10000.0;
 /// Side of a grid tile, in meters.
-pub const DEFAULT_TILE_M: f64 = 250.0;
+pub const DEFAULT_TILE_M: f64 = tileformat::units::TILE_M;
 
 /// Result of `download_osm`: metadata and raw counts.
 #[derive(Debug)]

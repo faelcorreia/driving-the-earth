@@ -107,6 +107,7 @@ mod tests {
                 })
                 .collect(),
             buildings: vec![],
+            ground: vec![],
         }
     }
 
