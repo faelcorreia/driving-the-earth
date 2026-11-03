@@ -217,32 +217,166 @@ pub fn sun_energy(sun_alt_deg: f64, max: f64) -> f64 {
     max * ((sun_alt_deg - SUN_DARK_DEG) / (SUN_FULL_DEG - SUN_DARK_DEG)).clamp(0.0, 1.0)
 }
 
-/// Cor do horizonte do céu (também a cor da neblina), pela altura do sol.
+/// Passo suave de Hermite (como o `smoothstep` do GLSL); aceita `e0 > e1` (passo invertido).
+fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp3(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+/// Cor do horizonte do lado oposto ao sol (e da neblina de horizonte): azul-marinho escuro à
+/// noite, com um leve brilho de cidade; azul claro de dia.
 pub fn horizon_tint(sun_alt_deg: f64) -> Rgb {
     gradient(
         &[
-            (-12.0, [0.05, 0.07, 0.14]),
-            (-4.0, [0.36, 0.24, 0.40]),
-            (1.0, [1.0, 0.50, 0.20]),
-            (12.0, [0.90, 0.70, 0.60]),
-            (25.0, [0.62, 0.82, 0.98]),
+            (-12.0, [0.07, 0.07, 0.12]),
+            (-6.0, [0.10, 0.12, 0.26]),
+            (-2.0, [0.22, 0.22, 0.36]),
+            (2.0, [0.45, 0.48, 0.62]),
+            (12.0, [0.70, 0.82, 0.95]),
+            (25.0, [0.72, 0.86, 1.0]),
         ],
         sun_alt_deg,
     )
 }
 
-/// Cor do topo do céu, pela altura do sol.
+/// Faixa intermediária do céu (entre horizonte e topo) do lado oposto ao sol.
+pub fn mid_tint(sun_alt_deg: f64) -> Rgb {
+    gradient(
+        &[
+            (-12.0, [0.02, 0.03, 0.08]),
+            (-6.0, [0.12, 0.16, 0.30]),
+            (-2.0, [0.36, 0.30, 0.40]),
+            (2.0, [0.62, 0.60, 0.68]),
+            (12.0, [0.66, 0.80, 0.95]),
+            (25.0, [0.72, 0.86, 1.0]),
+        ],
+        sun_alt_deg,
+    )
+}
+
+/// Cor do topo do céu, pela altura do sol: azul-petróleo no crepúsculo, azul-escuro à noite.
 pub fn zenith_tint(sun_alt_deg: f64) -> Rgb {
     gradient(
         &[
             (-12.0, [0.01, 0.02, 0.06]),
-            (-4.0, [0.08, 0.10, 0.22]),
-            (1.0, [0.30, 0.34, 0.60]),
-            (12.0, [0.18, 0.36, 0.78]),
-            (25.0, [0.22, 0.46, 0.92]),
+            (-6.0, [0.04, 0.06, 0.15]),
+            (-2.0, [0.06, 0.16, 0.26]),
+            (1.0, [0.08, 0.24, 0.32]),
+            (6.0, [0.12, 0.32, 0.55]),
+            (12.0, [0.18, 0.38, 0.80]),
+            (25.0, [0.22, 0.48, 0.94]),
         ],
         sun_alt_deg,
     )
+}
+
+/// Brilho baixo do lado do ocaso: rosa escuro com o sol bem abaixo, laranja intenso no ocaso.
+pub fn glow_tint(sun_alt_deg: f64) -> Rgb {
+    gradient(
+        &[
+            (-10.0, [0.45, 0.20, 0.32]),
+            (-5.0, [0.95, 0.38, 0.30]),
+            (-1.0, [1.0, 0.40, 0.12]),
+            (3.0, [1.0, 0.52, 0.20]),
+            (10.0, [1.0, 0.70, 0.45]),
+        ],
+        sun_alt_deg,
+    )
+}
+
+/// Banda alta do lado do ocaso: amarelo pálido logo acima do laranja.
+pub fn glow_hi_tint(sun_alt_deg: f64) -> Rgb {
+    gradient(
+        &[
+            (-10.0, [0.55, 0.30, 0.45]),
+            (-3.0, [0.95, 0.70, 0.45]),
+            (1.0, [1.0, 0.85, 0.45]),
+            (6.0, [1.0, 0.92, 0.70]),
+        ],
+        sun_alt_deg,
+    )
+}
+
+/// Parâmetros do céu para o shader (`godot/shaders/sky.gdshader`) e para a neblina, pela altura
+/// do sol, pela luz global e pela lua. Direções (sol, lua) ficam fora: vêm de `horizontal`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkyLook {
+    pub zenith: Rgb,
+    pub mid: Rgb,
+    pub horizon: Rgb,
+    /// Faixa baixa do lado do ocaso.
+    pub glow: Rgb,
+    /// Faixa alta do lado do ocaso e cor do halo.
+    pub glow_hi: Rgb,
+    /// Força da faixa do ocaso, 0..1.
+    pub glow_strength: f32,
+    /// Força do halo de espalhamento em volta do sol, 0..1.
+    pub halo_strength: f32,
+    /// Cor do disco do sol (sem o ganho HDR do shader).
+    pub sun_color: Rgb,
+    /// Visibilidade do disco do sol, 0..1.
+    pub sun_disk: f32,
+    /// Visibilidade das estrelas, 0..1: 1 com luz < 0,05; 0 com luz >= 0,15.
+    pub star_strength: f32,
+    /// Fração iluminada da lua, 0 (nova) a 1 (cheia).
+    pub moon_phase: f32,
+    /// Visibilidade do disco da lua, 0..1 (noite e lua acima do horizonte).
+    pub moon_visibility: f32,
+}
+
+/// Parâmetros do céu para uma altura do sol, luz global 0..1 e estado da lua.
+pub fn sky_look(sun_alt_deg: f64, light: f64, moon: &MoonState) -> SkyLook {
+    let alt = sun_alt_deg as f32;
+    SkyLook {
+        zenith: zenith_tint(sun_alt_deg),
+        mid: mid_tint(sun_alt_deg),
+        horizon: horizon_tint(sun_alt_deg),
+        glow: glow_tint(sun_alt_deg),
+        glow_hi: glow_hi_tint(sun_alt_deg),
+        glow_strength: smooth(-10.0, -5.0, alt) * (1.0 - smooth(2.0, 8.0, alt)),
+        halo_strength: 0.6 * smooth(-12.0, -4.0, alt) * (1.0 - 0.6 * smooth(8.0, 30.0, alt)),
+        sun_color: sun_tint(sun_alt_deg),
+        sun_disk: smooth(-1.5, 0.0, alt),
+        star_strength: smooth(0.15, 0.05, light as f32),
+        moon_phase: moon.illumination as f32,
+        moon_visibility: smooth(-1.0, 2.0, moon.position.altitude_deg as f32)
+            * (1.0 - smooth(-4.0, 2.0, alt)),
+    }
+}
+
+/// Cor do céu numa direção, sem estrelas, sol e lua: a mesma conta de `sky()` em
+/// `godot/shaders/sky.gdshader`. Serve à cor da neblina na direção do olhar. `sun_dir` e `eye`
+/// são unitários, em coordenadas do Godot (y para cima).
+pub fn sky_color(look: &SkyLook, sun_dir: [f32; 3], eye: [f32; 3]) -> Rgb {
+    let h = eye[1].max(0.0);
+    let mut c = lerp3(look.horizon, look.mid, smooth(0.0, 0.25, h));
+    c = lerp3(c, look.zenith, smooth(0.1, 0.9, h));
+    // Lado do ocaso: o azimute do sol (mesmo abaixo do horizonte) define o lado.
+    let sun_h = norm2([sun_dir[0], sun_dir[2]]);
+    let eye_h = norm2([eye[0], eye[2]]);
+    let side = (sun_h[0] * eye_h[0] + sun_h[1] * eye_h[1]) * 1.25 - 0.25;
+    let side = side.clamp(0.0, 1.0);
+    let low = 1.0 - smooth(-0.05, 0.45, eye[1]);
+    let band = smooth(0.0, 0.08, eye[1]) * (1.0 - smooth(0.1, 0.35, eye[1]));
+    c = lerp3(c, look.glow, look.glow_strength * side * low);
+    c = lerp3(c, look.glow_hi, look.glow_strength * side * band * 0.8);
+    // Halo: espalhamento para a frente em volta do sol.
+    let cs = (eye[0] * sun_dir[0] + eye[1] * sun_dir[1] + eye[2] * sun_dir[2]).max(0.0);
+    let halo = look.halo_strength * cs.powi(6) * 0.5;
+    [0, 1, 2].map(|i| c[i] + look.glow_hi[i] * halo)
+}
+
+fn norm2(v: [f32; 2]) -> [f32; 2] {
+    let len = (v[0] * v[0] + v[1] * v[1]).sqrt();
+    if len < 1e-6 {
+        [0.0, 0.0]
+    } else {
+        [v[0] / len, v[1] / len]
+    }
 }
 
 /// Limiar de luz com histerese: o sinal "descendo" dispara ao cair abaixo de `on_below`;
@@ -490,5 +624,136 @@ mod tests {
             seen.insert(d as u32);
         }
         assert_eq!(seen.len(), 6, "all 0..=5 minute delays appear");
+    }
+
+    fn luma(c: Rgb) -> f32 {
+        0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    }
+
+    fn no_moon() -> MoonState {
+        MoonState {
+            position: Horizontal {
+                azimuth_deg: 0.0,
+                altitude_deg: -10.0,
+            },
+            illumination: 0.0,
+            waxing: false,
+        }
+    }
+
+    #[test]
+    fn sky_colors_are_finite_and_in_unit_range() {
+        let moon = MoonState {
+            illumination: 0.5,
+            ..no_moon()
+        };
+        let sun_dir = [0.6_f32, 0.2, -0.5];
+        let eyes = [[0.0_f32, 1.0, 0.0], [0.0, 0.0, -1.0], [0.6, -0.2, 0.3]];
+        let mut alt = -90.0;
+        while alt <= 90.0 {
+            for light in [0.0, 0.5, 1.0] {
+                let look = sky_look(alt, light, &moon);
+                for c in [
+                    look.zenith,
+                    look.mid,
+                    look.horizon,
+                    look.glow,
+                    look.glow_hi,
+                    look.sun_color,
+                ] {
+                    assert!(
+                        c.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+                        "alt {alt}: {c:?}"
+                    );
+                }
+                for x in [
+                    look.glow_strength,
+                    look.halo_strength,
+                    look.sun_disk,
+                    look.star_strength,
+                    look.moon_visibility,
+                ] {
+                    assert!(x.is_finite() && (0.0..=1.0).contains(&x), "alt {alt}: {x}");
+                }
+                for eye in eyes {
+                    let c = sky_color(&look, sun_dir, eye);
+                    assert!(
+                        c.iter().all(|v| v.is_finite() && (0.0..=1.5).contains(v)),
+                        "alt {alt}: {c:?}"
+                    );
+                }
+            }
+            alt += 0.5;
+        }
+    }
+
+    #[test]
+    fn zenith_gets_brighter_with_the_sun() {
+        let mut prev = 0.0_f32;
+        let mut alt = -18.0;
+        while alt <= 30.0 {
+            let l = luma(zenith_tint(alt));
+            assert!(l >= prev - 1e-6, "zenith luma drops at {alt}: {l} < {prev}");
+            prev = l;
+            alt += 0.25;
+        }
+        let mut prev = 0.0_f32;
+        let mut alt = -12.0;
+        while alt <= 25.0 {
+            let l = luma(horizon_tint(alt));
+            assert!(
+                l >= prev - 1e-6,
+                "horizon luma drops at {alt}: {l} < {prev}"
+            );
+            prev = l;
+            alt += 0.25;
+        }
+    }
+
+    #[test]
+    fn night_sky_is_dark_but_not_black() {
+        for alt in [-90.0, -30.0, -12.0] {
+            let look = sky_look(alt, 0.0, &no_moon());
+            assert!(luma(look.zenith) > 0.01, "zenith at {alt} too dark");
+            assert!(
+                luma(look.horizon) > luma(look.zenith),
+                "horizon at {alt} not above zenith"
+            );
+        }
+    }
+
+    #[test]
+    fn sunset_glows_on_the_sun_side_and_stays_blue_opposite() {
+        let alt = -1.0;
+        let look = sky_look(alt, 0.5, &no_moon());
+        // Sol no azimute 250 (oeste-sudoeste), abaixo do horizonte; olhar no mesmo azimute e
+        // olhar para o lado oposto (70).
+        let sun_dir = [-0.9_f32, -0.02, 0.2];
+        let toward = norm2([-1.0, 0.2]);
+        let eye_side = [toward[0] * 0.98, 0.05, toward[1] * 0.98];
+        let eye_opposite = [-eye_side[0], 0.05, -eye_side[2]];
+        let warm = sky_color(&look, sun_dir, eye_side);
+        assert!(
+            warm[0] > 0.8 && warm[0] > 2.0 * warm[2],
+            "sun side not orange: {warm:?}"
+        );
+        let cool = sky_color(&look, sun_dir, eye_opposite);
+        assert!(cool[2] > cool[0], "opposite side not blue: {cool:?}");
+        // Topo no ocaso: azul-petróleo (verde e azul acima do vermelho).
+        let zen = zenith_tint(alt);
+        assert!(
+            zen[1] > 2.0 * zen[0] && zen[2] > zen[0],
+            "zenith not petrol: {zen:?}"
+        );
+    }
+
+    #[test]
+    fn stars_only_when_light_is_low() {
+        let moon = no_moon();
+        assert_eq!(sky_look(-30.0, 0.15, &moon).star_strength, 0.0);
+        assert_eq!(sky_look(-30.0, 0.6, &moon).star_strength, 0.0);
+        assert_eq!(sky_look(-30.0, 0.0, &moon).star_strength, 1.0);
+        let mid = sky_look(-30.0, 0.10, &moon).star_strength;
+        assert!((0.0..1.0).contains(&mid), "star fade {mid}");
     }
 }

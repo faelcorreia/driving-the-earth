@@ -9,8 +9,8 @@ use godot::classes::light_3d::Param;
 use godot::classes::rendering_server::GlobalShaderParameterType;
 use godot::classes::RenderingServer;
 use godot::classes::{
-    DirectionalLight3D, Environment, INode, InputEvent, Node, ProceduralSkyMaterial, Sky,
-    WorldEnvironment,
+    Camera3D, DirectionalLight3D, Environment, INode, InputEvent, Node, Shader, ShaderMaterial,
+    Sky, WorldEnvironment,
 };
 use godot::prelude::*;
 
@@ -40,8 +40,8 @@ const LAMP_OFF_ABOVE: f64 = 0.50;
 /// Globais de shader dos postes: instante do acendimento (s de jogo desde o início, -1 apagado),
 /// estado (1 aceso, 0 apagado) e o instante de jogo atual (s desde o início).
 const LAMP_GLOBALS: [&str; 3] = ["lamp_on_time", "lamp_state", "lamp_now"];
-/// Cor do chão embaixo do horizonte do céu.
-const GROUND_BOTTOM: Color = Color::from_rgb(0.12, 0.13, 0.16);
+/// Cobertura de nuvens do céu (ponto de extensão; sem nuvens por enquanto).
+const CLOUD_COVER: f32 = 0.0;
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
@@ -90,7 +90,7 @@ pub struct EnvironmentClock {
     /// Sol antigo da cena, liberado ao criar o novo.
     replaced_sun: Option<Gd<Node>>,
     env: Option<Gd<Environment>>,
-    sky_mat: Option<Gd<ProceduralSkyMaterial>>,
+    sky_mat: Option<Gd<ShaderMaterial>>,
     sun: Option<Gd<DirectionalLight3D>>,
     moon: Option<Gd<DirectionalLight3D>>,
     bank: ThresholdBank,
@@ -203,7 +203,12 @@ impl EnvironmentClock {
             godot_warn!("environment: no WorldEnvironment under the scene root, sky not driven");
             return;
         };
-        let mut sky_mat = ProceduralSkyMaterial::new_gd();
+        let Ok(shader) = try_load::<Shader>("res://shaders/sky.gdshader") else {
+            godot_warn!("environment: res://shaders/sky.gdshader not found, sky not driven");
+            return;
+        };
+        let mut sky_mat = ShaderMaterial::new_gd();
+        sky_mat.set_shader(&shader);
         let mut sky = Sky::new_gd();
         sky.set_material(&sky_mat);
         let mut env = Environment::new_gd();
@@ -211,7 +216,9 @@ impl EnvironmentClock {
         env.set_sky(&sky);
         env.set_ambient_source(AmbientSource::SKY);
         env.set_tonemapper(ToneMapper::AGX);
-        sky_mat.set_ground_bottom_color(GROUND_BOTTOM);
+        // Sem a neblina tingindo o céu: o fundo é o shader; a neblina de terreno segue o céu
+        // na direção do olhar (ver `apply_visuals`), então a costura no horizonte fica coerente.
+        env.set_fog_sky_affect(0.0);
         world_env.set_environment(&env);
         self.env = Some(env);
         self.sky_mat = Some(sky_mat);
@@ -238,34 +245,55 @@ impl EnvironmentClock {
         )
     }
 
-    fn apply_visuals(&mut self, sun: sky::Horizontal, moon: sky::MoonState) {
+    /// Direção para onde a câmera olha (unitária, Godot). Sem câmera, o -Z do mundo.
+    fn camera_forward(&self) -> Vector3 {
+        self.base()
+            .get_viewport()
+            .and_then(|v| v.get_camera_3d())
+            .map(|cam: Gd<Camera3D>| {
+                (cam.get_global_transform().basis * Vector3::FORWARD).normalized()
+            })
+            .unwrap_or(Vector3::new(0.0, 0.0, -1.0))
+    }
+
+    fn apply_visuals(&mut self, sun: sky::Horizontal, moon: sky::MoonState, eye: Vector3) {
         let alt = sun.altitude_deg;
+        let sun_dir = Self::direction_to(sun.azimuth_deg, alt);
+        let moon_dir = Self::direction_to(moon.position.azimuth_deg, moon.position.altitude_deg);
         if let Some(light) = self.sun.as_mut() {
-            Self::orient(light, Self::direction_to(sun.azimuth_deg, alt));
+            Self::orient(light, sun_dir);
             let tint = sky::sun_tint(alt);
             light.set_color(Color::from_rgb(tint[0], tint[1], tint[2]));
             light.set_param(Param::ENERGY, sky::sun_energy(alt, SUN_MAX_ENERGY) as f32);
         }
         if let Some(light) = self.moon.as_mut() {
-            Self::orient(
-                light,
-                Self::direction_to(moon.position.azimuth_deg, moon.position.altitude_deg),
-            );
+            Self::orient(light, moon_dir);
             let height = (moon.position.altitude_deg / sky::MOON_FULL_ALT_DEG).clamp(0.0, 1.0);
             light.set_param(
                 Param::ENERGY,
                 (MOON_MAX_ENERGY * moon.illumination * height) as f32,
             );
         }
+        let look = sky::sky_look(alt, self.light, &moon);
         if let (Some(mat), Some(env)) = (self.sky_mat.as_mut(), self.env.as_mut()) {
-            let horizon = sky::horizon_tint(alt);
-            let zenith = sky::zenith_tint(alt);
-            let horizon = Color::from_rgb(horizon[0], horizon[1], horizon[2]);
-            mat.set_sky_top_color(Color::from_rgb(zenith[0], zenith[1], zenith[2]));
-            mat.set_sky_horizon_color(horizon);
-            mat.set_ground_horizon_color(horizon);
-            // A neblina de profundidade (lod.rs) segue a cor do horizonte do céu.
-            env.set_fog_light_color(horizon);
+            mat.set_shader_parameter("zenith", &rgb_variant(look.zenith));
+            mat.set_shader_parameter("mid", &rgb_variant(look.mid));
+            mat.set_shader_parameter("horizon", &rgb_variant(look.horizon));
+            mat.set_shader_parameter("glow", &rgb_variant(look.glow));
+            mat.set_shader_parameter("glow_hi", &rgb_variant(look.glow_hi));
+            mat.set_shader_parameter("glow_strength", &look.glow_strength.to_variant());
+            mat.set_shader_parameter("halo_strength", &look.halo_strength.to_variant());
+            mat.set_shader_parameter("sun_dir", &rgb_variant(vec_arr(sun_dir)));
+            mat.set_shader_parameter("sun_color", &rgb_variant(look.sun_color));
+            mat.set_shader_parameter("sun_disk", &look.sun_disk.to_variant());
+            mat.set_shader_parameter("star_strength", &look.star_strength.to_variant());
+            mat.set_shader_parameter("moon_dir", &rgb_variant(vec_arr(moon_dir)));
+            mat.set_shader_parameter("moon_phase", &look.moon_phase.to_variant());
+            mat.set_shader_parameter("moon_visibility", &look.moon_visibility.to_variant());
+            mat.set_shader_parameter("cloud_cover", &CLOUD_COVER.to_variant());
+            // A neblina de profundidade (lod.rs) segue o céu na direção do olhar da câmera.
+            let fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
+            env.set_fog_light_color(Color::from_rgb(fog[0], fog[1], fog[2]));
             env.set_ambient_light_energy((AMBIENT_MIN + (1.0 - AMBIENT_MIN) * self.light) as f32);
         }
     }
@@ -334,7 +362,8 @@ impl INode for EnvironmentClock {
         let moon = sky::moon(self.sim_unix);
         self.sun_alt_deg = sun.altitude_deg;
         self.light = sky::light_level(sun.altitude_deg, &moon, WEATHER_FACTOR);
-        self.apply_visuals(sun, moon);
+        let eye = self.camera_forward();
+        self.apply_visuals(sun, moon, eye);
 
         let now = self.sim_unix - self.origin_unix;
         set_global(LAMP_GLOBALS[2], now as f32);
@@ -352,7 +381,11 @@ impl INode for EnvironmentClock {
             if crossing.name == "street_lamps" {
                 self.lamp_on_since = crossing.descending.then_some(now);
                 self.push_lamp_state();
-                godot_print!("environment: street lamps {} at {:.0} s", if crossing.descending { "on" } else { "off" }, now);
+                godot_print!(
+                    "environment: street lamps {} at {:.0} s",
+                    if crossing.descending { "on" } else { "off" },
+                    now
+                );
             }
             godot_print!(
                 "environment: light threshold '{}' crossed, descending={} (light {:.3})",
@@ -377,7 +410,11 @@ impl INode for EnvironmentClock {
                 self.local_clock(),
                 self.sun_alt_deg,
                 self.light,
-                if self.lamp_on_since.is_some() { "on" } else { "off" }
+                if self.lamp_on_since.is_some() {
+                    "on"
+                } else {
+                    "off"
+                }
             );
         }
     }
@@ -397,4 +434,13 @@ impl INode for EnvironmentClock {
 /// Sets a float shader global.
 fn set_global(name: &str, value: f32) {
     RenderingServer::singleton().global_shader_parameter_set(name, &Variant::from(value));
+}
+
+/// Cor ou direção como `vec3` de shader.
+fn rgb_variant(c: [f32; 3]) -> Variant {
+    Vector3::new(c[0], c[1], c[2]).to_variant()
+}
+
+fn vec_arr(v: Vector3) -> [f32; 3] {
+    [v.x, v.y, v.z]
 }
