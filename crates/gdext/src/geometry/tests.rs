@@ -678,17 +678,24 @@ fn probe_many_point_profile_on_axis() {
 #[test]
 #[ignore]
 fn real_tile_terrain_stays_under_the_ribbons() {
-    let root = std::path::Path::new("/mnt/Data/Codes/driving-the-earth/cache");
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../cache"));
     let index = crate::world::open_map(root, "casa-10km").expect("baked map 'casa-10km'");
     let m = index.meta.tile_size_m;
+    let (cx, cy): (i32, i32) = std::env::var("TILE")
+        .ok()
+        .and_then(|v| {
+            let (a, b) = v.split_once(',')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        })
+        .unwrap_or((-1, -2));
     let block: Vec<Tile> = (-1..=1)
-        .flat_map(|dy| (-1..=1).map(move |dx| (-1 + dx, -2 + dy)))
+        .flat_map(|dy| (-1..=1).map(move |dx| (cx + dx, cy + dy)))
         .filter_map(|(x, y)| index.read_tile_at(x, y).ok())
         .collect();
     let center = block
         .iter()
-        .find(|t| t.x == -1 && t.y == -2)
-        .expect("tile (-1, -2)");
+        .find(|t| t.x == cx && t.y == cy)
+        .expect("center tile");
     let geo: Vec<TileGeometry> = block
         .iter()
         .map(|t| {
@@ -712,6 +719,9 @@ fn real_tile_terrain_stays_under_the_ribbons() {
         let excess = h - lowest;
         if excess > worst {
             worst = excess;
+        }
+        if excess > 0.02 {
+            println!("leak x={x:.2} y={y:.2} h={h:.3} excess={excess:.3}");
         }
     }
     println!("checked={checked} worst_excess={worst:.4} m");
