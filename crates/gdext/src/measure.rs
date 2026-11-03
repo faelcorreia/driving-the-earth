@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::map::open_map;
+use crate::world::open_map;
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());

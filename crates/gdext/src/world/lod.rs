@@ -34,7 +34,7 @@ use godot::prelude::*;
 use tilebake::dem::{height_at_any, read_smoothed_dem, MapGrid, Raster};
 use tileformat::MapMeta;
 
-use crate::map::MeshData;
+use crate::geometry::MeshData;
 
 /// One ring: a square window of `half_m` around the center, with cells of `step_m`.
 #[derive(Debug, Clone, Copy, PartialEq)]

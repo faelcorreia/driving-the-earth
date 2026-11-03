@@ -11,20 +11,19 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{
-    ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, INode3D, MeshInstance3D, Node3D, PackedScene,
-    ProjectSettings, StandardMaterial3D, StaticBody3D,
+    INode3D, MeshInstance3D, Node3D,
+    ProjectSettings, StandardMaterial3D,
 };
 use godot::prelude::*;
-use godot::tools::try_load;
-use tileformat::Tile;
 
 use crate::environment::EnvironmentClock;
-use crate::lod::{self, TerrainLod};
-use crate::map::{open_map, MapIndex, MeshData, TileGeometry};
-use crate::spawn::{road_spawn, SpawnPose};
-use crate::streaming::{distance_to_tile, is_stale, tiles_in_range};
+use crate::geometry::TileGeometry;
+use crate::render::{material, solid_body, spawn_car};
+use crate::world::lod::{self, TerrainLod};
+use crate::world::spawn::find_spawn;
+use crate::world::streaming::{is_stale, tiles_in_range};
+use crate::world::{open_map, MapIndex};
 
 /// Height of the car above the terrain when spawned, in meters.
 const SPAWN_LIFT_M: f32 = 1.0;
@@ -335,84 +334,4 @@ impl EarthWorld {
         let local = self.base().to_local(car.get_global_position());
         Some([local.x as f64, -local.z as f64])
     }
-}
-
-/// The road nearest to home, searched among the tiles within `search_m` of it. Falls back
-/// to reading every tile when the nearest road is farther than that.
-fn find_spawn(index: &MapIndex, search_m: f64) -> io::Result<Option<SpawnPose>> {
-    let tile_m = index.meta.tile_size_m;
-    let near: Vec<Tile> = index
-        .coords()
-        .iter()
-        .filter(|&&t| distance_to_tile(t, tile_m, [0.0, 0.0]) <= search_m)
-        .map(|&(x, y)| index.read_tile_at(x, y))
-        .collect::<io::Result<_>>()?;
-    if let Some(pose) = road_spawn(&near) {
-        if pose.x.hypot(pose.y) <= search_m {
-            return Ok(Some(pose));
-        }
-    }
-    let all: Vec<Tile> = index
-        .coords()
-        .iter()
-        .map(|&(x, y)| index.read_tile_at(x, y))
-        .collect::<io::Result<_>>()?;
-    Ok(road_spawn(&all))
-}
-
-fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
-    let mut mat = StandardMaterial3D::new_gd();
-    mat.set_albedo(Color::from_rgb(color.0, color.1, color.2));
-    mat
-}
-
-/// Instantiates the car at `position`, turned by `yaw` about +Y.
-fn spawn_car(position: Vector3, yaw: f32) -> Option<Gd<Node3D>> {
-    let scene: Gd<PackedScene> = try_load("res://tr4/tr4.tscn").ok()?;
-    let mut car = scene.instantiate()?.try_cast::<Node3D>().ok()?;
-    car.set_position(position);
-    car.set_rotation(Vector3::new(0.0, yaw, 0.0));
-    Some(car)
-}
-
-/// Visible mesh only.
-fn mesh_instance(data: &MeshData, mat: &Gd<StandardMaterial3D>) -> Gd<MeshInstance3D> {
-    let mut instance = MeshInstance3D::new_alloc();
-    instance.set_mesh(&array_mesh(data));
-    instance.set_material_override(&mat.clone().upcast::<godot::classes::Material>());
-    instance
-}
-
-/// Static body with the visible mesh and a concave collision shape (terrain or roads of a tile).
-fn solid_body(data: &MeshData, mat: &Gd<StandardMaterial3D>) -> Gd<StaticBody3D> {
-    let mut body = StaticBody3D::new_alloc();
-    body.add_child(&mesh_instance(data, mat));
-
-    let points: PackedVector3Array = data.triangle_points().into_iter().map(vec3).collect();
-    let mut faces = ConcavePolygonShape3D::new_gd();
-    faces.set_faces(&points);
-    let mut collider = CollisionShape3D::new_alloc();
-    collider.set_shape(&faces);
-    body.add_child(&collider);
-    body
-}
-
-fn vec3(p: [f32; 3]) -> Vector3 {
-    Vector3::new(p[0], p[1], p[2])
-}
-
-fn array_mesh(data: &MeshData) -> Gd<ArrayMesh> {
-    let vertices: PackedVector3Array = data.vertices.iter().map(|&p| vec3(p)).collect();
-    let normals: PackedVector3Array = data.normals.iter().map(|&p| vec3(p)).collect();
-    let indices: PackedInt32Array = data.indices.iter().map(|&i| i as i32).collect();
-
-    let mut arrays = VarArray::new();
-    arrays.resize(ArrayType::MAX.ord() as usize, &Variant::nil());
-    arrays.set(ArrayType::VERTEX.ord() as usize, &vertices.to_variant());
-    arrays.set(ArrayType::NORMAL.ord() as usize, &normals.to_variant());
-    arrays.set(ArrayType::INDEX.ord() as usize, &indices.to_variant());
-
-    let mut mesh = ArrayMesh::new_gd();
-    mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
-    mesh
 }

@@ -1,9 +1,14 @@
 //! Spawn pose on the road nearest to home, facing south.
 //!
-//! Local coordinates: `x` east, `y` north (see `map.rs`). The car's forward is -Z in Godot,
+//! Local coordinates: `x` east, `y` north (see `world::map`). The car's forward is -Z in Godot,
 //! which is north, so a car facing south has its forward at +Z. Yaw is the Godot rotation
 //! about +Y that turns -Z into the wanted heading.
+use std::io;
+
 use tileformat::Tile;
+
+use super::map::MapIndex;
+use super::streaming::distance_to_tile;
 
 /// Segments shorter than this, in meters, are ignored.
 const MIN_SEGMENT_M: f64 = 1e-9;
@@ -55,6 +60,29 @@ pub fn road_spawn(tiles: &[Tile]) -> Option<SpawnPose> {
         y: c[1],
         yaw: yaw as f32,
     })
+}
+
+/// The road nearest to home, searched among the tiles within `search_m` of it. Falls back
+/// to reading every tile when the nearest road is farther than that.
+pub fn find_spawn(index: &MapIndex, search_m: f64) -> io::Result<Option<SpawnPose>> {
+    let tile_m = index.meta.tile_size_m;
+    let near: Vec<Tile> = index
+        .coords()
+        .iter()
+        .filter(|&&t| distance_to_tile(t, tile_m, [0.0, 0.0]) <= search_m)
+        .map(|&(x, y)| index.read_tile_at(x, y))
+        .collect::<io::Result<_>>()?;
+    if let Some(pose) = road_spawn(&near) {
+        if pose.x.hypot(pose.y) <= search_m {
+            return Ok(Some(pose));
+        }
+    }
+    let all: Vec<Tile> = index
+        .coords()
+        .iter()
+        .map(|&(x, y)| index.read_tile_at(x, y))
+        .collect::<io::Result<_>>()?;
+    Ok(road_spawn(&all))
 }
 
 #[cfg(test)]

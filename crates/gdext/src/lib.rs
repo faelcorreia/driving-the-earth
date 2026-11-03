@@ -1,14 +1,12 @@
 use godot::prelude::*;
 
 mod earth_world;
+mod render;
 mod environment;
-mod lod;
+mod geometry;
+mod world;
 #[cfg(test)]
 mod measure;
-mod map;
-mod sky;
-mod spawn;
-mod streaming;
 
 struct DriveEarthExt;
 

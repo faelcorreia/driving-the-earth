@@ -12,7 +12,7 @@ use godot::classes::{
 };
 use godot::prelude::*;
 
-use crate::sky::{self, Crossing, LightThreshold, ThresholdBank};
+use super::sky::{self, Crossing, LightThreshold, ThresholdBank};
 
 /// Passo de tempo do atalho de depuração `[` e `]`, em segundos de jogo.
 const DEBUG_STEP_S: f64 = 15.0 * 60.0;
