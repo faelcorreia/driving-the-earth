@@ -97,18 +97,36 @@ mod tests {
     use super::*;
 
     fn light(x: f32, y: f32, z: f32, weight: u8, hue: u8) -> FarLight {
-        FarLight { x, y, z, weight, hue }
+        FarLight {
+            x,
+            y,
+            z,
+            weight,
+            hue,
+        }
     }
 
     #[test]
     fn map_y_becomes_negative_godot_z() {
-        assert_eq!(godot_position(&light(1.0, 2.0, 3.0, 0, 0)), [1.0, 3.0, -2.0]);
-        assert_eq!(godot_position(&light(-5.5, -7.0, 0.5, 0, 0)), [-5.5, 0.5, 7.0]);
+        assert_eq!(
+            godot_position(&light(1.0, 2.0, 3.0, 0, 0)),
+            [1.0, 3.0, -2.0]
+        );
+        assert_eq!(
+            godot_position(&light(-5.5, -7.0, 0.5, 0, 0)),
+            [-5.5, 0.5, 7.0]
+        );
     }
 
     #[test]
     fn cut_keeps_the_heaviest_in_file_order() {
-        let pts = [light(0.0, 0.0, 0.0, 1, 0), light(1.0, 0.0, 0.0, 9, 0), light(2.0, 0.0, 0.0, 9, 0), light(3.0, 0.0, 0.0, 2, 0), light(4.0, 0.0, 0.0, 5, 0)];
+        let pts = [
+            light(0.0, 0.0, 0.0, 1, 0),
+            light(1.0, 0.0, 0.0, 9, 0),
+            light(2.0, 0.0, 0.0, 9, 0),
+            light(3.0, 0.0, 0.0, 2, 0),
+            light(4.0, 0.0, 0.0, 5, 0),
+        ];
         let kept: Vec<u32> = select_by_weight(&pts, 3).iter().map(|k| k.0).collect();
         assert_eq!(kept, vec![1, 2, 4]);
     }

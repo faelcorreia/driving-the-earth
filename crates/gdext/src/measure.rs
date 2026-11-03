@@ -33,12 +33,37 @@ fn baseline_casa() {
     }
     let mut all: Vec<f64> = road.iter().zip(&terr).map(|(a, b)| a + b).collect();
     println!("map {id}: {} tiles", ms.len());
-    println!("road tri p50 {:.0} p90 {:.0}", pct(&mut road.clone(), 0.5), pct(&mut road.clone(), 0.9));
-    println!("terrain tri p50 {:.0} p90 {:.0}", pct(&mut terr.clone(), 0.5), pct(&mut terr.clone(), 0.9));
-    println!("building tri p50 {:.0} p90 {:.0}", pct(&mut bld.clone(), 0.5), pct(&mut bld.clone(), 0.9));
-    println!("total tri p50 {:.0} p90 {:.0}", pct(&mut all.clone(), 0.5), pct(&mut all, 0.9));
-    println!("lamps per tile p50 {:.0} p90 {:.0} (total {})", pct(&mut lamps.clone(), 0.5), pct(&mut lamps.clone(), 0.9), lamps.iter().sum::<f64>());
-    println!("tile_geometry ms p50 {:.2} p90 {:.2}", pct(&mut ms.clone(), 0.5), pct(&mut ms, 0.9));
+    println!(
+        "road tri p50 {:.0} p90 {:.0}",
+        pct(&mut road.clone(), 0.5),
+        pct(&mut road.clone(), 0.9)
+    );
+    println!(
+        "terrain tri p50 {:.0} p90 {:.0}",
+        pct(&mut terr.clone(), 0.5),
+        pct(&mut terr.clone(), 0.9)
+    );
+    println!(
+        "building tri p50 {:.0} p90 {:.0}",
+        pct(&mut bld.clone(), 0.5),
+        pct(&mut bld.clone(), 0.9)
+    );
+    println!(
+        "total tri p50 {:.0} p90 {:.0}",
+        pct(&mut all.clone(), 0.5),
+        pct(&mut all, 0.9)
+    );
+    println!(
+        "lamps per tile p50 {:.0} p90 {:.0} (total {})",
+        pct(&mut lamps.clone(), 0.5),
+        pct(&mut lamps.clone(), 0.9),
+        lamps.iter().sum::<f64>()
+    );
+    println!(
+        "tile_geometry ms p50 {:.2} p90 {:.2}",
+        pct(&mut ms.clone(), 0.5),
+        pct(&mut ms, 0.9)
+    );
 }
 
 /// Rendered terrain height at `p` (map meters) from the triangles of tile `key`'s terrain mesh.
@@ -90,13 +115,27 @@ fn summarize(name: &str, st: &[&Station]) {
     let over = |v: &[f64], t: f64| v.iter().filter(|x| **x > t).count();
     println!("[{name}] stations {} | axis-terrain p50 {:+.3} p90 {:+.3} max {:+.3} (p90 w/o lift {:+.3})",
         st.len(), pct(&mut axis.clone(), 0.5), pct(&mut axis.clone(), 0.9), pct(&mut axis.clone(), 1.0), pct(&mut no_lift, 0.9));
-    println!("   edge-terrain p50 {:+.3} p90 {:+.3} max {:+.3} | >0.25m {:.1}% >0.6m {:.1}%",
-        pct(&mut edge.clone(), 0.5), pct(&mut edge.clone(), 0.9), pct(&mut edge.clone(), 1.0),
-        100.0 * over(&edge, 0.25) as f64 / edge.len() as f64, 100.0 * over(&edge, 0.6) as f64 / edge.len() as f64);
-    println!("   |ribbon edge - axis| p50 {:.3} p90 {:.3} | |terrain edge - axis| p50 {:.3} p90 {:.3}",
-        pct(&mut rib.clone(), 0.5), pct(&mut rib, 0.9), pct(&mut ter.clone(), 0.5), pct(&mut ter, 0.9));
+    println!(
+        "   edge-terrain p50 {:+.3} p90 {:+.3} max {:+.3} | >0.25m {:.1}% >0.6m {:.1}%",
+        pct(&mut edge.clone(), 0.5),
+        pct(&mut edge.clone(), 0.9),
+        pct(&mut edge.clone(), 1.0),
+        100.0 * over(&edge, 0.25) as f64 / edge.len() as f64,
+        100.0 * over(&edge, 0.6) as f64 / edge.len() as f64
+    );
+    println!(
+        "   |ribbon edge - axis| p50 {:.3} p90 {:.3} | |terrain edge - axis| p50 {:.3} p90 {:.3}",
+        pct(&mut rib.clone(), 0.5),
+        pct(&mut rib, 0.9),
+        pct(&mut ter.clone(), 0.5),
+        pct(&mut ter, 0.9)
+    );
     let mut worst: Vec<&&Station> = st.iter().collect();
-    worst.sort_by(|a, b| b.d_edge[0].max(b.d_edge[1]).total_cmp(&a.d_edge[0].max(a.d_edge[1])));
+    worst.sort_by(|a, b| {
+        b.d_edge[0]
+            .max(b.d_edge[1])
+            .total_cmp(&a.d_edge[0].max(a.d_edge[1]))
+    });
     for s in worst.iter().take(5) {
         println!("   worst at ({:.1},{:.1}) axis {:+.3} edges {:+.3}/{:+.3} rib {:+.3}/{:+.3} terr {:+.3}/{:+.3}",
             s.pos[0], s.pos[1], s.d_axis, s.d_edge[0], s.d_edge[1], s.rib[0], s.rib[1], s.ter[0], s.ter[1]);
@@ -114,7 +153,10 @@ fn road_clearance() {
     for &(x, y) in index.coords() {
         geo.insert((x, y), index.tile_geometry(x, y).expect("tile_geometry"));
     }
-    let spawn = find_spawn(&index, 500.0).expect("spawn").map(|s| [s.x, s.y]).unwrap_or([0.0, 0.0]);
+    let spawn = find_spawn(&index, 500.0)
+        .expect("spawn")
+        .map(|s| [s.x, s.y])
+        .unwrap_or([0.0, 0.0]);
     let mut all: Vec<Station> = Vec::new();
     let mut missing = 0usize;
     for g in geo.values() {
@@ -128,7 +170,11 @@ fn road_clearance() {
             let (pl, hl) = at(3 * s);
             let (pc, hc) = at(3 * s + 1);
             let (pr, hr) = at(3 * s + 2);
-            let (Some(tl), Some(tc), Some(tr)) = (terrain_at(&geo, tm, pl), terrain_at(&geo, tm, pc), terrain_at(&geo, tm, pr)) else {
+            let (Some(tl), Some(tc), Some(tr)) = (
+                terrain_at(&geo, tm, pl),
+                terrain_at(&geo, tm, pc),
+                terrain_at(&geo, tm, pr),
+            ) else {
                 missing += 1;
                 continue;
             };
@@ -141,11 +187,17 @@ fn road_clearance() {
             });
         }
     }
-    println!("map {id}: {} road stations, {missing} without terrain", all.len());
+    println!(
+        "map {id}: {} road stations, {missing} without terrain",
+        all.len()
+    );
     let dist = |s: &Station, c: [f64; 2]| (s.pos[0] - c[0]).hypot(s.pos[1] - c[1]);
-    for (name, c, r) in [("casa 300m", [0.0, 0.0], 300.0), ("casa 500m", [0.0, 0.0], 500.0), ("spawn 150m", spawn, 150.0)] {
+    for (name, c, r) in [
+        ("casa 300m", [0.0, 0.0], 300.0),
+        ("casa 500m", [0.0, 0.0], 500.0),
+        ("spawn 150m", spawn, 150.0),
+    ] {
         let sel: Vec<&Station> = all.iter().filter(|s| dist(s, c) <= r).collect();
         summarize(name, &sel);
     }
 }
-

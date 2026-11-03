@@ -4,22 +4,34 @@
 use std::fs;
 use std::path::Path;
 
-use tilebake::dem::{height_at, tile_heights, download_dem, read_smoothed_dem, MapGrid};
+use tilebake::dem::{download_dem, height_at, read_smoothed_dem, tile_heights, MapGrid};
 use tileformat::MapMeta;
 
 fn main() {
     let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-    let meta_txt = fs::read_to_string(cache.join("casa/meta.json")).expect("missing cache/casa/meta.json");
+    let meta_txt =
+        fs::read_to_string(cache.join("casa/meta.json")).expect("missing cache/casa/meta.json");
     let meta: MapMeta = serde_json::from_str(&meta_txt).expect("invalid meta.json");
 
-    let (tif, from_cache) = download_dem(&cache, &meta.id, meta.center_lat, meta.center_lon).expect("DEM download");
-    println!("dem: {} ({})", tif.display(), if from_cache { "cache" } else { "downloaded" });
+    let (tif, from_cache) =
+        download_dem(&cache, &meta.id, meta.center_lat, meta.center_lon).expect("DEM download");
+    println!(
+        "dem: {} ({})",
+        tif.display(),
+        if from_cache { "cache" } else { "downloaded" }
+    );
 
     let raster = read_smoothed_dem(&tif).expect("GeoTIFF read");
-    println!("raster: {}x{} px, step {:.6}° ", raster.width, raster.height, raster.step_lon);
+    println!(
+        "raster: {}x{} px, step {:.6}° ",
+        raster.width, raster.height, raster.step_lon
+    );
 
     let center = height_at(&raster, meta.center_lat, meta.center_lon).expect("center outside DEM");
-    println!("height at center ({:.6}, {:.6}): {:.1} m", meta.center_lat, meta.center_lon, center);
+    println!(
+        "height at center ({:.6}, {:.6}): {:.1} m",
+        meta.center_lat, meta.center_lon, center
+    );
 
     let grid = MapGrid::from_meta(&meta);
     let (mut min, mut max) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -36,5 +48,8 @@ fn main() {
         }
     }
     println!("tiles: {tiles} ({}x{} samples each)", 26, 26);
-    println!("min height: {min:.1} m   max: {max:.1} m   amplitude: {:.1} m", max - min);
+    println!(
+        "min height: {min:.1} m   max: {max:.1} m   amplitude: {:.1} m",
+        max - min
+    );
 }

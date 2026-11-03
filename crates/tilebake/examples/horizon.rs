@@ -45,7 +45,9 @@ fn sunset(lat: f64, lon: f64, day: f64, tz: f64) -> (f64, f64) {
         + 0.00148 * (3.0 * g).sin();
     // Equation of time, minutes.
     let eqt = 229.18
-        * (0.000075 + 0.001868 * g.cos() - 0.032077 * g.sin() - 0.014615 * (2.0 * g).cos()
+        * (0.000075 + 0.001868 * g.cos()
+            - 0.032077 * g.sin()
+            - 0.014615 * (2.0 * g).cos()
             - 0.040849 * (2.0 * g).sin());
     let phi = lat.to_radians();
     let zenith = 90.833_f64.to_radians();
@@ -66,9 +68,17 @@ fn hm(h: f64) -> String {
 }
 
 fn main() {
-    let dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "..", "..", "cache", "casa-10km", "raw", "copernicus"]
-        .iter()
-        .collect();
+    let dir: PathBuf = [
+        env!("CARGO_MANIFEST_DIR"),
+        "..",
+        "..",
+        "cache",
+        "casa-10km",
+        "raw",
+        "copernicus",
+    ]
+    .iter()
+    .collect();
     let mut tifs: Vec<PathBuf> = fs::read_dir(&dir)
         .expect("read copernicus cache dir")
         .map(|e| e.expect("dir entry").path())
@@ -81,7 +91,8 @@ fn main() {
         .collect();
     println!("DEM rasters: {}", rasters.len());
 
-    let ground = height_at_any(&rasters, home().lat_deg, home().lon_deg).expect("no DEM at home") as f64;
+    let ground =
+        height_at_any(&rasters, home().lat_deg, home().lon_deg).expect("no DEM at home") as f64;
     let eye = ground + EYE_M;
     println!("home ground {ground:.1} m, eye {eye:.1} m");
 
@@ -95,7 +106,12 @@ fn main() {
     for i in 0..n_az {
         let az = AZ_FROM + i as f64 * AZ_STEP;
         let (sin, cos) = az.to_radians().sin_cos();
-        let empty = Sample { az, dist_m: 0.0, elev_m: f64::NEG_INFINITY, ang_deg: f64::NEG_INFINITY };
+        let empty = Sample {
+            az,
+            dist_m: 0.0,
+            elev_m: f64::NEG_INFINITY,
+            ang_deg: f64::NEG_INFINITY,
+        };
         let (mut crest, mut peak) = (empty, empty);
         for k in 1..=steps {
             let d = k as f64 * STEP_D_M;
@@ -108,10 +124,20 @@ fn main() {
             let h = h as f64;
             let ang = ((h - eye) / d).atan().to_degrees();
             if ang > crest.ang_deg {
-                crest = Sample { az, dist_m: d, elev_m: h, ang_deg: ang };
+                crest = Sample {
+                    az,
+                    dist_m: d,
+                    elev_m: h,
+                    ang_deg: ang,
+                };
             }
             if h > peak.elev_m {
-                peak = Sample { az, dist_m: d, elev_m: h, ang_deg: ang };
+                peak = Sample {
+                    az,
+                    dist_m: d,
+                    elev_m: h,
+                    ang_deg: ang,
+                };
             }
         }
         rows.push((crest, peak));
@@ -136,14 +162,16 @@ fn main() {
         );
     }
 
-    let hc = rows
-        .iter()
-        .map(|r| r.0)
-        .fold(rows[0].0, |acc, c| if c.ang_deg > acc.ang_deg { c } else { acc });
-    let highest_peak = rows
-        .iter()
-        .map(|r| r.1)
-        .fold(rows[0].1, |acc, p| if p.elev_m > acc.elev_m { p } else { acc });
+    let hc =
+        rows.iter().map(|r| r.0).fold(
+            rows[0].0,
+            |acc, c| if c.ang_deg > acc.ang_deg { c } else { acc },
+        );
+    let highest_peak =
+        rows.iter().map(|r| r.1).fold(
+            rows[0].1,
+            |acc, p| if p.elev_m > acc.elev_m { p } else { acc },
+        );
     let nearest = rows
         .iter()
         .map(|r| r.0)
@@ -161,8 +189,20 @@ fn main() {
     let visible = rows.iter().filter(|r| r.0.ang_deg >= RIDGE_MIN_DEG).count();
 
     println!();
-    println!("crista de maior angulo: az {:.0}, dist {:.2} km, elev {:.0} m, {:.2}°", hc.az, hc.dist_m / 1000.0, hc.elev_m, hc.ang_deg);
-    println!("pico mais alto no setor: az {:.0}, dist {:.2} km, elev {:.0} m, {:.2}°", highest_peak.az, highest_peak.dist_m / 1000.0, highest_peak.elev_m, highest_peak.ang_deg);
+    println!(
+        "crista de maior angulo: az {:.0}, dist {:.2} km, elev {:.0} m, {:.2}°",
+        hc.az,
+        hc.dist_m / 1000.0,
+        hc.elev_m,
+        hc.ang_deg
+    );
+    println!(
+        "pico mais alto no setor: az {:.0}, dist {:.2} km, elev {:.0} m, {:.2}°",
+        highest_peak.az,
+        highest_peak.dist_m / 1000.0,
+        highest_peak.elev_m,
+        highest_peak.ang_deg
+    );
     match nearest {
         Some(n) => println!("crista mais proxima (>= {RIDGE_MIN_DEG}°): az {:.0}, dist {:.2} km, elev {:.0} m, {:.2}°", n.az, n.dist_m / 1000.0, n.elev_m, n.ang_deg),
         None => println!("crista mais proxima: nenhuma acima de {RIDGE_MIN_DEG}°"),
@@ -172,7 +212,10 @@ fn main() {
 
     let (set_h, set_az) = sunset(home().lat_deg, home().lon_deg, SUN_DAY_OF_YEAR, TZ_HOURS);
     println!();
-    println!("por do sol 15/11/2026 BH: ocaso {} (local), azimute {set_az:.1}°", hm(set_h));
+    println!(
+        "por do sol 15/11/2026 BH: ocaso {} (local), azimute {set_az:.1}°",
+        hm(set_h)
+    );
 
     // Optional: `horizon <file>` with one "lat lon" pair per line; prints ground stats and centroid.
     if let Some(path) = std::env::args().nth(1) {
@@ -187,11 +230,17 @@ fn points_stats(rasters: &[Raster], path: &str, m_lat: f64, m_lon: f64) {
     let (mut n, mut sum, mut min, mut max) = (0usize, 0.0f64, f64::INFINITY, f64::NEG_INFINITY);
     let (mut clat, mut clon) = (0.0f64, 0.0f64);
     for line in text.lines() {
-        let mut it = line.split_whitespace().map(|v| v.parse::<f64>().expect("lat/lon"));
-        let (Some(lat), Some(lon)) = (it.next(), it.next()) else { continue };
+        let mut it = line
+            .split_whitespace()
+            .map(|v| v.parse::<f64>().expect("lat/lon"));
+        let (Some(lat), Some(lon)) = (it.next(), it.next()) else {
+            continue;
+        };
         clat += lat;
         clon += lon;
-        let Some(h) = height_at_any(rasters, lat, lon) else { continue };
+        let Some(h) = height_at_any(rasters, lat, lon) else {
+            continue;
+        };
         let h = h as f64;
         n += 1;
         sum += h;
@@ -200,10 +249,19 @@ fn points_stats(rasters: &[Raster], path: &str, m_lat: f64, m_lon: f64) {
     }
     let total = text.lines().count().max(1) as f64;
     let (clat, clon) = (clat / total, clon / total);
-    let (dx, dy) = ((clon - home().lon_deg) * m_lon, (clat - home().lat_deg) * m_lat);
+    let (dx, dy) = (
+        (clon - home().lon_deg) * m_lon,
+        (clat - home().lat_deg) * m_lat,
+    );
     let dist = dx.hypot(dy);
     let az = dx.atan2(dy).to_degrees().rem_euclid(360.0);
     println!();
-    println!("pontos {total:.0} (com DEM {n}): elev media {:.0} m, min {min:.0} m, max {max:.0} m", sum / n.max(1) as f64);
-    println!("centroide {clat:.5} {clon:.5}: dist {:.2} km, az {az:.1}°", dist / 1000.0);
+    println!(
+        "pontos {total:.0} (com DEM {n}): elev media {:.0} m, min {min:.0} m, max {max:.0} m",
+        sum / n.max(1) as f64
+    );
+    println!(
+        "centroide {clat:.5} {clon:.5}: dist {:.2} km, az {az:.1}°",
+        dist / 1000.0
+    );
 }
