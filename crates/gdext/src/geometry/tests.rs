@@ -199,6 +199,53 @@ fn road_ends_meet_across_tiles() {
 }
 
 #[test]
+fn road_height_is_continuous_across_the_tile_border() {
+    // A 80-point profile (2.5 m stations, DEM-like noise) along y = 125 crosses the border x = 250
+    // between tile (0, 0), which owns the road, and tile (1, 0), which sees it as a neighbor.
+    let n = 80;
+    let points: Vec<[f64; 2]> = (0..n).map(|k| [150.0 + 2.5 * k as f64, 125.0]).collect();
+    let z: Vec<f32> = points
+        .iter()
+        .enumerate()
+        .map(|(k, p)| (0.04 * (p[0] - 150.0) + if k % 2 == 0 { 0.08 } else { -0.08 }) as f32)
+        .collect();
+    let (smooth, _, _) = super::profile_smooth::smooth_profile(&points, &z, &[], &[], "residential");
+    let road = Polyline { highway: "residential".into(), points, z, zl: Vec::new(), zr: Vec::new() };
+    let half = road_width_m("residential") / 2.0;
+    let t0 = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), vec![road]);
+    let t1 = tile(1, 0, grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)), Vec::new());
+    let g0 = tile_geometry_with(&t0, 250.0, &|x, y| sample_height(&t0, 250.0, x, y), &[&t1]);
+    let g1 = tile_geometry_with(&t1, 250.0, &|x, y| sample_height(&t1, 250.0, x, y), &[&t0]);
+
+    // Ribbon of the owning tile follows the smoothed profile on both sides of the border.
+    for x in (160..=340).step_by(5) {
+        let x = x as f64;
+        let Some(strip) = ribbon_height(&g0.roads, x, 125.0) else { continue };
+        let k = ((x - 150.0) / 2.5).round() as usize;
+        let want = smooth[k] as f64 + ROAD_LIFT_M as f64;
+        assert!((strip - want).abs() <= 0.02, "ribbon {strip:.3} off the profile {want:.3} at x={x}");
+    }
+    // The border itself: the owning tile's ribbon and the neighbor's terrain agree there.
+    let on_border = ribbon_height(&g0.roads, 250.0, 125.0).expect("ribbon on the border");
+    let k = ((250.0 - 150.0) / 2.5) as usize;
+    assert!((on_border - (smooth[k] as f64 + ROAD_LIFT_M as f64)).abs() <= 0.02);
+
+    // Terrain of the neighbor on the axis, past the border, never rises above the ribbon of (0, 0).
+    let mut checked = 0;
+    for v in &g1.terrain.vertices {
+        let (x, y, h) = (v[0] as f64, -(v[2] as f64), v[1] as f64);
+        if (y - 125.0).abs() > half || !(250.0..=340.0).contains(&x) {
+            continue;
+        }
+        if let Some(strip) = ribbon_height(&g0.roads, x, y) {
+            checked += 1;
+            assert!(h - strip <= 0.02, "terrain {h:.3} above the ribbon {strip:.3} at ({x:.1}, {y:.1})");
+        }
+    }
+    assert!(checked > 0, "no neighbor terrain vertex under the ribbon past the border");
+}
+
+#[test]
 fn sample_height_uses_tile_offset() {
     // Tile (1, -1) starts at x = 20 m, y = -20 m.
     let t = tile(1, -1, grid(3, |_, _| 7.5), Vec::new());
