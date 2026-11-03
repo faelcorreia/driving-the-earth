@@ -66,6 +66,30 @@ pub mod lots {
     const _: () = assert!(LOT_W_MIN_M > 2.0 * SIDE_SETBACK_MAX_M && LOT_D_MIN_M > FRONT_SETBACK_MAX_M + SIDE_SETBACK_MAX_M);
 }
 
+/// Spacing of the stations along a road (one quarter of a terrain cell), in meters.
+pub const ROAD_STATION_M: f64 = 2.5;
+
+/// Procedural street lamps (L1). Distances in meters; the spacing is a whole number of stations.
+pub mod lamps {
+    use super::ROAD_STATION_M;
+
+    /// Distance between two lamps along a road.
+    pub const LAMP_SPACING_M: f64 = 35.0;
+    /// Height of the pole.
+    pub const LAMP_HEIGHT_M: f64 = 8.0;
+    /// Length of the arm that carries the lamp over the carriageway.
+    pub const LAMP_ARM_M: f64 = 1.5;
+    /// Distance from the carriageway edge to the pole (over the sidewalk).
+    pub const LAMP_SIDE_OFFSET_M: f64 = 1.0;
+    /// No lamp closer than this to another road axis (intersections).
+    pub const LAMP_CROSSING_CLEAR_M: f64 = 8.0;
+    /// Service roads get lamps only when longer than this.
+    pub const LAMP_SERVICE_MIN_M: f64 = 60.0;
+
+    const _: () = assert!(LAMP_SPACING_M % ROAD_STATION_M == 0.0, "lamps sit on road stations");
+    const _: () = assert!(LAMP_ARM_M > 0.0 && LAMP_HEIGHT_M > 0.0 && LAMP_SIDE_OFFSET_M >= 0.0);
+}
+
 /// Widths of the waterway centerlines in the ground map (`river`, `canal`/`drain`, `stream`), in meters.
 pub const WATERWAY_RIVER_M: f64 = 8.0;
 pub const WATERWAY_CANAL_M: f64 = 4.0;

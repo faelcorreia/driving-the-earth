@@ -6,6 +6,7 @@
 mod building;
 mod ground;
 mod junction;
+mod lamps;
 mod mesh;
 mod road;
 mod terrain;
