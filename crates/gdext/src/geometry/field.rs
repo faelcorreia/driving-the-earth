@@ -33,6 +33,8 @@ struct Seg {
     len: f64,
     /// Unit normal pointing to the left edge (the side the ribbon calls `left`).
     nrm: [f64; 2],
+    /// Index of the road of this segment. The segments of one road are contiguous in `Field::segs`.
+    road: u32,
     half: f64,
     /// Half-width of the flat zone (`flat_zone_m`); the blend starts beyond it.
     flat: f64,
@@ -42,9 +44,9 @@ struct Seg {
 }
 
 impl Seg {
-    /// The field candidate of this segment at `(x, y)`, given the grid height `g` there.
-    /// `None` outside the corridor and its blend band.
-    fn value(&self, x: f64, y: f64, g: f32) -> Option<f32> {
+    /// The field candidate of this segment at `(x, y)`, given the grid height `g` there, and the
+    /// distance from `(x, y)` to this segment's axis. `None` outside the corridor and its blend band.
+    fn value(&self, x: f64, y: f64, g: f32) -> Option<(f32, f64)> {
         let p = [x - self.a[0], y - self.a[1]];
         let t = ((p[0] * self.dir[0] + p[1] * self.dir[1]) / self.len).clamp(0.0, 1.0);
         let (qx, qy) = (p[0] - self.dir[0] * self.len * t, p[1] - self.dir[1] * self.len * t);
@@ -59,10 +61,10 @@ impl Seg {
         let k = (s / self.half) as f32;
         let edge = if k >= 0.0 { zc + (zl - zc) * k } else { zc + (zr - zc) * -k };
         if dist <= self.flat {
-            Some(edge)
+            Some((edge, dist))
         } else {
             let u = ((dist - self.flat) / ROAD_BLEND_M).clamp(0.0, 1.0) as f32;
-            Some(edge + (g - edge) * u)
+            Some((edge + (g - edge) * u, dist))
         }
     }
 }
@@ -76,6 +78,8 @@ pub(super) struct Field {
     buckets: Vec<Vec<u32>>,
     /// Largest distance from an axis at which a segment still has a candidate.
     reach: f64,
+    /// Number of roads added so far (the next road's index).
+    roads: u32,
 }
 
 impl Field {
@@ -90,6 +94,7 @@ impl Field {
             rows: cols,
             buckets: vec![Vec::new(); cols * cols],
             reach: 0.0,
+            roads: 0,
         };
         for road in roads {
             field.add_road(road);
@@ -98,6 +103,8 @@ impl Field {
     }
 
     fn add_road(&mut self, road: &Polyline) {
+        let road_id = self.roads;
+        self.roads += 1;
         let n = road.points.len();
         if n < 2 || road.z.len() != n {
             return;
@@ -125,6 +132,7 @@ impl Field {
                 dir: [(b[0] - a[0]) / len, (b[1] - a[1]) / len],
                 len,
                 nrm: unit_normal(a, b),
+                road: road_id,
                 half,
                 flat,
                 z,
@@ -152,21 +160,33 @@ impl Field {
     }
 
     /// The surface height at map point `(x, y)`: the lowest road candidate, or the grid `ground`.
+    /// Within one road only the candidate of its segment nearest to `(x, y)` counts, so the end
+    /// cap of a segment never stands in for a point beside the next segment of the same road.
     pub(super) fn height(&self, ground: &dyn Fn(f64, f64) -> f32, x: f64, y: f64) -> f32 {
         let g = ground(x, y);
         let (c0, r0) = self.cell(x - self.reach, y - self.reach);
         let (c1, r1) = self.cell(x + self.reach, y + self.reach);
-        let mut best: Option<f32> = None;
+        // Per road: (road, distance to its nearest axis, candidate there).
+        let mut per_road: Vec<(u32, f64, f32)> = Vec::new();
         for r in r0..=r1 {
             for c in c0..=c1 {
                 for &k in &self.buckets[r * self.cols + c] {
-                    if let Some(v) = self.segs[k as usize].value(x, y, g) {
-                        best = Some(best.map_or(v, |b| b.min(v)));
+                    let seg = &self.segs[k as usize];
+                    if let Some((v, d)) = seg.value(x, y, g) {
+                        match per_road.iter_mut().find(|e| e.0 == seg.road) {
+                            Some(e) => {
+                                if d < e.1 {
+                                    e.1 = d;
+                                    e.2 = v;
+                                }
+                            }
+                            None => per_road.push((seg.road, d, v)),
+                        }
                     }
                 }
             }
         }
-        best.unwrap_or(g)
+        per_road.iter().map(|e| e.2).reduce(f32::min).unwrap_or(g)
     }
 }
 
@@ -196,7 +216,12 @@ impl Surface {
                 };
             }
         }
+        // Per vertex: the lowest candidate of the roads finished so far (`best`), and the nearest
+        // segment of the road being visited (`cur_*`). Roads are contiguous in `field.segs`.
         let mut best = vec![f32::INFINITY; n * n];
+        let mut cur_road = vec![u32::MAX; n * n];
+        let mut cur_dist = vec![f64::INFINITY; n * n];
+        let mut cur_val = vec![f32::INFINITY; n * n];
         for seg in &field.segs {
             let reach = seg.flat + ROAD_BLEND_M;
             let x0 = seg.a[0].min(seg.a[0] + seg.dir[0] * seg.len) - reach;
@@ -211,13 +236,27 @@ impl Surface {
                 for j in j0..=j1 {
                     let (x, y) = (origin[0] + j as f64 * cell, origin[1] + i as f64 * cell);
                     let g = grid[i * n + j];
-                    if let Some(v) = seg.value(x, y, g) {
-                        let b = &mut best[i * n + j];
-                        if v < *b {
-                            *b = v;
+                    if let Some((v, d)) = seg.value(x, y, g) {
+                        let idx = i * n + j;
+                        if cur_road[idx] != seg.road {
+                            // The previous road at this vertex is finished: it competes by its candidate.
+                            if cur_val[idx] < best[idx] {
+                                best[idx] = cur_val[idx];
+                            }
+                            cur_road[idx] = seg.road;
+                            cur_dist[idx] = d;
+                            cur_val[idx] = v;
+                        } else if d < cur_dist[idx] {
+                            cur_dist[idx] = d;
+                            cur_val[idx] = v;
                         }
                     }
                 }
+            }
+        }
+        for idx in 0..n * n {
+            if cur_val[idx] < best[idx] {
+                best[idx] = cur_val[idx];
             }
         }
         for (h, b) in grid.iter_mut().zip(&best) {
