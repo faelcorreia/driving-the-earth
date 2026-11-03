@@ -15,6 +15,7 @@ pub(super) const ROAD_ORDER_LIFT_M: f32 = 0.002;
 const ROAD_STEP_FREE_M: f32 = 0.15;
 const ROAD_STEP_LIFT: f32 = 0.4;
 const ROAD_STEP_LIFT_MAX_M: f32 = 0.4;
+const ROAD_STEP_CLIFF_M: f32 = 1.5;
 
 /// Adds one road as a continuous strip: three vertices per station (left edge, center,
 /// right edge), two quads between stations. Stations sit at the polyline nodes and every
@@ -78,7 +79,8 @@ pub(super) fn push_road(mesh: &mut MeshData, surface: &Surface, ground: &dyn Fn(
             }
         }
         step = step.max((heights[3 * s] - heights[3 * s + 1]).abs()).max((heights[3 * s + 1] - heights[3 * s + 2]).abs());
-        let extra = (ROAD_STEP_LIFT * (step - ROAD_STEP_FREE_M).max(0.0)).min(ROAD_STEP_LIFT_MAX_M);
+        // A step beyond `ROAD_STEP_CLIFF_M` is a cliff (a tile border over a different terrain), not a slope.
+        let extra = if step > ROAD_STEP_CLIFF_M { 0.0 } else { (ROAD_STEP_LIFT * (step - ROAD_STEP_FREE_M).max(0.0)).min(ROAD_STEP_LIFT_MAX_M) };
         for c in 0..3 {
             let [x, y] = xy[3 * s + c];
             mesh.vertices.push(world(x, y, heights[3 * s + c] + lift + extra));
