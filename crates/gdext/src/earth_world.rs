@@ -20,6 +20,7 @@ use godot::prelude::*;
 use godot::tools::try_load;
 use tileformat::Tile;
 
+use crate::environment::EnvironmentClock;
 use crate::lod::{self, TerrainLod};
 use crate::map::{open_map, MapIndex, MeshData, TileGeometry};
 use crate::spawn::{road_spawn, SpawnPose};
@@ -149,6 +150,7 @@ impl INode3D for EarthWorld {
                 return;
             }
         }
+        self.add_environment();
         if let (Some(car), Some(material)) = (&self.car, &self.terrain_mat) {
             lod::configure_view(self.base().get_parent(), car);
             self.lod = Some(TerrainLod::start(&cache_root, &id, &index.meta, material.clone()));
@@ -313,6 +315,21 @@ impl EarthWorld {
     }
 
     /// The car in map coordinates `[x, y]` (x east, y north), if it exists.
+    /// Adds the `Environment` clock node. It drives the scene's WorldEnvironment and replaces
+    /// the scene's Sun with its own lights; runs before `configure_view` sets the fog.
+    fn add_environment(&mut self) {
+        let world_env = self
+            .base()
+            .get_parent()
+            .and_then(|p| p.get_node_or_null("WorldEnvironment"))
+            .and_then(|n| n.try_cast::<godot::classes::WorldEnvironment>().ok());
+        let old_sun = self.base().get_node_or_null("Sun");
+        let mut clock = EnvironmentClock::new_alloc();
+        clock.bind_mut().attach(world_env, old_sun);
+        clock.set_name("Environment");
+        self.base_mut().add_child(&clock);
+    }
+
     fn car_position(&self) -> Option<[f64; 2]> {
         let car = self.car.as_ref()?;
         let local = self.base().to_local(car.get_global_position());

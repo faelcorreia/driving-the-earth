@@ -1,10 +1,12 @@
 use godot::prelude::*;
 
 mod earth_world;
+mod environment;
 mod lod;
 #[cfg(test)]
 mod measure;
 mod map;
+mod sky;
 mod spawn;
 mod streaming;
 
