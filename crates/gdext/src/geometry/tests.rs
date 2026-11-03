@@ -420,3 +420,30 @@ fn tile_geometry_timing() {
     let p90 = times[times.len() * 9 / 10];
     eprintln!("tile_geometry p90 {p90:.3} ms, tri {tris}");
 }
+
+/// Probe (S1c): a many-point profile (2.5 m stations, DEM-like noise) on flat ground.
+/// The ribbon on the axis must follow the smoothed profile, not the grid (0 m).
+#[test]
+fn probe_many_point_profile_on_axis() {
+    let n = 117;
+    let points: Vec<[f64; 2]> = (0..n).map(|k| [-20.0 + 2.5 * k as f64, 125.0]).collect();
+    let z: Vec<f32> = points.iter().enumerate().map(|(k, p)| {
+        (0.04 * (p[0] - 125.0) + if k % 2 == 0 { 0.08 } else { -0.08 }) as f32
+    }).collect();
+    let (smooth, _, _) = super::profile_smooth::smooth_profile(&points, &z, &[], &[], "residential");
+    let road = Polyline { highway: "residential".into(), points: points.clone(), z: z.clone(), zl: Vec::new(), zr: Vec::new() };
+    let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
+    let g = tile_geometry(&t, 250.0);
+    let mut worst = (0.0f64, 0.0f64, 0.0f64);
+    for x in (15..=235).step_by(5) {
+        let x = x as f64;
+        let strip = ribbon_height(&g.roads, x, 125.0).expect("on the ribbon");
+        let k = ((x + 20.0) / 2.5).round() as usize;
+        let want = smooth[k] as f64 + ROAD_LIFT_M as f64;
+        let err = (strip - want).abs();
+        eprintln!("x={x} ribbon={strip:.3} want={want:.3}");
+        if err > worst.0 { worst = (err, x, strip); }
+    }
+    eprintln!("probe worst error {:.4} m at x={} (ribbon {:.4})", worst.0, worst.1, worst.2);
+    assert!(worst.0 <= 0.02, "axis off the smoothed profile by {:.4} m at x={} (ribbon {:.4})", worst.0, worst.1, worst.2);
+}
