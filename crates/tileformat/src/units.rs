@@ -32,3 +32,36 @@ const _: () = assert!(GROUND_CELL_M % MODULE_M == 0.0, "ground cells are whole m
 const _: () = assert!(FLOOR_HEIGHT_M % MODULE_M == 0.0, "a floor is a whole number of modules");
 const _: () = assert!(SIDEWALK_M % MODULE_M == 0.0, "a sidewalk is a whole number of modules");
 const _: () = assert!(GROUND_N as f64 * GROUND_CELL_M == TILE_M, "the ground grid covers the tile");
+
+/// Lot rules of the generated buildings (B0). Distances in meters; the drawn values are snapped
+/// to `MODULE_M`, so every lot edge is a whole number of modules.
+pub mod lots {
+    use super::MODULE_M;
+
+    /// Lot width range (along the street).
+    pub const LOT_W_MIN_M: f64 = 8.0;
+    pub const LOT_W_MAX_M: f64 = 20.0;
+    /// Lot depth range (away from the street).
+    pub const LOT_D_MIN_M: f64 = 25.0;
+    pub const LOT_D_MAX_M: f64 = 35.0;
+    /// Front setback range (0 to 2 m) and side/back setback range (0 to 1 m).
+    pub const FRONT_SETBACK_MAX_M: f64 = 2.0;
+    pub const SIDE_SETBACK_MAX_M: f64 = 1.0;
+    /// Share of free lots left empty, in per mille (about 5%).
+    pub const EMPTY_LOT_PERMILLE: u64 = 50;
+    /// Margin that a lot keeps from a real footprint.
+    pub const FOOTPRINT_MARGIN_M: f64 = 1.0;
+    /// Service roads shorter than this do not split blocks; longer ones count as access roads.
+    pub const ACCESS_SERVICE_MIN_M: f64 = 60.0;
+    /// Probability (per mille) of a tall building (4 to 8 floors); higher on primary/secondary.
+    pub const TALL_PERMILLE: u64 = 200;
+    pub const TALL_MAIN_PERMILLE: u64 = 400;
+
+    const _: () = assert!(LOT_W_MIN_M < LOT_W_MAX_M && LOT_D_MIN_M < LOT_D_MAX_M);
+    const _: () = assert!(LOT_W_MIN_M % MODULE_M == 0.0 && LOT_D_MIN_M % MODULE_M == 0.0);
+    const _: () = assert!(FRONT_SETBACK_MAX_M % MODULE_M == 0.0 && SIDE_SETBACK_MAX_M % MODULE_M == 0.0);
+    const _: () = assert!(FOOTPRINT_MARGIN_M % MODULE_M == 0.0);
+    const _: () = assert!(EMPTY_LOT_PERMILLE < 1000 && TALL_PERMILLE <= TALL_MAIN_PERMILLE && TALL_MAIN_PERMILLE < 1000);
+    // A lot must still hold a building after both setbacks on each side.
+    const _: () = assert!(LOT_W_MIN_M > 2.0 * SIDE_SETBACK_MAX_M && LOT_D_MIN_M > FRONT_SETBACK_MAX_M + SIDE_SETBACK_MAX_M);
+}
