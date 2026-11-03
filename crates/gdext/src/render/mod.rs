@@ -12,6 +12,7 @@ use godot::prelude::*;
 
 pub(crate) mod far_lights;
 pub(crate) mod lamps;
+pub(crate) mod map2d;
 
 use crate::geometry::MeshData;
 

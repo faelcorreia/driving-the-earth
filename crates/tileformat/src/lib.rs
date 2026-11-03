@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub mod far_lights;
+pub mod roads;
 pub mod terrain;
 pub mod units;
 
@@ -57,6 +58,9 @@ pub struct HeightGrid {
 pub struct Polyline {
     /// Value of the OSM `highway` tag (e.g. "residential").
     pub highway: String,
+    /// Value of the OSM `name` tag; empty when the way has none. Used by the 2D map labels.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// Points `[x, y]` in the system defined by the bake.
     pub points: Vec<[f64; 2]>,
     /// Terrain-following height of each point (same length as `points`). Empty when the
@@ -174,6 +178,18 @@ pub fn write_tile(cache_root: &Path, id: &str, tile: &Tile) -> io::Result<PathBu
     Ok(path)
 }
 
+/// Reads only the road polylines of a tile file (the heights and buildings are skipped).
+pub fn read_tile_roads(path: &Path) -> io::Result<Vec<Polyline>> {
+    #[derive(Deserialize)]
+    struct RoadsOnly {
+        roads: Vec<Polyline>,
+    }
+    let file = fs::File::open(path)?;
+    let tile: RoadsOnly = serde_json::from_reader(io::BufReader::new(file))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(tile.roads)
+}
+
 /// Reads a tile from `cache/<id>/tiles/x_y.json`.
 pub fn read_tile(path: &Path) -> io::Result<Tile> {
     let file = fs::File::open(path)?;
@@ -196,6 +212,7 @@ mod tests {
             },
             roads: vec![Polyline {
                 highway: "residential".into(),
+                name: "Rua Exemplo".into(),
                 points: vec![[-43.9123456789, -19.9234567891], [-43.9, -19.92]],
                 z: Vec::new(),
                 zl: Vec::new(),
@@ -241,6 +258,35 @@ mod tests {
         assert!(tile.ground.is_empty());
         let text = serde_json::to_string(&tile).unwrap();
         assert!(!text.contains("ground") && !text.contains("generated"));
+    }
+
+    #[test]
+    fn road_name_round_trips_and_is_omitted_when_empty() {
+        let mut tile = sample_tile();
+        let text = serde_json::to_string(&tile).unwrap();
+        assert!(text.contains("\"name\":\"Rua Exemplo\""), "{text}");
+        let back: Tile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.roads[0].name, "Rua Exemplo");
+        tile.roads[0].name.clear();
+        let text = serde_json::to_string(&tile).unwrap();
+        assert!(!text.contains("name"), "{text}");
+        // Tiles baked before the field existed read with an empty name.
+        let old: Tile = serde_json::from_str(
+            r#"{"x":0,"y":0,"height":{"cols":1,"rows":1,"values":[1.0]},
+            "roads":[{"highway":"primary","points":[[0.0,0.0],[1.0,0.0]]}],"buildings":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.roads[0].name, "");
+    }
+
+    #[test]
+    fn read_tile_roads_skips_the_rest_of_the_tile() {
+        let root = temp_cache_root("roads");
+        let tile = sample_tile();
+        let path = write_tile(&root, "casa", &tile).unwrap();
+        let roads = read_tile_roads(&path).unwrap();
+        assert_eq!(roads, tile.roads);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

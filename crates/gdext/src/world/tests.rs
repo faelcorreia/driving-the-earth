@@ -103,6 +103,7 @@ fn neighborhood_geometry_matches_whole_map() {
     )
     .unwrap();
     let road = |points: Vec<[f64; 2]>| Polyline {
+        name: String::new(),
         z: Vec::new(),
         zl: Vec::new(),
         zr: Vec::new(),
@@ -261,6 +262,7 @@ fn road_over_a_tile_border_follows_the_neighbor_terrain() {
     // Tile (0,0) is flat at 10 m; tile (1,0) is flat at 20 m. A road along y = 10 ends
     // at x = 20 + 3 (it crosses the border), so its tail lies over the neighbor.
     let road = Polyline {
+        name: String::new(),
         z: Vec::new(),
         zl: Vec::new(),
         zr: Vec::new(),

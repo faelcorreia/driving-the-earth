@@ -102,6 +102,7 @@ mod tests {
             roads: roads
                 .into_iter()
                 .map(|points| Polyline {
+                    name: String::new(),
                     z: Vec::new(),
                     zl: Vec::new(),
                     zr: Vec::new(),

@@ -12,7 +12,8 @@ use std::thread;
 use std::time::Instant;
 
 use godot::classes::{
-    INode3D, MeshInstance3D, Node3D, ProjectSettings, ShaderMaterial, StandardMaterial3D,
+    CanvasLayer, INode3D, MeshInstance3D, Node3D, ProjectSettings, ShaderMaterial,
+    StandardMaterial3D,
 };
 use godot::prelude::*;
 
@@ -22,6 +23,7 @@ use crate::geometry::lamps::LampPost;
 use crate::geometry::{TileGeometry, GRASS_RGB};
 use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
+use crate::render::map2d::MapView;
 use crate::render::{building_material, material, solid_body, spawn_car};
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
@@ -42,6 +44,8 @@ const MAX_IN_FLIGHT: usize = 8;
 const HYSTERESIS_M: f64 = 150.0;
 /// Period of the timing line in the log, in seconds.
 const STATS_PERIOD_S: f64 = 5.0;
+/// Canvas layer of the 2D map, above the 3D view and the HUD.
+const MAP_CANVAS_LAYER: i32 = 10;
 /// Period of the real lights update (which lit lamps they stand on), in seconds.
 const LAMP_UPDATE_S: f64 = 0.25;
 
@@ -218,6 +222,7 @@ impl INode3D for EarthWorld {
             ));
         }
         self.start_loader(Arc::new(index));
+        self.add_map_view();
     }
 
     fn process(&mut self, delta: f64) {
@@ -456,6 +461,20 @@ impl EarthWorld {
     }
 
     /// The car in map coordinates `[x, y]` (x east, y north), if it exists.
+    /// Adds the 2D map (M) on its own canvas layer, reading the roads in the background.
+    fn add_map_view(&mut self) {
+        let (Some(index), Some(car)) = (self.index.clone(), self.car.clone()) else {
+            return;
+        };
+        let origin = self.to_gd().upcast::<Node3D>();
+        let mut layer = CanvasLayer::new_alloc();
+        layer.set_layer(MAP_CANVAS_LAYER);
+        let mut map = MapView::new_alloc();
+        map.bind_mut().start(index, car, origin);
+        layer.add_child(&map);
+        self.base_mut().add_child(&layer);
+    }
+
     /// Adds the `Environment` clock node. It drives the scene's WorldEnvironment and replaces
     /// the scene's Sun with its own lights; runs before `configure_view` sets the fog.
     fn add_environment(&mut self) {

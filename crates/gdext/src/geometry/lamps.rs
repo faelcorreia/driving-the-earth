@@ -351,6 +351,7 @@ mod tests {
 
     fn road(highway: &str, points: &[[f64; 2]]) -> Polyline {
         Polyline {
+            name: String::new(),
             highway: highway.into(),
             points: points.to_vec(),
             z: vec![],
