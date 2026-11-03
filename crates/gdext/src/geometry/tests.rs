@@ -494,3 +494,43 @@ fn probe_many_point_profile_on_axis() {
     eprintln!("probe worst error {:.4} m at x={} (ribbon {:.4})", worst.0, worst.1, worst.2);
     assert!(worst.0 <= 0.02, "axis off the smoothed profile by {:.4} m at x={} (ribbon {:.4})", worst.0, worst.1, worst.2);
 }
+
+/// Diagnostic on the real baked map `casa-10km`, tile (-1, -2) (run with `--ignored --nocapture`):
+/// the terrain of the tile must not rise above any road ribbon of the 3 x 3 block around it.
+#[test]
+#[ignore]
+fn real_tile_terrain_stays_under_the_ribbons() {
+    let root = std::path::Path::new("/mnt/Data/Codes/driving-the-earth/cache");
+    let index = crate::world::open_map(root, "casa-10km").expect("baked map 'casa-10km'");
+    let m = index.meta.tile_size_m;
+    let block: Vec<Tile> = (-1..=1)
+        .flat_map(|dy| (-1..=1).map(move |dx| (-1 + dx, -2 + dy)))
+        .filter_map(|(x, y)| index.read_tile_at(x, y).ok())
+        .collect();
+    let center = block.iter().find(|t| t.x == -1 && t.y == -2).expect("tile (-1, -2)");
+    let geo: Vec<TileGeometry> = block
+        .iter()
+        .map(|t| {
+            let around: Vec<&Tile> = block.iter().filter(|o| (o.x, o.y) != (t.x, t.y)).collect();
+            tile_geometry_with(t, m, &|x, y| sample_height(t, m, x, y), &around)
+        })
+        .collect();
+    let g = &geo[block.iter().position(|t| std::ptr::eq(t, center)).unwrap()];
+    let (mut worst, mut checked) = (f64::NEG_INFINITY, 0usize);
+    for v in &g.terrain.vertices {
+        let (x, y, h) = (v[0] as f64, -(v[2] as f64), v[1] as f64);
+        let strips: Vec<f64> = geo.iter().filter_map(|k| ribbon_height(&k.roads, x, y)).collect();
+        if strips.is_empty() {
+            continue;
+        }
+        checked += 1;
+        let lowest = strips.iter().cloned().fold(f64::INFINITY, f64::min);
+        let excess = h - lowest;
+        if excess > worst {
+            worst = excess;
+        }
+    }
+    println!("checked={checked} worst_excess={worst:.4} m");
+    assert!(checked > 0, "no terrain vertex under a ribbon in tile (-1, -2)");
+    assert!(worst <= 0.02, "terrain {worst:.4} m above the ribbon in tile (-1, -2)");
+}
