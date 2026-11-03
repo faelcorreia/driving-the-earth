@@ -24,7 +24,7 @@ pub const MAX_ATTEMPTS: u32 = 6;
 pub const BACKOFF_BASE: Duration = Duration::from_secs(5);
 
 fn other_err<E: std::fmt::Display>(e: E) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e.to_string())
+    io::Error::other(e.to_string())
 }
 
 /// Failed HTTP request: the status when the server answered, `None` for transport errors.

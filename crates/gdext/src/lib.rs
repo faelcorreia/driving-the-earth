@@ -1,3 +1,7 @@
+// `#[derive(GodotClass)]` expands `base: base` in its generated init; clippy reports that at
+// the `base` field of `EarthRoot`, where code we write is not, so the lint is allowed crate-wide.
+#![allow(clippy::redundant_field_names)]
+
 use godot::prelude::*;
 
 mod earth_world;

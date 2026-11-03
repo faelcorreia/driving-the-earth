@@ -78,7 +78,7 @@ fn extend_end(pts: &[[f64; 2]], half: f64, roads: &[Polyline], own: usize, tile_
         let mut best: Option<(f64, [f64; 2], [f64; 2])> = None;
         for w in other.points.windows(2) {
             let dd = dist_to_segment(end, w[0], w[1]);
-            if best.map_or(true, |(b, _, _)| dd < b) {
+            if best.is_none_or(|(b, _, _)| dd < b) {
                 best = Some((dd, w[0], w[1]));
             }
         }

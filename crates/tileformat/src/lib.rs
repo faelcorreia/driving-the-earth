@@ -132,14 +132,14 @@ mod ground_rle {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let flat: Vec<u32> = Vec::deserialize(d)?;
-        if flat.len() % 2 != 0 {
+        if !flat.len().is_multiple_of(2) {
             return Err(serde::de::Error::custom(
                 "ground runs must come in (value, count) pairs",
             ));
         }
         let mut out = Vec::new();
         for pair in flat.chunks(2) {
-            out.extend(std::iter::repeat(pair[0] as u8).take(pair[1] as usize));
+            out.extend(std::iter::repeat_n(pair[0] as u8, pair[1] as usize));
         }
         Ok(out)
     }

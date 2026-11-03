@@ -3,6 +3,10 @@
 //! on terrain loaded synchronously. Then the tiles within `view_radius_m` of the car are
 //! built in the background and instantiated on the main thread, a few per frame, and tiles
 //! that fall beyond the radius plus a margin are freed.
+// `#[derive(GodotClass)]` expands `base: base` in its generated init; clippy reports that at
+// the `base` field, where code we write is not, so the lint is allowed for this module only.
+#![allow(clippy::redundant_field_names)]
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
@@ -44,6 +48,9 @@ const HYSTERESIS_M: f64 = 150.0;
 const STATS_PERIOD_S: f64 = 5.0;
 /// Period of the real lights update (which lit lamps they stand on), in seconds.
 const LAMP_UPDATE_S: f64 = 0.25;
+
+/// Result of one tile load: its coordinates and the geometry or the error.
+type TileResult = ((i32, i32), io::Result<TileGeometry>);
 
 /// Streams `<cache_root>/<map_id>` around the car.
 #[derive(GodotClass)]
@@ -98,7 +105,7 @@ pub struct EarthWorld {
     /// Geometry back from the loader, waiting for its turn to be instantiated.
     done: VecDeque<((i32, i32), TileGeometry)>,
     requests: Option<Sender<(i32, i32)>>,
-    results: Option<Receiver<((i32, i32), io::Result<TileGeometry>)>>,
+    results: Option<Receiver<TileResult>>,
     /// Distant terrain rings, and the node of the last build.
     lod: Option<TerrainLod>,
     lod_node: Option<Gd<MeshInstance3D>>,

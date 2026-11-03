@@ -232,7 +232,7 @@ pub fn lamps_of_road(
             // Alternating sides: +1 on even samples, -1 on odd ones; avenues use both.
             let sides: &[f64] = if both {
                 &[1.0, -1.0]
-            } else if k % 2 == 0 {
+            } else if k.is_multiple_of(2) {
                 &[1.0]
             } else {
                 &[-1.0]

@@ -50,10 +50,9 @@ pub fn check_areas_body(v: &Value) -> io::Result<()> {
     osm::check_elements(v)?;
     if let Some(remark) = v["remark"].as_str() {
         if remark.contains("runtime error") {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("partial Overpass answer: {remark}"),
-            ));
+            return Err(io::Error::other(format!(
+                "partial Overpass answer: {remark}"
+            )));
         }
     }
     Ok(())
@@ -116,14 +115,10 @@ pub fn visit_elements(dir: &Path, meta: &MapMeta, mut f: impl FnMut(&Value)) -> 
                 format!("{}: {e} (download the area blocks first)", path.display()),
             )
         })?;
-        let v: Value = serde_json::from_str(&text)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        let elements = v["elements"].as_array().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("{}: no 'elements'", path.display()),
-            )
-        })?;
+        let v: Value = serde_json::from_str(&text).map_err(|e| io::Error::other(e.to_string()))?;
+        let elements = v["elements"]
+            .as_array()
+            .ok_or_else(|| io::Error::other(format!("{}: no 'elements'", path.display())))?;
         for e in elements {
             if let (Some(t), Some(id)) = (e["type"].as_str(), e["id"].as_u64()) {
                 if !seen.insert((t.to_string(), id)) {

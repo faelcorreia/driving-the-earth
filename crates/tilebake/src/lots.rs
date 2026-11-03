@@ -697,7 +697,7 @@ mod tests {
     #[test]
     fn neighbour_tiles_share_the_same_lots_without_repeats() {
         // Block x 25.5..464.5 fits in the window of tiles (0,0) and (1,0): both bake it.
-        let rs = vec![
+        let rs = [
             street(&[[-100.0, 50.0], [600.0, 50.0]]),
             street(&[[-100.0, 200.0], [600.0, 200.0]]),
             street(&[[20.0, -100.0], [20.0, 300.0]]),

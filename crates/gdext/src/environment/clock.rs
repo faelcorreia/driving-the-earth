@@ -1,5 +1,8 @@
 //! Ambiente da cena: relógio do mundo, sol e lua como luzes, céu, neblina e tonemapping.
 //! A astronomia e os limiares vivem em `sky.rs` (puros); aqui fica só a ponte com Godot.
+// `#[derive(GodotClass)]` expands `base: base` in its generated init; clippy reports that at
+// the `base` field, where code we write is not, so the lint is allowed for this module only.
+#![allow(clippy::redundant_field_names)]
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -49,6 +52,9 @@ const HAZE_GLOBAL: &str = "haze_color";
 const FOG_DEPTH_CURVE: f32 = 2.0;
 /// Saturação da luz ambiente em relação ao cinza médio do céu (0 neutro, 1 cor do céu).
 const AMBIENT_SAT: f32 = 0.35;
+
+/// Callback called when a light threshold is crossed.
+type CrossingListener = Box<dyn FnMut(&Crossing)>;
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
@@ -101,7 +107,7 @@ pub struct EnvironmentClock {
     sun: Option<Gd<DirectionalLight3D>>,
     moon: Option<Gd<DirectionalLight3D>>,
     bank: ThresholdBank,
-    listeners: Vec<Box<dyn FnMut(&Crossing)>>,
+    listeners: Vec<CrossingListener>,
     log_timer: f64,
     /// `sim_unix` at the start: game time in the lamp globals counts from here.
     origin_unix: f64,

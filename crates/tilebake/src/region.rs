@@ -10,6 +10,7 @@
 //! - `cache/regions/<id>/`: the package (`manifest.json`, `height.i16`, `mask.u8`).
 //! - `cache/regions/index.json`: `{"regions": [ids]}`, written by `tilebake region`; the bake loads
 //!   exactly the packages listed there.
+//!
 //! Heights are absolute official heights, not diffs.
 use std::collections::VecDeque;
 use std::fs;
@@ -178,7 +179,9 @@ impl Region {
             return Err(bad("package: file sizes do not match the manifest"));
         }
         let heights = hb
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         Region::new(manifest, heights, mask)
@@ -373,8 +376,8 @@ fn contour_at(cand: &[(f64, u32, f64, f64)], segs: &[Seg]) -> f64 {
     };
     let z1 = segs[i1 as usize].z as f64;
     // Nearest segment of each side: (squared distance, x, y, z).
-    let (mut lo, mut hi): (Option<(f64, f64, f64, f64)>, Option<(f64, f64, f64, f64)>) =
-        (None, None);
+    type Nearest = Option<(f64, f64, f64, f64)>;
+    let (mut lo, mut hi): (Nearest, Nearest) = (None, None);
     for &(d2, idx, vx, vy) in cand {
         let z = segs[idx as usize].z as f64;
         let side = if z < z1 {

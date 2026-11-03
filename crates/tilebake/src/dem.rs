@@ -81,7 +81,7 @@ impl MapGrid {
 }
 
 fn other_err<E: Display>(e: E) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e.to_string())
+    io::Error::other(e.to_string())
 }
 
 fn invalid_data<E: Display>(e: E) -> io::Error {

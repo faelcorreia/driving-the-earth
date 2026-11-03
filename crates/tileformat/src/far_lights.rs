@@ -60,7 +60,9 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<FarLight>> {
     }
     let f32_at = |b: &[u8], o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
     Ok(bytes[HEADER_BYTES..]
-        .chunks_exact(RECORD_BYTES)
+        .as_chunks::<RECORD_BYTES>()
+        .0
+        .iter()
         .map(|r| FarLight {
             x: f32_at(r, 0),
             y: f32_at(r, 4),

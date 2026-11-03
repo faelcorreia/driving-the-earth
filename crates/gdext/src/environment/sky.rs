@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn unix_epoch_and_local_time() {
-        assert_eq!(local_to_unix(1970, 1, 1, 0.0), LOCAL_UTC_OFFSET_S * -1.0);
+        assert_eq!(local_to_unix(1970, 1, 1, 0.0), -LOCAL_UTC_OFFSET_S);
         let t = local_to_unix(2026, 11, 15, 17.5);
         assert!((local_hour(t) - 17.5).abs() < 1e-9);
     }

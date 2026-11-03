@@ -42,7 +42,7 @@ pub fn road_spawn(tiles: &[Tile]) -> Option<SpawnPose> {
                 let t = (-(p[0] * d[0] + p[1] * d[1]) / len2).clamp(0.0, 1.0);
                 let c = [p[0] + t * d[0], p[1] + t * d[1]];
                 let dist2 = c[0] * c[0] + c[1] * c[1];
-                if best.map_or(true, |(b, _, _)| dist2 < b) {
+                if best.is_none_or(|(b, _, _)| dist2 < b) {
                     best = Some((dist2, c, d));
                 }
             }

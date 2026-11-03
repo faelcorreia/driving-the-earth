@@ -435,7 +435,9 @@ mod tests {
 
     /// Two ways meeting at (50, 0): one along x, one north. A bump next to the north way makes
     /// their smoothed terrain differ at the node.
-    fn junction_case() -> (Vec<SmoothWay>, HashMap<(i64, i64), f64>, (i64, i64)) {
+    type JunctionCase = (Vec<SmoothWay>, HashMap<(i64, i64), f64>, (i64, i64));
+
+    fn junction_case() -> JunctionCase {
         let bump = |p: [f64; 2]| {
             Some(10.0 + 1.5 * (-((p[0] - 50.0).powi(2) + (p[1] - 25.0).powi(2)) / 200.0).exp())
         };
