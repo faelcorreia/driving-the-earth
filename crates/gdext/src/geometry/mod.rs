@@ -3,6 +3,7 @@
 //! May import: `tileformat` (data contract) and `tilebake` (shared profile math). Nothing else in
 //! `gdext`. `world` and `render` use it; it must not use them.
 
+mod building;
 mod junction;
 mod mesh;
 mod road;
@@ -13,6 +14,7 @@ pub(crate) mod tests;
 
 use tileformat::Tile;
 
+use building::building_mesh;
 use junction::extend_junction_ends;
 pub(crate) use road::ROAD_LIFT_M;
 use road::{lower_under_roads, push_road, ROAD_ORDER_LIFT_M, ROAD_STATIONS_PER_CELL};
@@ -73,5 +75,6 @@ pub fn tile_geometry_with(tile: &Tile, tile_m: f64, ground: &dyn Fn(f64, f64) ->
         push_road(&mut roads, ground, pts, zs, half, step, lift);
     }
 
-    TileGeometry { terrain, roads }
+    let buildings = building_mesh(tile, ground);
+    TileGeometry { terrain, roads, buildings }
 }

@@ -60,6 +60,8 @@ pub struct EarthWorld {
     car: Option<Gd<Node3D>>,
     terrain_mat: Option<Gd<StandardMaterial3D>>,
     road_mat: Option<Gd<StandardMaterial3D>>,
+    /// White, so the per-vertex colors of the buildings show as they are.
+    building_mat: Option<Gd<StandardMaterial3D>>,
     /// Loaded tiles, each one a container node with the terrain and road bodies.
     loaded: HashMap<(i32, i32), Gd<Node3D>>,
     /// Geometry requested from the loader and not back yet.
@@ -105,6 +107,7 @@ impl INode3D for EarthWorld {
         );
         self.terrain_mat = Some(material(TERRAIN_COLOR));
         self.road_mat = Some(material(ROAD_COLOR));
+        self.building_mat = Some(material((1.0, 1.0, 1.0)));
 
         // Spawn on the road nearest to home (the local origin), facing south. Without any
         // road, fall back to home itself facing south.
@@ -298,9 +301,11 @@ impl EarthWorld {
         }
     }
 
-    /// Creates the nodes of one tile: terrain body, and road body when there are roads.
+    /// Creates the nodes of one tile: terrain body, and road and building bodies when there are some.
     fn add_tile(&mut self, t: (i32, i32), geometry: &TileGeometry) {
-        let (Some(terrain_mat), Some(road_mat)) = (self.terrain_mat.clone(), self.road_mat.clone()) else {
+        let (Some(terrain_mat), Some(road_mat), Some(building_mat)) =
+            (self.terrain_mat.clone(), self.road_mat.clone(), self.building_mat.clone())
+        else {
             return;
         };
         let mut node = Node3D::new_alloc();
@@ -308,6 +313,10 @@ impl EarthWorld {
         if !geometry.roads.is_empty() {
             // Roads are solid too, so the wheels rest on them instead of on the terrain below.
             node.add_child(&solid_body(&geometry.roads, &road_mat));
+        }
+        if !geometry.buildings.is_empty() {
+            // One mesh and one collision body per tile, for the buildings of that tile.
+            node.add_child(&solid_body(&geometry.buildings, &building_mat));
         }
         self.base_mut().add_child(&node);
         self.loaded.insert(t, node);

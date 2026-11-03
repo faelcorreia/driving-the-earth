@@ -23,11 +23,13 @@ impl MeshData {
     }
 }
 
-/// Terrain and road meshes of one tile.
+/// Terrain, road and building meshes of one tile.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct TileGeometry {
     pub terrain: MeshData,
     pub roads: MeshData,
+    /// All buildings of the tile, one mesh (solid, with per-vertex colors).
+    pub buildings: MeshData,
 }
 
 /// Local `(x, y)` plus height to Godot world space.
