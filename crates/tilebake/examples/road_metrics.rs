@@ -72,12 +72,15 @@ fn main() {
     let mut lumps = (vec![], vec![]);
     let mut first_curve: Option<(f64, f64, Vec<f64>)> = None;
     let (mut pieces, mut without_z) = (0, 0);
+    let mut worst: Vec<(f64, [f64; 2], usize, usize)> = vec![]; // (pitch, pos, piece, step)
+    let mut no_z_dist: Vec<f64> = vec![];
     for entry in fs::read_dir(dir.join("tiles")).expect("tiles dir") {
         let path = entry.expect("entry").path();
         let tile = read_tile(&path).expect("tile");
         for road in &tile.roads {
             if road.z.len() != road.points.len() {
                 without_z += 1;
+                no_z_dist.push(road.points.iter().map(|p| p[0].hypot(p[1])).fold(f64::MAX, f64::min));
                 continue;
             }
             let s = resample(road);
@@ -95,6 +98,7 @@ fn main() {
                 let ang = |j: usize| ((hs[j + 1] - hs[j]) / STEP).atan().to_degrees();
                 let dp = (ang(i) - ang(i - 1)).abs();
                 let bucket = if turn > 10.0 { &mut pitch.1 } else { &mut pitch.0 };
+                worst.push((dp, [s[i][0], s[i][1]], pieces, i));
                 bucket.push(dp);
                 let k2 = (hs[i + 1] - 2.0 * hs[i] + hs[i - 1]).abs();
                 kink = (kink.0.max(k2), kink.1 + 1);
@@ -124,6 +128,16 @@ fn main() {
             }
         }
     }
+    worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let edge = |x: f64| (x / 250.0 - (x / 250.0).round()).abs() * 250.0;
+    println!("10 worst pitch steps (deg, pos, dist to tile line m, piece, step index):");
+    for (dp, pos, piece, i) in worst.iter().take(10) {
+        let d_tile = edge(pos[0]).min(edge(pos[1]));
+        println!("  {dp:6.2}  ({:7.1},{:7.1})  seam {d_tile:6.1}  piece {piece:4}  step {i}", pos[0], pos[1]);
+    }
+    let mut nd = no_z_dist.clone();
+    let inside = nd.iter().filter(|d| **d <= 1000.0).count();
+    println!("no-z pieces: {} with a point within 1000 m of home; min-dist pct p50 {:.0} p95 {:.0} max {:.0} m", inside, pct(&mut nd, 0.5), pct(&mut nd, 0.95), pct(&mut nd, 1.0));
     let (mut ps, mut pc) = (pitch.0, pitch.1);
     println!("road pieces with profile: {pieces} (without z: {without_z})");
     println!("pitch 2.5 m steps, straight: max {:.3} p95 {:.3} deg ({} samples)", ps.iter().cloned().fold(0.0, f64::max), pct(&mut ps, 0.95), ps.len());

@@ -1,5 +1,5 @@
 //! Raw data (OSM + DEM already in cache) -> tiles in `cache/<id>/tiles/`.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -73,9 +73,14 @@ pub fn covering_tiles(radius_m: f64, tile_m: f64) -> Vec<(i32, i32)> {
 /// The OSM query uses it, so every way that touches a baked tile is downloaded.
 pub fn covering_bbox(meta: &MapMeta) -> (f64, f64, f64, f64) {
     let grid = MapGrid::from_meta(meta);
+    tiles_bbox(&covering_tiles(meta.radius_m, meta.tile_size_m), &grid)
+}
+
+/// Geographic bounding box `(south, west, north, east)` of a set of tiles.
+fn tiles_bbox(tiles: &[(i32, i32)], grid: &MapGrid) -> (f64, f64, f64, f64) {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for (x, y) in covering_tiles(meta.radius_m, meta.tile_size_m) {
-        let r = tile_rect(x, y, meta.tile_size_m);
+    for &(x, y) in tiles {
+        let r = tile_rect(x, y, grid.tile_m);
         x0 = x0.min(r.x0);
         y0 = y0.min(r.y0);
         x1 = x1.max(r.x1);
@@ -265,8 +270,18 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
     osm::visit_ways(&dir.join("raw").join("osm"), &meta, |e| {
         add_way(e, &grid, &mut roads, &mut buildings)
     })?;
-    // One Copernicus tile per 1 degree cell that the baked area touches; missing ones are downloaded.
-    let (south, west, north, east) = covering_bbox(&meta);
+    // The baked disc, plus the tiles that ways reach beyond it: their road profile needs terrain too.
+    let covering: HashSet<(i32, i32)> = covering_tiles(meta.radius_m, meta.tile_size_m).into_iter().collect();
+    let mut terrain_tiles: HashSet<(i32, i32)> = covering.clone();
+    for road in &roads {
+        for p in profile::densify(&road.points) {
+            let (x, y) = ((p[0] / grid.tile_m).floor() as i32, (p[1] / grid.tile_m).floor() as i32);
+            terrain_tiles.insert((x, y));
+        }
+    }
+    let terrain_list: Vec<(i32, i32)> = terrain_tiles.iter().copied().collect();
+    // One Copernicus tile per 1 degree cell that the terrain touches; missing ones are downloaded.
+    let (south, west, north, east) = tiles_bbox(&terrain_list, &grid);
     let mut rasters = Vec::new();
     for la in south.floor() as i32..=north.floor() as i32 {
         for lo in west.floor() as i32..=east.floor() as i32 {
@@ -277,21 +292,32 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
     let regions = load_regions(cache_root)?;
 
     // Final terrain of every tile (regions applied), shared by the road profiles and the tiles.
+    // Tiles beyond the disc with no DEM data (the edge of the map) get no terrain: their ways
+    // keep no profile.
     let mut heights: HashMap<(i32, i32), HeightGrid> = HashMap::new();
-    for (x, y) in covering_tiles(meta.radius_m, meta.tile_size_m) {
+    for &(x, y) in &terrain_list {
         let rect = tile_rect(x, y, grid.tile_m);
-        let mut h = tile_heights_any(&rasters, &grid, x, y)?;
+        let Ok(mut h) = tile_heights_any(&rasters, &grid, x, y) else {
+            if covering.contains(&(x, y)) {
+                return Err(invalid_data(format!("no terrain data at baked tile ({x},{y})")));
+            }
+            continue;
+        };
         apply_regions(&mut h, &grid, &regions, rect.x0, rect.y0);
         heights.insert((x, y), h);
     }
-    // Road profiles: each way whole (not cut by tile), densified and smoothed over the final terrain.
+    // Road profiles: each way whole (not cut by tile), densified and smoothed over the final
+    // terrain, then pinned to one shared height at its junctions and ends.
     let ways: Vec<Vec<[f64; 2]>> = roads.iter().map(|r| r.points.clone()).collect();
     let pins = profile::pinned_nodes(&ways);
     let terrain = |p: [f64; 2]| terrain_at(&heights, &grid, p);
-    for road in roads.iter_mut() {
-        if let Some(z) = profile::way_profile(&road.points, &terrain, &|p| pins.contains(&profile::node_key(p))) {
-            road.points = profile::densify(&road.points);
-            road.z = z;
+    let smooth: Vec<Option<profile::SmoothWay>> =
+        roads.iter().map(|r| profile::smooth_way(&r.points, &terrain)).collect();
+    let node_h = profile::node_heights(&smooth, &pins);
+    for (road, sw) in roads.iter_mut().zip(&smooth) {
+        if let Some(sw) = sw {
+            road.points = sw.pts.clone();
+            road.z = profile::pin_way(sw, &node_h);
         }
     }
     let road_index = index_by_tile(&roads, |r| &r.points, meta.tile_size_m);
