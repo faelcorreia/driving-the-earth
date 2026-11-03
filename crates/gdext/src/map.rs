@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tileformat::{read_tile, MapMeta, Polyline, Tile};
 
@@ -82,28 +82,93 @@ fn invalid_data<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
-/// Loads `cache_root/<id>/meta.json` and every `tiles/*.json`.
-/// Fails when the map is not complete (tilebake has not finished) or a tile is malformed.
-pub fn load_map(cache_root: &Path, id: &str) -> io::Result<Map> {
+/// A baked map opened without reading its tiles: the metadata and the grid coordinates of
+/// the files in `cache/<id>/tiles/`. Tiles are read on demand, so opening a big map is cheap.
+/// Read-only, so it can be shared with the loader thread.
+pub struct MapIndex {
+    pub meta: MapMeta,
+    dir: PathBuf,
+    /// Sorted.
+    coords: Vec<(i32, i32)>,
+}
+
+/// Reads `cache_root/<id>/meta.json` and lists `tiles/x_y.json` by name, without parsing tiles.
+/// Fails when the map is not complete (tilebake has not finished).
+pub fn open_map(cache_root: &Path, id: &str) -> io::Result<MapIndex> {
     let dir = cache_root.join(id);
     let meta: MapMeta = serde_json::from_str(&fs::read_to_string(dir.join("meta.json"))?).map_err(invalid_data)?;
     if !meta.complete {
         return Err(invalid_data(format!("map '{id}' is not complete, run tilebake first")));
     }
-    let mut tiles = Vec::new();
+    let mut coords = Vec::new();
     for entry in fs::read_dir(dir.join("tiles"))? {
         let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("json") {
-            let tile = read_tile(&path)?;
-            let n = tile.height.cols as usize;
-            if n < 2 || tile.height.rows as usize != n || tile.height.values.len() != n * n {
-                return Err(invalid_data(format!("tile {} {} has a bad height grid", tile.x, tile.y)));
-            }
-            tiles.push(tile);
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(c) = path.file_stem().and_then(|s| s.to_str()).and_then(parse_coords) {
+            coords.push(c);
         }
     }
-    tiles.sort_by_key(|t| (t.x, t.y));
-    Ok(Map::new(meta, tiles))
+    coords.sort_unstable();
+    Ok(MapIndex { meta, dir, coords })
+}
+
+/// `"-3_12"` to `(-3, 12)`.
+fn parse_coords(stem: &str) -> Option<(i32, i32)> {
+    let (x, y) = stem.split_once('_')?;
+    Some((x.parse().ok()?, y.parse().ok()?))
+}
+
+fn check_tile(tile: &Tile) -> io::Result<()> {
+    let n = tile.height.cols as usize;
+    if n < 2 || tile.height.rows as usize != n || tile.height.values.len() != n * n {
+        return Err(invalid_data(format!("tile {} {} has a bad height grid", tile.x, tile.y)));
+    }
+    Ok(())
+}
+
+impl MapIndex {
+    /// Grid coordinates of every tile file, sorted.
+    pub fn coords(&self) -> &[(i32, i32)] {
+        &self.coords
+    }
+
+    pub fn has_tile(&self, x: i32, y: i32) -> bool {
+        self.coords.binary_search(&(x, y)).is_ok()
+    }
+
+    /// Reads and validates one tile file.
+    pub fn read_tile_at(&self, x: i32, y: i32) -> io::Result<Tile> {
+        let tile = read_tile(&self.dir.join("tiles").join(format!("{x}_{y}.json")))?;
+        check_tile(&tile)?;
+        Ok(tile)
+    }
+
+    /// The existing tiles within one step of `(x, y)`, as a `Map`. Its `tile_geometry` for a
+    /// center tile equals the whole map's: no road ribbon reaches past a neighbor's edge.
+    pub fn neighborhood(&self, x: i32, y: i32) -> io::Result<Map> {
+        let mut tiles = Vec::new();
+        for ty in y - 1..=y + 1 {
+            for tx in x - 1..=x + 1 {
+                if self.has_tile(tx, ty) {
+                    tiles.push(self.read_tile_at(tx, ty)?);
+                }
+            }
+        }
+        Ok(Map::new(self.meta.clone(), tiles))
+    }
+
+    /// Geometry of tile `(x, y)` as the whole map would give it, reading only its neighborhood.
+    pub fn tile_geometry(&self, x: i32, y: i32) -> io::Result<TileGeometry> {
+        let map = self.neighborhood(x, y)?;
+        let center = map
+            .tiles
+            .iter()
+            .find(|t| (t.x, t.y) == (x, y))
+            .ok_or_else(|| invalid_data(format!("no tile {x} {y} in map '{}'", self.meta.id)))?;
+        Ok(map.tile_geometry(center))
+    }
 }
 
 /// Terrain height at local `(x, y)`, on the same triangles that `tile_geometry` draws
@@ -145,7 +210,9 @@ pub fn road_width_m(highway: &str) -> f64 {
     }
 }
 
-/// Builds the terrain grid and the road ribbons of one tile.
+/// Builds the terrain grid and the road ribbons of one tile, with no neighbors (tests only;
+/// the game uses `Map::tile_geometry`, which sees the neighbors).
+#[cfg(test)]
 pub fn tile_geometry(tile: &Tile, tile_m: f64) -> TileGeometry {
     tile_geometry_with(tile, tile_m, &|x, y| sample_height(tile, tile_m, x, y))
 }
@@ -466,6 +533,17 @@ mod tests {
         }
     }
 
+    /// Reads every tile of a map eagerly (tests only).
+    fn load_map(root: &Path, id: &str) -> io::Result<Map> {
+        let index = open_map(root, id)?;
+        let tiles = index
+            .coords()
+            .iter()
+            .map(|&(x, y)| index.read_tile_at(x, y))
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(Map::new(index.meta.clone(), tiles))
+    }
+
     fn temp_cache_root(tag: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -734,6 +812,30 @@ mod tests {
         fs::create_dir_all(dir.join("tiles")).unwrap();
         fs::write(dir.join("meta.json"), serde_json::to_string(&meta(false)).unwrap()).unwrap();
         assert!(load_map(&root, "t").is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn neighborhood_geometry_matches_whole_map() {
+        let root = temp_cache_root("nbhd");
+        let dir = root.join("t");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("meta.json"), serde_json::to_string(&meta(true)).unwrap()).unwrap();
+        let road = |points: Vec<[f64; 2]>| Polyline {
+            highway: "residential".into(),
+            points,
+        };
+        // A road crosses the border between (0, 0) and (1, 0); the others are sloped.
+        write_tile(&root, "t", &tile(0, 0, grid(3, |u, _| (3.0 * u) as f32), vec![road(vec![[15.0, 10.0], [25.0, 10.0]])])).unwrap();
+        write_tile(&root, "t", &tile(1, 0, grid(3, |u, v| (20.0 + 4.0 * v + u) as f32), vec![road(vec![[22.0, 5.0], [33.0, 15.0]])])).unwrap();
+        write_tile(&root, "t", &tile(0, 1, grid(3, |_, v| (5.0 * v) as f32), Vec::new())).unwrap();
+
+        let whole = load_map(&root, "t").unwrap();
+        let index = open_map(&root, "t").unwrap();
+        for tile in &whole.tiles {
+            let from_index = index.tile_geometry(tile.x, tile.y).unwrap();
+            assert_eq!(from_index, whole.tile_geometry(tile), "tile {} {}", tile.x, tile.y);
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 

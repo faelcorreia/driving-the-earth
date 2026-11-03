@@ -1,7 +1,15 @@
-//! Godot node that loads a baked map from the cache, builds the terrain and roads of
-//! the neighborhood, and spawns the car on the road nearest to home (the map center),
-//! facing south.
+//! Godot node that streams a baked map around the car. The map is opened without reading
+//! its tiles; the car is spawned on the road nearest to home (the map center), facing south,
+//! on terrain loaded synchronously. Then the tiles within `view_radius_m` of the car are
+//! built in the background and instantiated on the main thread, a few per frame, and tiles
+//! that fall beyond the radius plus a margin are freed.
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
+use std::thread;
+use std::time::Instant;
 
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{
@@ -10,16 +18,26 @@ use godot::classes::{
 };
 use godot::prelude::*;
 use godot::tools::try_load;
+use tileformat::Tile;
 
-use crate::map::{load_map, MeshData};
-use crate::spawn::road_spawn;
+use crate::map::{open_map, MapIndex, MeshData, TileGeometry};
+use crate::spawn::{road_spawn, SpawnPose};
+use crate::streaming::{distance_to_tile, is_stale, tiles_in_range};
 
 /// Height of the car above the terrain when spawned, in meters.
 const SPAWN_LIFT_M: f32 = 1.0;
 const TERRAIN_COLOR: (f32, f32, f32) = (0.42, 0.55, 0.36);
 const ROAD_COLOR: (f32, f32, f32) = (0.22, 0.22, 0.24);
+/// Tiles instantiated (nodes, meshes and collision shapes) on the main thread per frame.
+const TILES_PER_FRAME: usize = 2;
+/// Geometry requests the loader thread may have outstanding.
+const MAX_IN_FLIGHT: usize = 8;
+/// A loaded tile is freed only beyond the view radius plus this, in meters.
+const HYSTERESIS_M: f64 = 150.0;
+/// Period of the timing line in the log, in seconds.
+const STATS_PERIOD_S: f64 = 5.0;
 
-/// Loads `<cache_root>/<map_id>` and builds the world under this node.
+/// Streams `<cache_root>/<map_id>` around the car.
 #[derive(GodotClass)]
 #[class(base = Node3D, init)]
 pub struct EarthWorld {
@@ -32,60 +50,279 @@ pub struct EarthWorld {
     #[init(val = GString::from("res://../cache"))]
     #[export]
     cache_root: GString,
+    /// Tiles within this distance of the car are loaded, in meters.
+    #[init(val = 1000.0)]
+    #[export]
+    view_radius_m: f32,
+
+    index: Option<Arc<MapIndex>>,
+    car: Option<Gd<Node3D>>,
+    terrain_mat: Option<Gd<StandardMaterial3D>>,
+    road_mat: Option<Gd<StandardMaterial3D>>,
+    /// Loaded tiles, each one a container node with the terrain and road bodies.
+    loaded: HashMap<(i32, i32), Gd<Node3D>>,
+    /// Geometry requested from the loader and not back yet.
+    requested: HashSet<(i32, i32)>,
+    /// Tiles whose geometry failed to load; not retried.
+    failed: HashSet<(i32, i32)>,
+    /// Geometry back from the loader, waiting for its turn to be instantiated.
+    done: VecDeque<((i32, i32), TileGeometry)>,
+    requests: Option<Sender<(i32, i32)>>,
+    results: Option<Receiver<((i32, i32), io::Result<TileGeometry>)>>,
+
+    /// Worst `process` call and worst tile instantiation since the last log line, seconds.
+    worst_frame: f64,
+    worst_build: f64,
+    stats_timer: f64,
 }
 
 #[godot_api]
 impl INode3D for EarthWorld {
     fn ready(&mut self) {
+        self.base_mut().set_process(true);
         let id = self.map_id.to_string();
         let cache_root = PathBuf::from(
             ProjectSettings::singleton()
                 .globalize_path(&self.cache_root)
                 .to_string(),
         );
-        let map = match load_map(&cache_root, &id) {
-            Ok(map) => map,
+        let index = match open_map(&cache_root, &id) {
+            Ok(index) => index,
             Err(e) => {
-                godot_error!("cannot load map '{id}' from {}: {e}", cache_root.display());
+                godot_error!("cannot open map '{id}' from {}: {e}", cache_root.display());
                 return;
             }
         };
-        godot_print!("map '{id}' loaded: {} tiles", map.tiles.len());
-
-        let terrain_mat = material(TERRAIN_COLOR);
-        let road_mat = material(ROAD_COLOR);
-        for tile in &map.tiles {
-            let geometry = map.tile_geometry(tile);
-            let body = solid_body(&geometry.terrain, &terrain_mat);
-            self.base_mut().add_child(&body);
-            if !geometry.roads.is_empty() {
-                // Roads are solid too, so the wheels rest on them instead of on the terrain below.
-                let roads = solid_body(&geometry.roads, &road_mat);
-                self.base_mut().add_child(&roads);
-            }
-        }
+        let tile_m = index.meta.tile_size_m;
+        godot_print!(
+            "map '{id}' opened: {} tiles, streamed within {} m",
+            index.coords().len(),
+            self.view_radius_m
+        );
+        self.terrain_mat = Some(material(TERRAIN_COLOR));
+        self.road_mat = Some(material(ROAD_COLOR));
 
         // Spawn on the road nearest to home (the local origin), facing south. Without any
         // road, fall back to home itself facing south.
-        let (x, y, yaw) = match road_spawn(&map.tiles) {
-            Some(pose) => (pose.x, pose.y, pose.yaw),
-            None => {
+        let (x, y, yaw) = match find_spawn(&index, self.view_radius_m as f64) {
+            Ok(Some(pose)) => (pose.x, pose.y, pose.yaw),
+            Ok(None) => {
                 godot_warn!("map '{id}' has no road to spawn on, spawning at home");
                 (0.0, 0.0, std::f32::consts::PI)
             }
+            Err(e) => {
+                godot_error!("cannot read map '{id}': {e}");
+                return;
+            }
         };
-        let Some(height) = map.height_at(x, y) else {
+        let spawn_tile = ((x / tile_m).floor() as i32, (y / tile_m).floor() as i32);
+        let near = match index.neighborhood(spawn_tile.0, spawn_tile.1) {
+            Ok(map) => map,
+            Err(e) => {
+                godot_error!("cannot read tiles at the spawn point of '{id}': {e}");
+                return;
+            }
+        };
+        let Some(height) = near.height_at(x, y) else {
             godot_error!("map '{id}' has no tile at the spawn point, car not spawned");
             return;
         };
+        // The car lands on the spawn tile and its neighbors, so those are built now.
+        for ty in spawn_tile.1 - 1..=spawn_tile.1 + 1 {
+            for tx in spawn_tile.0 - 1..=spawn_tile.0 + 1 {
+                self.load_now(&index, (tx, ty));
+            }
+        }
+
         let position = Vector3::new(x as f32, height + SPAWN_LIFT_M, -(y as f32));
         match spawn_car(position, yaw) {
-            Some(car) => self.base_mut().add_child(&car),
+            Some(car) => {
+                self.base_mut().add_child(&car);
+                self.car = Some(car);
+            }
             None => {
                 godot_error!("cannot instantiate res://tr4/tr4.tscn");
+                return;
+            }
+        }
+        self.start_loader(Arc::new(index));
+    }
+
+    fn process(&mut self, delta: f64) {
+        let frame_start = Instant::now();
+        let (Some(index), Some(p)) = (self.index.clone(), self.car_position()) else {
+            return;
+        };
+        let tile_m = index.meta.tile_size_m;
+        let radius = self.view_radius_m as f64;
+
+        // Free the tiles that left the view, with the hysteresis margin.
+        let stale: Vec<(i32, i32)> = self
+            .loaded
+            .keys()
+            .copied()
+            .filter(|&t| is_stale(t, tile_m, p, radius, HYSTERESIS_M))
+            .collect();
+        for t in stale {
+            if let Some(mut node) = self.loaded.remove(&t) {
+                node.queue_free();
+            }
+        }
+
+        self.collect_results();
+
+        // Instantiate the geometry that came back, within the per-frame budget.
+        let build_start = Instant::now();
+        let mut built = 0;
+        while built < TILES_PER_FRAME {
+            let Some((t, geometry)) = self.done.pop_front() else {
+                break;
+            };
+            if self.loaded.contains_key(&t) || is_stale(t, tile_m, p, radius, HYSTERESIS_M) {
+                continue;
+            }
+            self.add_tile(t, &geometry);
+            built += 1;
+        }
+        if built > 0 {
+            self.worst_build = self.worst_build.max(build_start.elapsed().as_secs_f64());
+        }
+
+        // Ask the loader for the tiles in view that are neither loaded nor on their way.
+        for t in tiles_in_range(index.coords(), tile_m, p, radius) {
+            if self.requested.len() >= MAX_IN_FLIGHT {
+                break;
+            }
+            if self.loaded.contains_key(&t)
+                || self.requested.contains(&t)
+                || self.failed.contains(&t)
+                || self.done.iter().any(|(d, _)| *d == t)
+            {
+                continue;
+            }
+            let Some(tx) = &self.requests else {
+                break;
+            };
+            if tx.send(t).is_ok() {
+                self.requested.insert(t);
+            }
+        }
+
+        self.worst_frame = self.worst_frame.max(frame_start.elapsed().as_secs_f64());
+        self.stats_timer += delta;
+        if self.stats_timer >= STATS_PERIOD_S {
+            godot_print!(
+                "stream: {} tiles loaded, {} requested, {} waiting; worst frame {:.2} ms, worst tile build {:.2} ms",
+                self.loaded.len(),
+                self.requested.len(),
+                self.done.len(),
+                self.worst_frame * 1000.0,
+                self.worst_build * 1000.0
+            );
+            self.stats_timer = 0.0;
+            self.worst_frame = 0.0;
+            self.worst_build = 0.0;
+        }
+    }
+}
+
+impl EarthWorld {
+    /// Starts the loader thread. It builds tile geometry for each request, in order, and
+    /// stops when this node (and with it the request sender) is freed.
+    fn start_loader(&mut self, index: Arc<MapIndex>) {
+        let (req_tx, req_rx) = mpsc::channel::<(i32, i32)>();
+        let (res_tx, res_rx) = mpsc::channel();
+        let worker_index = index.clone();
+        thread::spawn(move || {
+            for (x, y) in req_rx {
+                let result = worker_index.tile_geometry(x, y);
+                if res_tx.send(((x, y), result)).is_err() {
+                    break;
+                }
+            }
+        });
+        self.index = Some(index);
+        self.requests = Some(req_tx);
+        self.results = Some(res_rx);
+    }
+
+    fn collect_results(&mut self) {
+        let Some(rx) = &self.results else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok((t, Ok(geometry))) => {
+                    self.requested.remove(&t);
+                    self.done.push_back((t, geometry));
+                }
+                Ok((t, Err(e))) => {
+                    self.requested.remove(&t);
+                    self.failed.insert(t);
+                    godot_error!("cannot load tile {} {}: {e}", t.0, t.1);
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
     }
+
+    /// Builds tile `t` now, on the main thread (spawn area only).
+    fn load_now(&mut self, index: &MapIndex, t: (i32, i32)) {
+        if !index.has_tile(t.0, t.1) || self.loaded.contains_key(&t) {
+            return;
+        }
+        match index.tile_geometry(t.0, t.1) {
+            Ok(geometry) => self.add_tile(t, &geometry),
+            Err(e) => {
+                godot_error!("cannot load tile {} {}: {e}", t.0, t.1);
+            }
+        }
+    }
+
+    /// Creates the nodes of one tile: terrain body, and road body when there are roads.
+    fn add_tile(&mut self, t: (i32, i32), geometry: &TileGeometry) {
+        let (Some(terrain_mat), Some(road_mat)) = (self.terrain_mat.clone(), self.road_mat.clone()) else {
+            return;
+        };
+        let mut node = Node3D::new_alloc();
+        node.add_child(&solid_body(&geometry.terrain, &terrain_mat));
+        if !geometry.roads.is_empty() {
+            // Roads are solid too, so the wheels rest on them instead of on the terrain below.
+            node.add_child(&solid_body(&geometry.roads, &road_mat));
+        }
+        self.base_mut().add_child(&node);
+        self.loaded.insert(t, node);
+    }
+
+    /// The car in map coordinates `[x, y]` (x east, y north), if it exists.
+    fn car_position(&self) -> Option<[f64; 2]> {
+        let car = self.car.as_ref()?;
+        let local = self.base().to_local(car.get_global_position());
+        Some([local.x as f64, -local.z as f64])
+    }
+}
+
+/// The road nearest to home, searched among the tiles within `search_m` of it. Falls back
+/// to reading every tile when the nearest road is farther than that.
+fn find_spawn(index: &MapIndex, search_m: f64) -> io::Result<Option<SpawnPose>> {
+    let tile_m = index.meta.tile_size_m;
+    let near: Vec<Tile> = index
+        .coords()
+        .iter()
+        .filter(|&&t| distance_to_tile(t, tile_m, [0.0, 0.0]) <= search_m)
+        .map(|&(x, y)| index.read_tile_at(x, y))
+        .collect::<io::Result<_>>()?;
+    if let Some(pose) = road_spawn(&near) {
+        if pose.x.hypot(pose.y) <= search_m {
+            return Ok(Some(pose));
+        }
+    }
+    let all: Vec<Tile> = index
+        .coords()
+        .iter()
+        .map(|&(x, y)| index.read_tile_at(x, y))
+        .collect::<io::Result<_>>()?;
+    Ok(road_spawn(&all))
 }
 
 fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
