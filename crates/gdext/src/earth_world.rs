@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use godot::classes::{
     INode3D, MeshInstance3D, Node3D,
-    ProjectSettings, StandardMaterial3D,
+    ProjectSettings, ShaderMaterial, StandardMaterial3D,
 };
 use godot::prelude::*;
 
@@ -23,7 +23,7 @@ use crate::geometry::lamps::LampPost;
 use crate::geometry::{TileGeometry, GRASS_RGB};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::far_lights::{rss_mb, DistantLights};
-use crate::render::{material, solid_body, spawn_car};
+use crate::render::{building_material, material, solid_body, spawn_car};
 use tileformat::units::lamps::LAMP_REAL_REACH_M;
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::find_spawn;
@@ -88,6 +88,8 @@ pub struct EarthWorld {
     /// White albedo: meshes with per-vertex colors (buildings, terrain with ground cover) show
     /// their colors as they are.
     vertex_mat: Option<Gd<StandardMaterial3D>>,
+    /// Material of the buildings: vertex colors, windows by mask (None: `vertex_mat` is used).
+    building_mat: Option<Gd<ShaderMaterial>>,
     /// Loaded tiles, each one a container node with the terrain and road bodies.
     loaded: HashMap<(i32, i32), Gd<Node3D>>,
     /// Geometry requested from the loader and not back yet.
@@ -148,6 +150,10 @@ impl INode3D for EarthWorld {
         self.terrain_mat = Some(material(TERRAIN_COLOR));
         self.road_mat = Some(material(ROAD_COLOR));
         self.vertex_mat = Some(material((1.0, 1.0, 1.0)));
+        self.building_mat = building_material();
+        if self.building_mat.is_none() {
+            godot_warn!("building shader not loaded: buildings have no windows");
+        }
         self.lamp_mats = LampMaterials::new();
         if self.lamp_mats.is_none() {
             godot_warn!("lamp shaders not loaded: street lamps are not drawn");
@@ -423,7 +429,11 @@ impl EarthWorld {
         }
         if !geometry.buildings.is_empty() {
             // One mesh and one collision body per tile, for the buildings of that tile.
-            node.add_child(&solid_body(&geometry.buildings, &vertex_mat));
+            let body = match &self.building_mat {
+                Some(mat) => solid_body(&geometry.buildings, mat),
+                None => solid_body(&geometry.buildings, &vertex_mat),
+            };
+            node.add_child(&body);
         }
         if let Some(mats) = &self.lamp_mats {
             if !geometry.lamps.is_empty() {

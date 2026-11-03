@@ -103,6 +103,8 @@ fn quad_model() -> MeshData {
         vertices: vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]],
         normals: vec![[0.0, 0.0, 1.0]; 4],
         colors: Vec::new(),
+        uvs: Vec::new(),
+        uv2: Vec::new(),
         indices: vec![0, 1, 2, 0, 2, 3],
     }
 }

@@ -5,6 +5,8 @@
 //! at every vertex and at the centroid). Each wall reaches down to the terrain at its own two
 //! vertices, so on a slope the walls are a skirt: no gap is left on the low side, and the
 //! walls never go under the terrain. The height is `levels x FLOOR_HEIGHT_M`, measured from the flat base.
+//! For the window shader, a wall's UV is (perimeter in m, height above the base in m), continuous
+//! around the ring; a roof has `ROOF_UV`; UV2 x is the building seed (see `seed_of`).
 use tileformat::units::FLOOR_HEIGHT_M;
 use tileformat::{Polygon, Tile};
 
@@ -14,6 +16,8 @@ use super::mesh::{world, MeshData};
 pub const PALETTE: [[f32; 3]; 4] = [[0.72, 0.38, 0.24], [0.88, 0.89, 0.88], [0.68, 0.69, 0.69], [0.38, 0.39, 0.41]];
 /// No channel of a building color goes above this (ice white never blows out to white).
 pub const MAX_CHANNEL: f32 = 0.90;
+/// UV of every roof vertex: a negative x is the roof for the shader (walls have x >= 0).
+pub const ROOF_UV: [f32; 2] = [-1.0, -1.0];
 /// Roofs are this much darker than the walls.
 const ROOF_SHADE: f32 = 0.8;
 /// Walls go from this shade at the terrain to 1.0 at the top.
@@ -52,26 +56,33 @@ fn add_building(mesh: &mut MeshData, b: &Polygon, ground: &dyn Fn(f64, f64) -> f
 
     let wall = palette_color(b.color_idx, b.tint);
     let roof = scale(wall, ROOF_SHADE);
+    let seed = seed_of(centroid);
     // Counter-clockwise in (x, y) so that the outward normal of an edge is known.
     let sign = if signed_area(&ring) > 0.0 { 1.0 } else { -1.0 };
+    // Meters along the ring from its first vertex: a wall's top q and the next wall's top p share
+    // one value, so the perimeter has no jump at the corners.
+    let mut along = vec![0.0f32; n + 1];
+    for i in 0..n {
+        along[i + 1] = along[i] + edge_len(ring[i], ring[(i + 1) % n]) as f32;
+    }
 
     for i in 0..n {
         let (p, q) = (ring[i], ring[(i + 1) % n]);
-        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
-        let len = (dx * dx + dy * dy).sqrt();
+        let len = edge_len(p, q);
         if len == 0.0 {
             continue;
         }
         // Local (x, y) outward normal is (dy, -dx) for a counter-clockwise ring; Godot z is -y.
+        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
         let normal = [(sign * dy / len) as f32, 0.0, (sign * dx / len) as f32];
         let (gp, gq) = (ground_at[i], ground_at[(i + 1) % n]);
         let base = scale(wall, BASE_SHADE);
         let first = mesh.vertices.len() as u32;
-        // Top p, top q, bottom q, bottom p (bottom on the terrain under each vertex).
-        for (pt, h, color) in [(p, top_y, wall), (q, top_y, wall), (q, gq, base), (p, gp, base)] {
-            mesh.vertices.push(world(pt[0], pt[1], h));
-            mesh.normals.push(normal);
-            mesh.colors.push([color[0], color[1], color[2], 1.0]);
+        let (u0, u1) = (along[i], along[i + 1]);
+        // Top p, top q, bottom q, bottom p (bottom on the terrain under each vertex). UV: x is the
+        // perimeter in meters, y the height above the flat base in meters.
+        for (pt, h, u, color) in [(p, top_y, u0, wall), (q, top_y, u1, wall), (q, gq, u1, base), (p, gp, u0, base)] {
+            push_vertex(mesh, world(pt[0], pt[1], h), normal, color, [u, h - base_y], seed);
         }
         push_facing(mesh, first, first + 1, first + 2, normal);
         push_facing(mesh, first, first + 2, first + 3, normal);
@@ -80,9 +91,7 @@ fn add_building(mesh: &mut MeshData, b: &Polygon, ground: &dyn Fn(f64, f64) -> f
     let up = [0.0, 1.0, 0.0];
     let first = mesh.vertices.len() as u32;
     for pt in &ring {
-        mesh.vertices.push(world(pt[0], pt[1], top_y));
-        mesh.normals.push(up);
-        mesh.colors.push([roof[0], roof[1], roof[2], 1.0]);
+        push_vertex(mesh, world(pt[0], pt[1], top_y), up, roof, ROOF_UV, seed);
     }
     let ccw: Vec<[f64; 2]> = if sign > 0.0 { ring.clone() } else { ring.iter().rev().copied().collect() };
     for [a, b, c] in triangulate(&ccw) {
@@ -99,6 +108,29 @@ fn estimated_levels(centroid: [f64; 2]) -> u8 {
     let mut bytes = qx.to_le_bytes().to_vec();
     bytes.extend(qy.to_le_bytes());
     1 + (fnv1a(&bytes) % ESTIMATED_LEVELS_SPAN) as u8
+}
+
+/// Seed of a building in 0..1 (its own hash, not the one of `estimated_levels`), the same on every vertex.
+fn seed_of(centroid: [f64; 2]) -> f32 {
+    let qx = (centroid[0] * 2.0).round() as i64;
+    let qy = (centroid[1] * 2.0).round() as i64;
+    let mut bytes = qx.to_le_bytes().to_vec();
+    bytes.extend(qy.to_le_bytes());
+    bytes.extend(b"seed");
+    (fnv1a(&bytes) % 256) as f32 / 255.0
+}
+
+fn edge_len(p: [f64; 2], q: [f64; 2]) -> f64 {
+    ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt()
+}
+
+/// One wall or roof vertex: position, normal, color, UV (see `add_building`) and the building seed.
+fn push_vertex(mesh: &mut MeshData, pos: [f32; 3], normal: [f32; 3], color: [f32; 3], uv: [f32; 2], seed: f32) {
+    mesh.vertices.push(pos);
+    mesh.normals.push(normal);
+    mesh.colors.push([color[0], color[1], color[2], 1.0]);
+    mesh.uvs.push(uv);
+    mesh.uv2.push([seed, 0.0]);
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -271,5 +303,56 @@ mod tests {
         let m = one(building(rect(10.0, 10.0, 20.0, 20.0), 1, 3, 0));
         assert_eq!(m.colors.len(), m.vertices.len());
         assert!(m.colors.iter().all(|c| c[3] == 1.0));
+    }
+
+    #[test]
+    fn uv_height_is_levels_times_floor_height_above_the_base() {
+        for levels in [1u8, 2, 5] {
+            let m = one(building(rect(10.0, 10.0, 20.0, 20.0), levels, 1, 0));
+            let walls: Vec<[f32; 2]> = m.uvs.iter().zip(&m.normals).filter(|(_, n)| n[1] == 0.0).map(|(uv, _)| *uv).collect();
+            let top = walls.iter().map(|uv| uv[1]).fold(f32::NEG_INFINITY, f32::max);
+            assert!((top - levels as f32 * FLOOR_HEIGHT_M as f32).abs() < 1e-3, "levels {levels}: uv v top {top}");
+            // Bottoms sit on the terrain (never below the flat base).
+            assert!(walls.iter().all(|uv| uv[1] >= -1e-4), "a wall vertex below the base");
+        }
+    }
+
+    #[test]
+    fn perimeter_is_continuous_across_the_corners() {
+        // Square 10 m side: perimeter 40 m. Top corners of the four walls carry 0, 10, 20, 30 and 40.
+        let m = one(building(rect(10.0, 10.0, 20.0, 20.0), 1, 0, 0));
+        let mut us: Vec<f32> = m
+            .vertices
+            .iter()
+            .zip(&m.uvs)
+            .zip(&m.normals)
+            .filter(|((v, _), n)| n[1] == 0.0 && (v[1] - top_y_of(&m)).abs() < 1e-4)
+            .map(|((_, uv), _)| uv[0])
+            .collect();
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        us.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+        assert_eq!(us.len(), 5, "corner values {us:?}");
+        for (got, want) in us.iter().zip([0.0, 10.0, 20.0, 30.0, 40.0]) {
+            assert!((got - want).abs() < 1e-3, "corner values {us:?}");
+        }
+    }
+
+    fn top_y_of(m: &MeshData) -> f32 {
+        m.vertices.iter().map(|v| v[1]).fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    #[test]
+    fn roofs_carry_the_roof_uv_and_every_vertex_the_same_seed() {
+        let m = one(building(rect(10.0, 10.0, 20.0, 20.0), 2, 2, 5));
+        assert_eq!(m.uvs.len(), m.vertices.len());
+        assert_eq!(m.uv2.len(), m.vertices.len());
+        for ((uv, n), _) in m.uvs.iter().zip(&m.normals).zip(&m.vertices) {
+            if n[1] != 0.0 {
+                assert_eq!(*uv, ROOF_UV);
+            }
+        }
+        let seed = m.uv2[0][0];
+        assert!((0.0..=1.0).contains(&seed));
+        assert!(m.uv2.iter().all(|c| c[0] == seed));
     }
 }

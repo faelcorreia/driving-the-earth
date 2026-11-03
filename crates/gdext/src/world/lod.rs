@@ -102,7 +102,7 @@ pub fn build_ring(
         })
         .collect();
 
-    let mut mesh = MeshData { vertices: Vec::new(), normals: Vec::new(), colors: Vec::new(), indices: Vec::new() };
+    let mut mesh = MeshData { vertices: Vec::new(), normals: Vec::new(), colors: Vec::new(), uvs: Vec::new(), uv2: Vec::new(), indices: Vec::new() };
     for k in 0..m * m {
         let (i, j) = (k % m, k / m);
         let y = if h[k].is_nan() { 0.0 } else { h[k] };

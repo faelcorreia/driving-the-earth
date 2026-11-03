@@ -9,6 +9,12 @@ pub struct MeshData {
     /// RGBA per vertex, sRGB-like values in 0..1. Empty means the mesh has no color channel and
     /// the material's own albedo is used as before.
     pub colors: Vec<[f32; 4]>,
+    /// UV per vertex. Empty means the mesh has no UV channel (terrain and roads). Buildings use it
+    /// for the perimeter and the height above the base, both in meters (see `building.rs`).
+    pub uvs: Vec<[f32; 2]>,
+    /// Second UV per vertex. Empty means no UV2 channel. Buildings use `x` for the seed of the
+    /// building, in 0..1.
+    pub uv2: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
 }
 
