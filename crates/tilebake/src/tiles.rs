@@ -2,12 +2,14 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tileformat::{MapMeta, Polygon, Polyline, Tile};
 
 use crate::clip::{clip_polygon, clip_polyline, Rect};
-use crate::dem::{download_dem, read_smoothed_dem, tile_heights, MapGrid, Raster};
+use crate::dem::{download_dem, read_smoothed_dem, tile_heights_any, MapGrid, Raster};
+use crate::osm;
 use crate::region::{apply_regions, Region};
 
 fn invalid_data<E: std::fmt::Display>(e: E) -> io::Error {
@@ -21,6 +23,9 @@ pub struct BakeSummary {
     /// Road pieces written over all tiles (a way crossing a border gives one piece per tile).
     pub road_pieces: usize,
     pub building_pieces: usize,
+    /// Size of `cache/<id>/tiles/` after the bake, in bytes.
+    pub tiles_bytes: u64,
+    pub elapsed: Duration,
 }
 
 /// Tile `(x, y)` rectangle on the local plane.
@@ -79,6 +84,37 @@ pub fn covering_bbox(meta: &MapMeta) -> (f64, f64, f64, f64) {
     (south, west, north, east)
 }
 
+/// Adds one way (Overpass element with `out body geom`) to `roads` or `buildings`, in the local plane.
+pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: &mut Vec<Polygon>) {
+    let Some(geom) = e["geometry"].as_array() else {
+        return;
+    };
+    let points: Vec<[f64; 2]> = geom
+        .iter()
+        .filter_map(|p| {
+            let (x, y) = grid.local(p["lat"].as_f64()?, p["lon"].as_f64()?);
+            Some([x, y])
+        })
+        .collect();
+    if let Some(highway) = e["tags"]["highway"].as_str() {
+        if points.len() >= 2 {
+            roads.push(Polyline {
+                highway: highway.to_string(),
+                points: points.clone(),
+            });
+        }
+    }
+    if e["tags"]["building"].is_string() {
+        let mut ring = points;
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        if ring.len() >= 3 {
+            buildings.push(Polygon { points: ring });
+        }
+    }
+}
+
 /// Roads and buildings from a raw Overpass response (`out body geom`), in the local plane.
 pub fn parse_ways(overpass_json: &str, grid: &MapGrid) -> io::Result<(Vec<Polyline>, Vec<Polygon>)> {
     let v: Value = serde_json::from_str(overpass_json).map_err(invalid_data)?;
@@ -88,33 +124,7 @@ pub fn parse_ways(overpass_json: &str, grid: &MapGrid) -> io::Result<(Vec<Polyli
     let mut roads = Vec::new();
     let mut buildings = Vec::new();
     for e in elements {
-        let Some(geom) = e["geometry"].as_array() else {
-            continue;
-        };
-        let points: Vec<[f64; 2]> = geom
-            .iter()
-            .filter_map(|p| {
-                let (x, y) = grid.local(p["lat"].as_f64()?, p["lon"].as_f64()?);
-                Some([x, y])
-            })
-            .collect();
-        if let Some(highway) = e["tags"]["highway"].as_str() {
-            if points.len() >= 2 {
-                roads.push(Polyline {
-                    highway: highway.to_string(),
-                    points: points.clone(),
-                });
-            }
-        }
-        if e["tags"]["building"].is_string() {
-            let mut ring = points;
-            if ring.len() > 1 && ring.first() == ring.last() {
-                ring.pop();
-            }
-            if ring.len() >= 3 {
-                buildings.push(Polygon { points: ring });
-            }
-        }
+        add_way(e, grid, &mut roads, &mut buildings);
     }
     Ok((roads, buildings))
 }
@@ -122,7 +132,7 @@ pub fn parse_ways(overpass_json: &str, grid: &MapGrid) -> io::Result<(Vec<Polyli
 /// Builds tile `(x, y)`: DEM grid plus the parts of the roads and buildings inside it.
 /// Returns the tile and the number of road and building pieces.
 pub fn build_tile(
-    raster: &Raster,
+    rasters: &[Raster],
     grid: &MapGrid,
     roads: &[Polyline],
     buildings: &[Polygon],
@@ -131,7 +141,7 @@ pub fn build_tile(
     y: i32,
 ) -> io::Result<(Tile, usize, usize)> {
     let rect = tile_rect(x, y, grid.tile_m);
-    let mut height = tile_heights(raster, grid, x, y)?;
+    let mut height = tile_heights_any(rasters, grid, x, y)?;
     apply_regions(&mut height, grid, regions, rect.x0, rect.y0);
     let mut tile_roads = Vec::new();
     for road in roads {
@@ -165,29 +175,86 @@ pub fn load_regions(cache_root: &Path) -> io::Result<Vec<Region>> {
     crate::region::load_indexed(&crate::region::regions_dir(cache_root))
 }
 
-/// Bakes all the tiles covering the radius from the raw data in `cache_root/<id>/raw/`,
-/// writes them to `cache_root/<id>/tiles/`, and then sets `meta.complete = true`.
-/// Needs `meta.json` and `raw/overpass.json`; downloads the DEM tile only if it is missing.
+/// Index from tile `(x, y)` to the positions of the items whose bounding box touches that tile.
+/// `points_of` gives the vertices of an item (a road or the ring of a building).
+pub fn index_by_tile<T>(
+    items: &[T],
+    points_of: impl Fn(&T) -> &[[f64; 2]],
+    tile_m: f64,
+) -> std::collections::HashMap<(i32, i32), Vec<usize>> {
+    let mut index: std::collections::HashMap<(i32, i32), Vec<usize>> = std::collections::HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        let pts = points_of(item);
+        if pts.is_empty() {
+            continue;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for p in pts {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+            x1 = x1.max(p[0]);
+            y1 = y1.max(p[1]);
+        }
+        // One tile of margin on each side: an item that only touches a tile border still
+        // clips to a (degenerate) piece there, as in a full scan, so that tile must see it.
+        let (tx0, ty0) = ((x0 / tile_m).floor() as i32 - 1, (y0 / tile_m).floor() as i32 - 1);
+        let (tx1, ty1) = ((x1 / tile_m).floor() as i32 + 1, (y1 / tile_m).floor() as i32 + 1);
+        for tx in tx0..=tx1 {
+            for ty in ty0..=ty1 {
+                index.entry((tx, ty)).or_default().push(i);
+            }
+        }
+    }
+    index
+}
+
+/// Bakes all the tiles covering the radius from the raw data in `cache_root/<id>/raw/osm/`
+/// (blocks, deduplicated by way id), writes them to `cache_root/<id>/tiles/`, and then sets
+/// `meta.complete = true`. Needs `meta.json` and the blocks; downloads the DEM tile only if it is missing.
 pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
+    let started = Instant::now();
     let dir = cache_root.join(id);
     let meta_path = dir.join("meta.json");
     let mut meta: MapMeta = serde_json::from_str(&fs::read_to_string(&meta_path)?).map_err(invalid_data)?;
     let grid = MapGrid::from_meta(&meta);
 
-    let overpass = fs::read_to_string(dir.join("raw").join("overpass.json"))?;
-    let (roads, buildings) = parse_ways(&overpass, &grid)?;
+    let mut roads = Vec::new();
+    let mut buildings = Vec::new();
+    osm::visit_ways(&dir.join("raw").join("osm"), &meta, |e| {
+        add_way(e, &grid, &mut roads, &mut buildings)
+    })?;
+    let road_index = index_by_tile(&roads, |r| &r.points, meta.tile_size_m);
+    let building_index = index_by_tile(&buildings, |b| &b.points, meta.tile_size_m);
 
-    let (tif, _) = download_dem(cache_root, id, meta.center_lat, meta.center_lon)?;
-    let raster = read_smoothed_dem(&tif)?;
+    // One Copernicus tile per 1 degree cell that the baked area touches; missing ones are downloaded.
+    let (south, west, north, east) = covering_bbox(&meta);
+    let mut rasters = Vec::new();
+    for la in south.floor() as i32..=north.floor() as i32 {
+        for lo in west.floor() as i32..=east.floor() as i32 {
+            let (tif, _) = download_dem(cache_root, id, la as f64 + 0.5, lo as f64 + 0.5)?;
+            rasters.push(read_smoothed_dem(&tif)?);
+        }
+    }
     let regions = load_regions(cache_root)?;
 
     let mut summary = BakeSummary {
         tiles: 0,
         road_pieces: 0,
         building_pieces: 0,
+        tiles_bytes: 0,
+        elapsed: Duration::ZERO,
     };
     for (x, y) in covering_tiles(meta.radius_m, meta.tile_size_m) {
-        let (tile, r, b) = build_tile(&raster, &grid, &roads, &buildings, &regions, x, y)?;
+        // Only the ways whose bounding box touches the tile: the others clip to nothing.
+        let tile_roads: Vec<Polyline> = road_index
+            .get(&(x, y))
+            .map(|ids| ids.iter().map(|&i| roads[i].clone()).collect())
+            .unwrap_or_default();
+        let tile_buildings: Vec<Polygon> = building_index
+            .get(&(x, y))
+            .map(|ids| ids.iter().map(|&i| buildings[i].clone()).collect())
+            .unwrap_or_default();
+        let (tile, r, b) = build_tile(&rasters, &grid, &tile_roads, &tile_buildings, &regions, x, y)?;
         tileformat::write_tile(cache_root, id, &tile)?;
         summary.tiles += 1;
         summary.road_pieces += r;
@@ -196,6 +263,8 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
 
     meta.complete = true;
     fs::write(&meta_path, serde_json::to_string_pretty(&meta).map_err(invalid_data)?)?;
+    summary.tiles_bytes = crate::dir_bytes(&dir.join("tiles"))?;
+    summary.elapsed = started.elapsed();
     Ok(summary)
 }
 
@@ -295,6 +364,36 @@ mod tests {
     }
 
     #[test]
+    fn index_gives_the_same_tiles_as_a_full_scan() {
+        let grid = MapGrid {
+            lat0: -19.9,
+            lon0: -43.9,
+            tile_m: 250.0,
+            cell_m: CELL_M,
+        };
+        let raster = flat_raster(&grid);
+        let (roads, buildings) = parse_ways(OSM, &grid).unwrap();
+        let road_index = index_by_tile(&roads, |r| &r.points, 250.0);
+        let building_index = index_by_tile(&buildings, |b| &b.points, 250.0);
+        for (x, y) in covering_tiles(1000.0, 250.0) {
+            let sub_roads: Vec<Polyline> = road_index
+                .get(&(x, y))
+                .map(|ids| ids.iter().map(|&i| roads[i].clone()).collect())
+                .unwrap_or_default();
+            let sub_buildings: Vec<Polygon> = building_index
+                .get(&(x, y))
+                .map(|ids| ids.iter().map(|&i| buildings[i].clone()).collect())
+                .unwrap_or_default();
+            let (full, _, _) = build_tile(std::slice::from_ref(&raster), &grid, &roads, &buildings, &[], x, y).unwrap();
+            let (part, _, _) = build_tile(std::slice::from_ref(&raster), &grid, &sub_roads, &sub_buildings, &[], x, y).unwrap();
+            let road_pts = |t: &Tile| t.roads.iter().map(|r| (r.highway.clone(), r.points.clone())).collect::<Vec<_>>();
+            let bld_pts = |t: &Tile| t.buildings.iter().map(|b| b.points.clone()).collect::<Vec<_>>();
+            assert_eq!(road_pts(&full), road_pts(&part), "roads of tile ({x},{y})");
+            assert_eq!(bld_pts(&full), bld_pts(&part), "buildings of tile ({x},{y})");
+        }
+    }
+
+    #[test]
     fn build_tile_clips_geometry_and_samples_dem() {
         let grid = MapGrid {
             lat0: -19.9,
@@ -306,7 +405,7 @@ mod tests {
         let (roads, buildings) = parse_ways(OSM, &grid).unwrap();
         // Tile (0, 0): the road (x in [0, ~1046]) is cut to [0, 250] in x; the building
         // (x in [0, ~105], y in [0, ~56]) lies inside the tile and is kept whole.
-        let (tile, nr, nb) = build_tile(&raster, &grid, &roads, &buildings, &[], 0, 0).unwrap();
+        let (tile, nr, nb) = build_tile(std::slice::from_ref(&raster), &grid, &roads, &buildings, &[], 0, 0).unwrap();
         assert_eq!((tile.x, tile.y), (0, 0));
         assert_eq!((tile.height.cols, tile.height.rows), (26, 26));
         assert!(tile.height.values.iter().all(|v| (*v - 100.0).abs() < 1e-3));
@@ -320,7 +419,7 @@ mod tests {
             assert!(p[1] >= -1e-9 && p[1] <= 250.0 + 1e-9);
         }
         // Tile (5, 0) starts at x = 1250 m, east of the road end (~1046 m): nothing there.
-        let (empty, nr, nb) = build_tile(&raster, &grid, &roads, &buildings, &[], 5, 0).unwrap();
+        let (empty, nr, nb) = build_tile(std::slice::from_ref(&raster), &grid, &roads, &buildings, &[], 5, 0).unwrap();
         assert!(empty.roads.is_empty() && empty.buildings.is_empty());
         assert_eq!((nr, nb), (0, 0));
     }

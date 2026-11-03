@@ -3,11 +3,12 @@ use serde_json::Value;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tileformat::MapMeta;
 
 pub mod clip;
 pub mod dem;
+pub mod osm;
 pub mod region;
 pub mod shp;
 pub mod tiles;
@@ -16,9 +17,11 @@ pub mod utm;
 const USER_AGENT: &str = "driving-the-earth/0.1 (tilebake; projeto pessoal)";
 const NOMINATIM_URL: &str = "https://nominatim.openstreetmap.org/search";
 const OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
+/// Environment variable with the collection radius, in meters (read when `meta.json` is created).
+const RADIUS_ENV: &str = "TILEBAKE_RADIUS_M";
 
-/// Collection radius around the home, in meters.
-pub const DEFAULT_RADIUS_M: f64 = 1000.0;
+/// Collection radius around the home, in meters, when `TILEBAKE_RADIUS_M` is not set.
+pub const DEFAULT_RADIUS_M: f64 = 10000.0;
 /// Side of a grid tile, in meters.
 pub const DEFAULT_TILE_M: f64 = 250.0;
 
@@ -26,14 +29,20 @@ pub const DEFAULT_TILE_M: f64 = 250.0;
 #[derive(Debug)]
 pub struct Summary {
     pub meta: MapMeta,
-    /// Ways with a `highway` tag.
+    /// Ways with a `highway` tag (all blocks, each way counted once).
     pub roads: usize,
-    /// Ways with a `building` tag.
+    /// Ways with a `building` tag (all blocks, each way counted once).
     pub buildings: usize,
     /// Geocoding came from an existing `meta.json`.
     pub geocoding_cached: bool,
-    /// Raw Overpass data came from an existing `raw/overpass.json`.
+    /// No block was downloaded in this run: all of them were already on disk.
     pub osm_cached: bool,
+    /// Blocks that cover the baked tiles.
+    pub blocks: usize,
+    /// Blocks downloaded in this run.
+    pub blocks_downloaded: usize,
+    /// Size of `raw/osm/` after the run, in bytes.
+    pub osm_bytes: u64,
 }
 
 fn other_err<E: std::fmt::Display>(e: E) -> io::Error {
@@ -67,32 +76,70 @@ fn geocode(address: &str) -> io::Result<(f64, f64, String)> {
     Ok((lat, lon, text))
 }
 
-/// Counts (roads, buildings) in a raw Overpass response.
-fn count_ways(overpass_json: &str) -> io::Result<(usize, usize)> {
-    let v: Value = serde_json::from_str(overpass_json).map_err(other_err)?;
-    let elements = v["elements"]
-        .as_array()
-        .ok_or_else(|| other_err("Overpass response has no 'elements'"))?;
-    let roads = elements.iter().filter(|e| e["tags"]["highway"].is_string()).count();
-    let buildings = elements.iter().filter(|e| e["tags"]["building"].is_string()).count();
-    Ok((roads, buildings))
+/// Radius from `TILEBAKE_RADIUS_M`, if it is set.
+fn radius_from_env() -> io::Result<Option<f64>> {
+    match std::env::var(RADIUS_ENV) {
+        Ok(text) => {
+            let r: f64 = text
+                .trim()
+                .parse()
+                .map_err(|_| other_err(format!("{RADIUS_ENV} is not a number: {text}")))?;
+            if r > 0.0 && r.is_finite() {
+                Ok(Some(r))
+            } else {
+                Err(other_err(format!("{RADIUS_ENV} must be a positive number of meters")))
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(other_err(format!("{RADIUS_ENV}: {e}"))),
+    }
 }
 
-/// Downloads the OSM data around the address and writes the raw data to `cache_root/<id>/raw/`.
+/// Total size in bytes of the files under `path` (0 if it does not exist).
+pub fn dir_bytes(path: &Path) -> io::Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        total += if meta.is_dir() {
+            dir_bytes(&entry.path())?
+        } else {
+            meta.len()
+        };
+    }
+    Ok(total)
+}
+
+/// Downloads the OSM data around the address and writes it to `cache_root/<id>/raw/osm/`,
+/// one file per block of `osm::BLOCK_M` meters (see `osm`).
 ///
-/// Reuses the cache: if `meta.json` exists, it does not geocode again; if
-/// `raw/overpass.json` exists, it does not query Overpass again.
+/// Reuses the cache: if `meta.json` exists, it does not geocode again and keeps its radius
+/// (a different `TILEBAKE_RADIUS_M` is an error); blocks already on disk are not queried again,
+/// so an interrupted run continues where it stopped.
 pub fn download_osm(cache_root: &Path, id: &str, name: &str, address: &str) -> io::Result<Summary> {
     let dir = cache_root.join(id);
     let raw = dir.join("raw");
     fs::create_dir_all(&raw)?;
     let meta_path = dir.join("meta.json");
     let nominatim_path = raw.join("nominatim.json");
-    let overpass_path = raw.join("overpass.json");
+    let env_radius = radius_from_env()?;
 
     let (meta, geocoding_cached) = if meta_path.exists() {
         let file = fs::File::open(&meta_path)?;
         let meta: MapMeta = serde_json::from_reader(io::BufReader::new(file)).map_err(other_err)?;
+        if let Some(r) = env_radius {
+            if (r - meta.radius_m).abs() > 1e-9 {
+                return Err(other_err(format!(
+                    "{RADIUS_ENV}={r} differs from the radius in {} ({} m); the cache keeps the radius \
+                     it was created with: use another id or remove meta.json",
+                    meta_path.display(),
+                    meta.radius_m
+                )));
+            }
+        }
         (meta, true)
     } else {
         let (lat, lon, raw_body) = geocode(address)?;
@@ -106,7 +153,7 @@ pub fn download_osm(cache_root: &Path, id: &str, name: &str, address: &str) -> i
             name: name.to_string(),
             center_lat: lat,
             center_lon: lon,
-            radius_m: DEFAULT_RADIUS_M,
+            radius_m: env_radius.unwrap_or(DEFAULT_RADIUS_M),
             tile_size_m: DEFAULT_TILE_M,
             created_unix,
             complete: false,
@@ -115,35 +162,35 @@ pub fn download_osm(cache_root: &Path, id: &str, name: &str, address: &str) -> i
         (meta, false)
     };
 
-    let (osm_json, osm_cached) = if overpass_path.exists() {
-        (fs::read_to_string(&overpass_path)?, true)
-    } else {
-        // Bounding box of the baked tiles, not the circle: ways cut at the circle
-        // edge would end inside the baked area.
-        let (south, west, north, east) = tiles::covering_bbox(&meta);
-        let query = format!(
-            "[out:json][timeout:90];(way[\"highway\"]({s},{w},{n},{e});way[\"building\"]({s},{w},{n},{e}););out body geom;",
-            s = south,
-            w = west,
-            n = north,
-            e = east,
-        );
-        let body = ureq::post(OVERPASS_URL)
-            .set("User-Agent", USER_AGENT)
-            .send_form(&[("data", query.as_str())])
-            .map_err(other_err)?
-            .into_string()?;
-        count_ways(&body)?; // validate before writing
-        fs::write(&overpass_path, &body)?;
-        (body, false)
+    let osm_dir = raw.join("osm");
+    let sleep = |d: Duration| std::thread::sleep(d);
+    let client = osm::UreqOverpass;
+    let dl = osm::Downloader {
+        client: &client,
+        sleep: &sleep,
+        min_gap: osm::MIN_GAP,
+        max_attempts: osm::MAX_ATTEMPTS,
+        backoff_base: osm::BACKOFF_BASE,
     };
+    let (blocks, blocks_downloaded) = osm::download_missing_blocks(&osm_dir, &meta, &dl)?;
 
-    let (roads, buildings) = count_ways(&osm_json)?;
+    let (mut roads, mut buildings) = (0, 0);
+    osm::visit_ways(&osm_dir, &meta, |e| {
+        if e["tags"]["highway"].is_string() {
+            roads += 1;
+        }
+        if e["tags"]["building"].is_string() {
+            buildings += 1;
+        }
+    })?;
     Ok(Summary {
         meta,
         roads,
         buildings,
         geocoding_cached,
-        osm_cached,
+        osm_cached: blocks_downloaded == 0,
+        blocks,
+        blocks_downloaded,
+        osm_bytes: dir_bytes(&osm_dir)?,
     })
 }

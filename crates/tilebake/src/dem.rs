@@ -241,8 +241,18 @@ pub fn height_at(r: &Raster, lat: f64, lon: f64) -> Option<f32> {
     }
 }
 
+/// Height at `(lat, lon)` from the first raster that has data there.
+pub fn height_at_any(rasters: &[Raster], lat: f64, lon: f64) -> Option<f32> {
+    rasters.iter().find_map(|r| height_at(r, lat, lon))
+}
+
 /// Samples the height grid of tile `(x, y)` (see the module doc).
 pub fn tile_heights(r: &Raster, grid: &MapGrid, x: i32, y: i32) -> io::Result<HeightGrid> {
+    tile_heights_any(std::slice::from_ref(r), grid, x, y)
+}
+
+/// Like `tile_heights`, with several rasters (the 1-degree DEM tiles that cover the map).
+pub fn tile_heights_any(rasters: &[Raster], grid: &MapGrid, x: i32, y: i32) -> io::Result<HeightGrid> {
     let n = (grid.tile_m / grid.cell_m).round() as u32;
     let cols = n + 1;
     let x0 = x as f64 * grid.tile_m;
@@ -253,7 +263,7 @@ pub fn tile_heights(r: &Raster, grid: &MapGrid, x: i32, y: i32) -> io::Result<He
             let x_m = x0 + j as f64 * grid.cell_m;
             let y_m = y0 + i as f64 * grid.cell_m;
             let (lat, lon) = grid.latlon(x_m, y_m);
-            let h = height_at(r, lat, lon).ok_or_else(|| {
+            let h = height_at_any(rasters, lat, lon).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("no terrain data at tile ({x},{y}) point ({x_m:.1},{y_m:.1})"),

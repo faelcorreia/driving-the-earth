@@ -40,7 +40,12 @@ fn main() {
                 r.meta.id, r.meta.radius_m, r.meta.center_lat, r.meta.center_lon
             );
             println!("geocoding: {}", if r.geocoding_cached { "cache" } else { "Nominatim" });
-            println!("osm: {}", if r.osm_cached { "cache" } else { "Overpass" });
+            println!(
+                "osm: {} blocks, {} downloaded, {:.1} MB on disk",
+                r.blocks,
+                r.blocks_downloaded,
+                r.osm_bytes as f64 / 1e6
+            );
             println!("roads: {}", r.roads);
             println!("buildings: {}", r.buildings);
         }
@@ -51,7 +56,8 @@ fn main() {
     }
     match tilebake::tiles::bake_tiles(&cache, "casa") {
         Ok(t) => {
-            println!("tiles: {} written", t.tiles);
+            println!("tiles: {} written in {:.1} s", t.tiles, t.elapsed.as_secs_f64());
+            println!("tiles on disk: {:.1} MB", t.tiles_bytes as f64 / 1e6);
             println!("road pieces: {}", t.road_pieces);
             println!("building pieces: {}", t.building_pieces);
             println!("meta.complete: true");
