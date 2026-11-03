@@ -132,7 +132,8 @@ fn road_with_profile_follows_its_heights() {
     for x in [70.0, 125.0, 180.0] {
         let strip = ribbon_height(&g.roads, x, 125.0).expect("road covers the point");
         let want = (x - 60.0) / 130.0 * 10.0 + 0.1;
-        assert!((strip - want).abs() < 0.01, "x={x}: {strip} != {want}");
+        // The ribbon rises slightly above the profile on steep stretches (`ROAD_STEP_LIFT`).
+        assert!((strip - want).abs() < 0.03, "x={x}: {strip} != {want}");
     }
 }
 
@@ -386,8 +387,8 @@ fn reference_tile_geometry_is_unchanged() {
     assert_eq!(mesh_hash(&g.roads), REFERENCE_ROADS_HASH);
 }
 
-const REFERENCE_TERRAIN_HASH: u64 = 0xa026d6b33f0fd410;
-const REFERENCE_ROADS_HASH: u64 = 0x64345fe1bdeca327;
+const REFERENCE_TERRAIN_HASH: u64 = 0x96963f0a2b17c47f;
+const REFERENCE_ROADS_HASH: u64 = 0x768baad5f156b576;
 
 /// A tile with no roads has the 10 m grid, bilinear, at every fine vertex (2,5 m).
 #[test]

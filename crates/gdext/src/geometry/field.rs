@@ -35,6 +35,10 @@ struct Seg {
     nrm: [f64; 2],
     /// Index of the road of this segment. The segments of one road are contiguous in `Field::segs`.
     road: u32,
+    /// The segment start / end is a node shared with a neighbor segment of the same road (not an
+    /// end of the road): beyond it, the lateral coordinate is the radial distance, so both
+    /// segments agree on the bisector of the bend.
+    joint: [bool; 2],
     half: f64,
     /// Half-width of the flat zone (`flat_zone_m`); the blend starts beyond it.
     flat: f64,
@@ -48,13 +52,20 @@ impl Seg {
     /// distance from `(x, y)` to this segment's axis. `None` outside the corridor and its blend band.
     fn value(&self, x: f64, y: f64, g: f32) -> Option<(f32, f64)> {
         let p = [x - self.a[0], y - self.a[1]];
-        let t = ((p[0] * self.dir[0] + p[1] * self.dir[1]) / self.len).clamp(0.0, 1.0);
+        let t_raw = (p[0] * self.dir[0] + p[1] * self.dir[1]) / self.len;
+        let t = t_raw.clamp(0.0, 1.0);
         let (qx, qy) = (p[0] - self.dir[0] * self.len * t, p[1] - self.dir[1] * self.len * t);
         let dist = qx.hypot(qy);
         if dist > self.flat + ROAD_BLEND_M {
             return None;
         }
-        let s = (qx * self.nrm[0] + qy * self.nrm[1]).clamp(-self.half, self.half);
+        let side = qx * self.nrm[0] + qy * self.nrm[1];
+        // Beyond a joint node the nearest point is the node itself and `side` depends on this
+        // segment's normal, so the two segments would disagree on the bisector (a jump of the
+        // cross slope). The radial distance with the side of this segment is the same for both.
+        let beyond_joint = (t_raw < 0.0 && self.joint[0]) || (t_raw > 1.0 && self.joint[1]);
+        let lateral = if beyond_joint { dist.copysign(side) } else { side };
+        let s = lateral.clamp(-self.half, self.half);
         let t = t as f32;
         let at = |v: [f32; 2]| v[0] + (v[1] - v[0]) * t;
         let (zc, zl, zr) = (at(self.z), at(self.zl), at(self.zr));
@@ -133,6 +144,7 @@ impl Field {
                 len,
                 nrm: unit_normal(a, b),
                 road: road_id,
+                joint: [k > 0, k + 2 < n],
                 half,
                 flat,
                 z,
