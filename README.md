@@ -1,6 +1,6 @@
 # Driving the Earth
 
-Drive a realistic small car (a Fiat Uno-like) through real places, built from open map data.
+Drive a realistic small car (a light hatchback) through real places, built from open map data.
 Rust (Godot 4 GDExtension) runtime plus an offline `tilebake` pipeline that turns OpenStreetMap
 and elevation data into 250 m tiles.
 

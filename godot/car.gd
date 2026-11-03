@@ -4,7 +4,7 @@ extends VehicleBody3D
 ## Frente do carro é -Z; rodas dianteiras esterçam, traseiras tracionam.
 ## Com engine_force positivo o VehicleBody3D anda para +Z, então o sinal é invertido.
 ##
-## Performance target: Fiat Uno Mille, 0-100 km/h in ~14.5 s, top speed ~120 km/h, on flat ground.
+## Performance target: light 1.0 L hatchback, 0-100 km/h in ~14.5 s, top speed ~120 km/h, on flat ground.
 ## Traction falls linearly from `max_traction_force_n` (standstill) to zero at `top_speed_kmh * 1.1`;
 ## aero drag and rolling resistance hold the final speed near `top_speed_kmh`.
 ## VehicleBody3D also resists speed linearly (~`wheel_damping_n_per_ms`, measured), so the engine
