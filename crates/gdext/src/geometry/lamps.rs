@@ -72,13 +72,39 @@ pub fn head_model() -> MeshData {
     m
 }
 
-/// Flat square of light on the ground under the arm (+Y up), in model space: side `2 * LAMP_GLOW_RADIUS_M`.
-/// The shader fades it radially from its vertices.
+/// Light pool on the ground under the arm (+Y up), in model space: a fan, full alpha (vertex
+/// color `a = 1`) at the center, half at 0.4 of the radius and zero at the rim, so the shader
+/// only multiplies by the vertex alpha and the per-instance light state.
 pub fn glow_model() -> MeshData {
+    const SEG: usize = 12;
     let (c, r) = (LAMP_ARM_M, LAMP_GLOW_RADIUS_M);
     let y = LAMP_GLOW_LIFT_M;
+    let ring = |rad: f64, a: f32| -> Vec<([f32; 3], [f32; 4])> {
+        (0..SEG)
+            .map(|k| {
+                let t = k as f64 * std::f64::consts::TAU / SEG as f64;
+                ([(c + rad * t.cos()) as f32, y as f32, (rad * t.sin()) as f32], [1.0, 1.0, 1.0, a])
+            })
+            .collect()
+    };
+    let inner = ring(r * 0.4, 0.5);
+    let rim = ring(r, 0.0);
     let mut m = MeshData::default();
-    push_quad(&mut m, [[c - r, y, -r], [c + r, y, -r], [c + r, y, r], [c - r, y, r]]);
+    let mut push = |p: [f32; 3], col: [f32; 4]| {
+        m.vertices.push(p);
+        m.normals.push([0.0, 1.0, 0.0]);
+        m.colors.push(col);
+        (m.vertices.len() - 1) as u32
+    };
+    let center = push([c as f32, y as f32, 0.0], [1.0, 1.0, 1.0, 1.0]);
+    let inner_i: Vec<u32> = inner.iter().map(|(p, col)| push(*p, *col)).collect();
+    let rim_i: Vec<u32> = rim.iter().map(|(p, col)| push(*p, *col)).collect();
+    for k in 0..SEG {
+        let n = (k + 1) % SEG;
+        push_up_facing(&mut m, center, inner_i[k], inner_i[n]);
+        push_up_facing(&mut m, inner_i[k], rim_i[k], rim_i[n]);
+        push_up_facing(&mut m, inner_i[k], rim_i[n], inner_i[n]);
+    }
     m
 }
 
@@ -374,7 +400,7 @@ mod model_tests {
         let tris = |m: &MeshData| m.indices.len() / 3;
         assert!(tris(&pole) >= 24 && tris(&pole) <= 40, "pole {}", tris(&pole));
         assert_eq!(tris(&head), 12);
-        assert_eq!(tris(&glow), 2);
+        assert_eq!(tris(&glow), 36);
     }
 
     #[test]
@@ -391,5 +417,6 @@ mod model_tests {
         let cx = (xs.iter().cloned().fold(f32::MIN, f32::max) + xs.iter().cloned().fold(f32::MAX, f32::min)) / 2.0;
         assert!((cx as f64 - LAMP_ARM_M).abs() < 1e-6);
         assert!(glow.vertices.iter().all(|v| (v[1] as f64 - LAMP_GLOW_LIFT_M).abs() < 1e-6));
+        assert_eq!(glow.colors.len(), glow.vertices.len());
     }
 }

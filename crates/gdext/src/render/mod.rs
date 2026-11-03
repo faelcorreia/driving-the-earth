@@ -9,6 +9,8 @@ use godot::classes::{
 };
 use godot::prelude::*;
 
+pub(crate) mod lamps;
+
 use crate::geometry::MeshData;
 
 pub(crate) fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {

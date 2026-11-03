@@ -17,9 +17,13 @@ use godot::classes::{
 };
 use godot::prelude::*;
 
+use crate::environment::lamps::{delay_s, is_lit};
 use crate::environment::EnvironmentClock;
+use crate::geometry::lamps::LampPost;
 use crate::geometry::{TileGeometry, GRASS_RGB};
+use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::{material, solid_body, spawn_car};
+use tileformat::units::lamps::LAMP_REAL_REACH_M;
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::find_spawn;
 use crate::world::streaming::{is_stale, tiles_in_range};
@@ -37,6 +41,8 @@ const MAX_IN_FLIGHT: usize = 8;
 const HYSTERESIS_M: f64 = 150.0;
 /// Period of the timing line in the log, in seconds.
 const STATS_PERIOD_S: f64 = 5.0;
+/// Period of the real lights update (which lit lamps they stand on), in seconds.
+const LAMP_UPDATE_S: f64 = 0.25;
 
 /// Streams `<cache_root>/<map_id>` around the car.
 #[derive(GodotClass)]
@@ -55,6 +61,14 @@ pub struct EarthWorld {
     #[init(val = 1000.0)]
     #[export]
     view_radius_m: f32,
+    /// Real lights on the lit lamps nearest the car: 0 turns them off, at most `LAMP_POOL`.
+    #[init(val = 4)]
+    #[export]
+    lamp_real_lights: i64,
+    /// Light pools on the ground under the lit lamps.
+    #[init(val = true)]
+    #[export]
+    lamp_glow_enabled: bool,
 
     index: Option<Arc<MapIndex>>,
     car: Option<Gd<Node3D>>,
@@ -76,6 +90,16 @@ pub struct EarthWorld {
     /// Distant terrain rings, and the node of the last build.
     lod: Option<TerrainLod>,
     lod_node: Option<Gd<MeshInstance3D>>,
+
+    lamp_mats: Option<LampMaterials>,
+    lamp_lights: Option<LampLights>,
+    /// Lamp posts of each loaded tile, for the real lights.
+    lamp_posts: HashMap<(i32, i32), Vec<LampPost>>,
+    clock: Option<Gd<EnvironmentClock>>,
+    lamp_timer: f64,
+    /// Lit lamps (all loaded tiles) and lamps in total, at the last real-light update.
+    lamps_lit: usize,
+    lamps_total: usize,
 
     /// Worst `process` call and worst tile instantiation since the last log line, seconds.
     worst_frame: f64,
@@ -109,6 +133,11 @@ impl INode3D for EarthWorld {
         self.terrain_mat = Some(material(TERRAIN_COLOR));
         self.road_mat = Some(material(ROAD_COLOR));
         self.vertex_mat = Some(material((1.0, 1.0, 1.0)));
+        self.lamp_mats = LampMaterials::new();
+        if self.lamp_mats.is_none() {
+            godot_warn!("lamp shaders not loaded: street lamps are not drawn");
+        }
+        self.lamp_lights = Some(LampLights::new());
 
         // Spawn on the road nearest to home (the local origin), facing south. Without any
         // road, fall back to home itself facing south.
@@ -154,6 +183,7 @@ impl INode3D for EarthWorld {
             }
         }
         self.add_environment();
+        self.add_lamp_lights();
         if let (Some(car), Some(material)) = (&self.car, &self.terrain_mat) {
             lod::configure_view(self.base().get_parent(), car);
             self.lod = Some(TerrainLod::start(&cache_root, &id, &index.meta, material.clone()));
@@ -177,6 +207,7 @@ impl INode3D for EarthWorld {
             .filter(|&t| is_stale(t, tile_m, p, radius, HYSTERESIS_M))
             .collect();
         for t in stale {
+            self.lamp_posts.remove(&t);
             if let Some(mut node) = self.loaded.remove(&t) {
                 node.queue_free();
             }
@@ -231,16 +262,24 @@ impl INode3D for EarthWorld {
             }
         }
 
+        self.lamp_timer += delta;
+        if self.lamp_timer >= LAMP_UPDATE_S {
+            self.lamp_timer = 0.0;
+            self.update_lamp_lights(p);
+        }
+
         self.worst_frame = self.worst_frame.max(frame_start.elapsed().as_secs_f64());
         self.stats_timer += delta;
         if self.stats_timer >= STATS_PERIOD_S {
             godot_print!(
-                "stream: {} tiles loaded, {} requested, {} waiting; worst frame {:.2} ms, worst tile build {:.2} ms",
+                "stream: {} tiles loaded, {} requested, {} waiting; worst frame {:.2} ms, worst tile build {:.2} ms; lamps {} lit of {}",
                 self.loaded.len(),
                 self.requested.len(),
                 self.done.len(),
                 self.worst_frame * 1000.0,
-                self.worst_build * 1000.0
+                self.worst_build * 1000.0,
+                self.lamps_lit,
+                self.lamps_total
             );
             self.stats_timer = 0.0;
             self.worst_frame = 0.0;
@@ -321,6 +360,12 @@ impl EarthWorld {
             // One mesh and one collision body per tile, for the buildings of that tile.
             node.add_child(&solid_body(&geometry.buildings, &vertex_mat));
         }
+        if let Some(mats) = &self.lamp_mats {
+            if !geometry.lamps.is_empty() {
+                node.add_child(&lamp_node(&geometry.lamps, mats, self.lamp_glow_enabled));
+            }
+        }
+        self.lamp_posts.insert(t, geometry.lamps.clone());
         self.base_mut().add_child(&node);
         self.loaded.insert(t, node);
     }
@@ -338,7 +383,47 @@ impl EarthWorld {
         let mut clock = EnvironmentClock::new_alloc();
         clock.bind_mut().attach(world_env, old_sun);
         clock.set_name("Environment");
+        self.clock = Some(clock.clone());
         self.base_mut().add_child(&clock);
+    }
+
+    /// Adds the pool of real lights under the world node.
+    fn add_lamp_lights(&mut self) {
+        let nodes = self.lamp_lights.as_ref().map(|l| l.nodes()).unwrap_or_default();
+        for light in nodes {
+            self.base_mut().add_child(&light);
+        }
+    }
+
+    /// Moves the real lights to the lit lamps nearest the car (within `LAMP_REAL_REACH_M`).
+    fn update_lamp_lights(&mut self, p: [f64; 2]) {
+        let Some(clock) = &self.clock else {
+            return;
+        };
+        let (now, on_since) = clock.bind().lamp_clock();
+        let total: usize = self.lamp_posts.values().map(Vec::len).sum();
+        let mut lit: Vec<(f64, Vector3)> = Vec::new();
+        let mut lit_total = 0;
+        if on_since.is_some() {
+            for post in self.lamp_posts.values().flatten() {
+                if !is_lit(now, on_since, delay_s(post.id)) {
+                    continue;
+                }
+                lit_total += 1;
+                let d = (post.base[0] as f64 - p[0]).hypot(-(post.base[2] as f64) - p[1]);
+                if d <= LAMP_REAL_REACH_M {
+                    lit.push((d, head_position(post)));
+                }
+            }
+        }
+        self.lamps_lit = lit_total;
+        self.lamps_total = total;
+        lit.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let heads: Vec<Vector3> = lit.into_iter().take(LAMP_POOL).map(|(_, v)| v).collect();
+        let active = self.lamp_real_lights.clamp(0, LAMP_POOL as i64) as usize;
+        if let Some(lights) = self.lamp_lights.as_mut() {
+            lights.place(&heads, active);
+        }
     }
 
     fn car_position(&self) -> Option<[f64; 2]> {
