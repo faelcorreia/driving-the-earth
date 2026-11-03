@@ -137,7 +137,7 @@ fn road_with_profile_follows_its_heights() {
 }
 
 #[test]
-fn terrain_under_a_profiled_road_is_lowered_not_raised() {
+fn terrain_under_a_profiled_road_follows_its_profile() {
     // A crest of 2 m across the road at x = 125; the road profile is flat at 0 m.
     let crest = |u: f64, _v: f64| {
         let x = u * 250.0;
@@ -153,22 +153,18 @@ fn terrain_under_a_profiled_road_is_lowered_not_raised() {
     let plain = tile_geometry(&raw, 250.0);
     let g = tile_geometry(&with, 250.0);
     assert_eq!(g.terrain.indices, plain.terrain.indices, "triangles must not change");
-    let cell = 250.0 / 25.0;
-    let mut lowered = 0;
+    let mut on_axis = 0;
     for (v, w) in g.terrain.vertices.iter().zip(&plain.terrain.vertices) {
         let (x, y) = (v[0] as f64, -(v[2] as f64));
         let dist = (y - 125.0).abs();
-        if dist <= 3.0 + 1.5 * cell {
-            assert!(v[1] <= -0.1 + 1e-4, "vertex ({x:.1}, {y:.1}) still at {}", v[1]);
-            lowered += usize::from(v[1] < w[1] - 1e-6);
-        } else {
+        if dist <= 3.0 {
+            assert!(v[1].abs() < 1e-4, "vertex ({x:.1}, {y:.1}) is {} off the profile", v[1]);
+            on_axis += 1;
+        } else if dist > 3.0 + TERRAIN_FINE_CELL_M {
             assert_eq!(v[1], w[1], "vertex outside the band changed at ({x:.1}, {y:.1})");
         }
     }
-    assert!(lowered > 0, "the crest was not lowered");
-    // The ribbon lies above the (lowered) terrain at the crest.
-    let strip = ribbon_height(&g.roads, 125.0, 125.0).expect("road covers the crest");
-    assert!((strip - 0.1).abs() < 0.01, "ribbon at {strip}");
+    assert!(on_axis > 0);
 }
 
 #[test]
@@ -213,10 +209,10 @@ fn sample_height_uses_tile_offset() {
 fn terrain_is_a_grid_with_front_faces_up() {
     let t = tile(0, 0, grid(5, |u, v| (u * 3.0 + v * 2.0) as f32), Vec::new());
     let g = tile_geometry(&t, 20.0);
-    assert_eq!(g.terrain.vertices.len(), 25);
-    assert_eq!(g.terrain.normals.len(), 25);
-    assert_eq!(g.terrain.indices.len(), 2 * 4 * 4 * 3);
-    assert!(g.terrain.indices.iter().all(|&i| (i as usize) < 25));
+    assert_eq!(g.terrain.vertices.len(), 81);
+    assert_eq!(g.terrain.normals.len(), 81);
+    assert_eq!(g.terrain.indices.len(), 2 * 8 * 8 * 3);
+    assert!(g.terrain.indices.iter().all(|&i| (i as usize) < 81));
     for tri in g.terrain.indices.chunks(3) {
         let p: Vec<[f32; 3]> = tri.iter().map(|&i| g.terrain.vertices[i as usize]).collect();
         let cross_y = (p[1][2] - p[0][2]) * (p[2][0] - p[0][0]) - (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]);
@@ -229,7 +225,7 @@ fn terrain_normals_follow_the_slope() {
     // Height rises 0.5 m per meter eastward: interior normals tilt west (-x).
     let t = tile(0, 0, grid(5, |u, _| (u * 20.0 * 0.5) as f32), Vec::new());
     let g = tile_geometry(&t, 20.0);
-    let n = g.terrain.normals[2 * 5 + 2];
+    let n = g.terrain.normals[4 * 9 + 4];
     let len = (0.5f32 * 0.5 + 1.0).sqrt();
     assert!((n[0] + 0.5 / len).abs() < 1e-4, "{n:?}");
     assert!((n[1] - 1.0 / len).abs() < 1e-4, "{n:?}");
@@ -242,7 +238,7 @@ fn terrain_world_axes_match_godot() {
     let t = tile(0, 1, grid(3, |_, _| 4.0), Vec::new());
     let g = tile_geometry(&t, 20.0);
     // Vertex row 0 is at y = 20 (tile y = 1), column 1 at x = 10.
-    assert_eq!(g.terrain.vertices[1], [10.0, 4.0, -20.0]);
+    assert_eq!(g.terrain.vertices[4], [10.0, 4.0, -20.0]);
 }
 
 #[test]
@@ -343,18 +339,19 @@ fn reference_tile_geometry_is_unchanged() {
     assert_eq!(mesh_hash(&g.roads), REFERENCE_ROADS_HASH);
 }
 
-const REFERENCE_TERRAIN_HASH: u64 = 0x84e8_aac5_74f1_597e;
-const REFERENCE_ROADS_HASH: u64 = 0xe0743e9d4b222c16;
+const REFERENCE_TERRAIN_HASH: u64 = 0xa026d6b33f0fd410;
+const REFERENCE_ROADS_HASH: u64 = 0x64345fe1bdeca327;
 
-/// Regression: a tile with no roads keeps the same terrain and (empty) road meshes as before the
-/// road lowering rework (`lower_under_roads` must leave its grid untouched without roads).
+/// A tile with no roads has the 10 m grid, bilinear, at every fine vertex (2,5 m).
 #[test]
-fn tile_without_roads_geometry_is_unchanged() {
+fn tile_without_roads_is_the_grid_on_the_fine_vertices() {
     let t = tile(0, 0, grid(9, |u, v| hill(u * 250.0, v * 250.0)), Vec::new());
     let g = tile_geometry(&t, 250.0);
     assert!(g.roads.is_empty());
-    println!("no-roads terrain {:016x}", mesh_hash(&g.terrain));
-    assert_eq!(mesh_hash(&g.terrain), REFERENCE_NO_ROADS_TERRAIN_HASH);
+    let n = 101;
+    assert_eq!(g.terrain.vertices.len(), n * n);
+    for (k, v) in g.terrain.vertices.iter().enumerate() {
+        let (x, y) = ((k % n) as f64 * TERRAIN_FINE_CELL_M, (k / n) as f64 * TERRAIN_FINE_CELL_M);
+        assert_eq!(v[1], sample_height(&t, 250.0, x, y), "vertex {k}");
+    }
 }
-
-const REFERENCE_NO_ROADS_TERRAIN_HASH: u64 = 0x0966_6548_a9bb_f653;

@@ -1,6 +1,5 @@
 //! Junction geometry: extends road ends so ribbons meet at crossings and overlap across tile
 //! borders. Pure Rust (no Godot types). Imports `geometry::vec2` and `tileformat`/`tilebake` data.
-use tilebake::profile::z_at;
 use tileformat::{road_width_m, Polyline};
 
 use super::vec2::{dist, dist_to_segment, unit, unit_normal};
@@ -15,9 +14,8 @@ pub(super) const BORDER_OVERLAP_M: f64 = 0.25;
 /// its cut lies past the near edge of the crossed road. Ends on a tile border run a
 /// little past it (overlap with the next tile); ends with no other road close by
 /// (cul-de-sacs) are kept as they are.
-/// Each road's points with their heights (empty when the bake gave no profile). Points added
-/// by an extension take the height of the nearest point of the original road.
-pub(super) fn extend_junction_ends(roads: &[Polyline], tile_m: f64) -> Vec<(Vec<[f64; 2]>, Vec<f32>)> {
+/// Points of each road (extended ends included). Heights come from the terrain field, not here.
+pub(super) fn extend_junction_ends(roads: &[Polyline], tile_m: f64) -> Vec<Vec<[f64; 2]>> {
     roads
         .iter()
         .enumerate()
@@ -25,7 +23,7 @@ pub(super) fn extend_junction_ends(roads: &[Polyline], tile_m: f64) -> Vec<(Vec<
             let half = road_width_m(&road.highway) / 2.0;
             let mut pts = road.points.clone();
             if pts.len() < 2 {
-                return (pts, Vec::new());
+                return pts;
             }
             let head = extend_end(&pts, half, roads, i, tile_m);
             extend_tail(&mut pts, head);
@@ -33,13 +31,7 @@ pub(super) fn extend_junction_ends(roads: &[Polyline], tile_m: f64) -> Vec<(Vec<
             let tail = extend_end(&pts, half, roads, i, tile_m);
             extend_tail(&mut pts, tail);
             pts.reverse();
-            let has_z = road.z.len() == road.points.len();
-            let zs = if has_z {
-                pts.iter().map(|&p| z_at(&road.points, &road.z, p)).collect()
-            } else {
-                Vec::new()
-            };
-            (pts, zs)
+            pts
         })
         .collect()
 }

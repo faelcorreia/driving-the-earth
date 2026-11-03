@@ -14,6 +14,13 @@
 pub const TILE_M: f64 = 250.0;
 /// Side of a terrain (DEM) cell, in meters.
 pub const TERRAIN_CELL_M: f64 = 10.0;
+/// Side of a cell of the fine terrain surface built at runtime (roads, junctions, edges), in meters.
+pub const TERRAIN_FINE_CELL_M: f64 = 2.5;
+/// Vertices per side of the fine terrain surface of one tile (`TILE_M / TERRAIN_FINE_CELL_M + 1`).
+pub const TERRAIN_FINE_N: usize = (TILE_M / TERRAIN_FINE_CELL_M) as usize + 1;
+/// Width of the band beside a road's edge where the terrain blends from the road profile to the
+/// 10 m grid, in meters (one fine cell).
+pub const ROAD_BLEND_M: f64 = TERRAIN_FINE_CELL_M;
 /// Side of a ground-cover cell (`Tile::ground`), in meters.
 pub const GROUND_CELL_M: f64 = 5.0;
 /// Cells per side of the ground-cover grid of one tile.
@@ -32,6 +39,10 @@ const _: () = assert!(GROUND_CELL_M % MODULE_M == 0.0, "ground cells are whole m
 const _: () = assert!(FLOOR_HEIGHT_M % MODULE_M == 0.0, "a floor is a whole number of modules");
 const _: () = assert!(SIDEWALK_M % MODULE_M == 0.0, "a sidewalk is a whole number of modules");
 const _: () = assert!(GROUND_N as f64 * GROUND_CELL_M == TILE_M, "the ground grid covers the tile");
+const _: () = assert!(TILE_M % TERRAIN_FINE_CELL_M == 0.0, "a tile holds whole fine cells");
+const _: () = assert!(TERRAIN_CELL_M % TERRAIN_FINE_CELL_M == 0.0, "a terrain cell holds whole fine cells");
+const _: () = assert!(GROUND_CELL_M % TERRAIN_FINE_CELL_M == 0.0, "a ground cell holds whole fine cells");
+const _: () = assert!(TERRAIN_FINE_N == 101, "the fine grid is 101 vertices per side");
 
 /// Lot rules of the generated buildings (B0). Distances in meters; the drawn values are snapped
 /// to `MODULE_M`, so every lot edge is a whole number of modules.

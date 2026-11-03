@@ -32,12 +32,16 @@ impl Map {
         Some(sample_height(tile, size, x, y))
     }
 
-    /// Like `tile_geometry`, but roads sit on the terrain of whichever tile owns each point.
-    /// A ribbon that crosses a tile border (half its width, or its overlap) then follows the
-    /// neighbor's real surface instead of an extension of this tile's edge plane.
+    /// Geometry of `tile` with its neighbors' roads and grid: the surface is the same one the
+    /// neighbor's tile sees at a shared border.
     pub fn tile_geometry(&self, tile: &Tile) -> TileGeometry {
         let size = self.meta.tile_size_m;
-        tile_geometry_with(tile, size, &|x, y| self.height_at(x, y).unwrap_or_else(|| sample_height(tile, size, x, y)))
+        let around: Vec<&Tile> = self
+            .tiles
+            .iter()
+            .filter(|t| (t.x - tile.x).abs() <= 1 && (t.y - tile.y).abs() <= 1 && (t.x, t.y) != (tile.x, tile.y))
+            .collect();
+        tile_geometry_with(tile, size, &|x, y| self.height_at(x, y).unwrap_or_else(|| sample_height(tile, size, x, y)), &around)
     }
 }
 

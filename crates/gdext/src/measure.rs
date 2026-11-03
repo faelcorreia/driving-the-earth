@@ -82,7 +82,7 @@ fn summarize(name: &str, st: &[&Station]) {
         println!("[{name}] no stations");
         return;
     }
-    let mut axis: Vec<f64> = st.iter().map(|s| s.d_axis).collect();
+    let axis: Vec<f64> = st.iter().map(|s| s.d_axis).collect();
     let edge: Vec<f64> = st.iter().flat_map(|s| s.d_edge).collect();
     let mut rib: Vec<f64> = st.iter().flat_map(|s| s.rib.map(f64::abs)).collect();
     let mut ter: Vec<f64> = st.iter().flat_map(|s| s.ter.map(f64::abs)).collect();
