@@ -9,6 +9,7 @@ mod ground;
 mod junction;
 pub mod lamps;
 mod mesh;
+mod profile_smooth;
 mod road;
 mod terrain;
 #[cfg(test)]
