@@ -48,6 +48,24 @@ pub struct Polyline {
     /// bake gave no profile: the road then follows the terrain under it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub z: Vec<f32>,
+    /// Height of the left edge of the road at each point (`z` minus half the width times the
+    /// transverse slope of the terrain). Same length as `z`; empty when there is no profile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zl: Vec<f32>,
+    /// Height of the right edge at each point (`z` plus half the width times the transverse slope).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zr: Vec<f32>,
+}
+
+/// Road width in meters by OSM `highway` class.
+pub fn road_width_m(highway: &str) -> f64 {
+    match highway {
+        "motorway" | "trunk" | "primary" => 12.0,
+        "secondary" => 10.0,
+        "tertiary" => 8.0,
+        "residential" | "unclassified" | "living_street" => 6.0,
+        _ => 3.0,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,6 +119,8 @@ mod tests {
                 highway: "residential".into(),
                 points: vec![[-43.9123456789, -19.9234567891], [-43.9, -19.92]],
                 z: Vec::new(),
+                zl: Vec::new(),
+                zr: Vec::new(),
             }],
             buildings: vec![Polygon {
                 points: vec![[0.0, 0.0], [10.5, 0.0], [10.5, 8.25], [0.0, 8.25]],

@@ -200,16 +200,8 @@ pub fn sample_height(tile: &Tile, tile_m: f64, x: f64, y: f64) -> f32 {
     h as f32
 }
 
-/// Road width in meters by OSM `highway` class.
-pub fn road_width_m(highway: &str) -> f64 {
-    match highway {
-        "motorway" | "trunk" | "primary" => 12.0,
-        "secondary" => 10.0,
-        "tertiary" => 8.0,
-        "residential" | "unclassified" | "living_street" => 6.0,
-        _ => 3.0,
-    }
-}
+/// Road width in meters by OSM `highway` class (shared with the bake, see `tileformat`).
+pub use tileformat::road_width_m;
 
 /// Builds the terrain grid and the road ribbons of one tile, with no neighbors (tests only;
 /// the game uses `Map::tile_geometry`, which sees the neighbors).
@@ -696,7 +688,7 @@ mod tests {
     fn road_never_goes_under_the_terrain() {
         // A bendy road over a hill: the strip is sampled between nodes, so it must stay
         // above the drawn terrain everywhere, not only at the nodes.
-        let road = Polyline { z: Vec::new(),
+        let road = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
             highway: "residential".into(),
             points: vec![[60.0, 100.0], [120.0, 128.0], [190.0, 150.0], [200.0, 60.0]],
         };
@@ -731,7 +723,7 @@ mod tests {
         let road = Polyline {
             highway: "residential".into(),
             points: vec![[60.0, 125.0], [190.0, 125.0]],
-            z: vec![0.0, 10.0],
+            z: vec![0.0, 10.0], zl: Vec::new(), zr: Vec::new(),
         };
         let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
         let g = tile_geometry(&t, 250.0);
@@ -752,7 +744,7 @@ mod tests {
         let road = Polyline {
             highway: "residential".into(),
             points: vec![[0.0, 125.0], [250.0, 125.0]],
-            z: vec![0.0, 0.0],
+            z: vec![0.0, 0.0], zl: Vec::new(), zr: Vec::new(),
         };
         let raw = tile(0, 0, grid(26, crest), Vec::new());
         let with = tile(0, 0, grid(26, crest), vec![road.clone()]);
@@ -790,7 +782,7 @@ mod tests {
             assert!((a - b).abs() < 1e-4, "edge height differs at y={y}: {a} vs {b}");
         }
         // The strip of each tile ends on the shared border line.
-        let piece = |x0: f64, x1: f64| Polyline { z: Vec::new(),
+        let piece = |x0: f64, x1: f64| Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
             highway: "residential".into(),
             points: vec![[x0, 125.0], [x1, 125.0]],
         };
@@ -853,7 +845,7 @@ mod tests {
 
     #[test]
     fn road_becomes_front_up_ribbon_on_terrain() {
-        let road = Polyline { z: Vec::new(),
+        let road = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
             highway: "residential".into(),
             points: vec![[0.0, 10.0], [20.0, 10.0]],
         };
@@ -888,8 +880,8 @@ mod tests {
     fn road_end_on_crossed_road_leaves_no_wedge() {
         let s = std::f64::consts::FRAC_1_SQRT_2;
         let end = [125.0, 125.0];
-        let a = Polyline { z: Vec::new(), highway: "primary".into(), points: vec![[end[0] - 80.0 * s, end[1] - 80.0 * s], end] };
-        let b = Polyline { z: Vec::new(), highway: "residential".into(), points: vec![[0.0, 125.0], [250.0, 125.0]] };
+        let a = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(), highway: "primary".into(), points: vec![[end[0] - 80.0 * s, end[1] - 80.0 * s], end] };
+        let b = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(), highway: "residential".into(), points: vec![[0.0, 125.0], [250.0, 125.0]] };
         let t = tile(0, 0, grid(26, |_, _| 50.0), vec![a, b]);
         let g = tile_geometry(&t, 250.0);
         let (half_a, half_b) = (6.0, 3.0);
@@ -957,7 +949,7 @@ mod tests {
         let dir = root.join("t");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("meta.json"), serde_json::to_string(&meta(true)).unwrap()).unwrap();
-        let road = |points: Vec<[f64; 2]>| Polyline { z: Vec::new(),
+        let road = |points: Vec<[f64; 2]>| Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
             highway: "residential".into(),
             points,
         };
@@ -1041,7 +1033,7 @@ mod tests {
     fn road_over_a_tile_border_follows_the_neighbor_terrain() {
         // Tile (0,0) is flat at 10 m; tile (1,0) is flat at 20 m. A road along y = 10 ends
         // at x = 20 + 3 (it crosses the border), so its tail lies over the neighbor.
-        let road = Polyline { z: Vec::new(), highway: "residential".into(), points: vec![[10.0, 10.0], [23.0, 10.0]] };
+        let road = Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(), highway: "residential".into(), points: vec![[10.0, 10.0], [23.0, 10.0]] };
         let a = tile(0, 0, grid(3, |_, _| 10.0), vec![road]);
         let b = tile(1, 0, grid(3, |_, _| 20.0), Vec::new());
         let map = Map::new(meta(true), vec![a.clone(), b]);

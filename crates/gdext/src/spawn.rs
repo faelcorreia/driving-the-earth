@@ -73,7 +73,7 @@ mod tests {
             },
             roads: roads
                 .into_iter()
-                .map(|points| Polyline { z: Vec::new(),
+                .map(|points| Polyline { z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
                     highway: "residential".into(),
                     points,
                 })

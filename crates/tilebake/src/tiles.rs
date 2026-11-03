@@ -108,7 +108,7 @@ pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: 
             roads.push(Polyline {
                 highway: highway.to_string(),
                 points: points.clone(),
-                z: Vec::new(),
+                z: Vec::new(), zl: Vec::new(), zr: Vec::new(),
             });
         }
     }
@@ -172,10 +172,22 @@ pub fn build_tile_from(
             } else {
                 profile::z_for_piece(&road.points, &road.z, &points)
             };
+            let zl = if road.zl.is_empty() {
+                Vec::new()
+            } else {
+                profile::z_for_piece(&road.points, &road.zl, &points)
+            };
+            let zr = if road.zr.is_empty() {
+                Vec::new()
+            } else {
+                profile::z_for_piece(&road.points, &road.zr, &points)
+            };
             tile_roads.push(Polyline {
                 highway: road.highway.clone(),
                 points,
                 z,
+                zl,
+                zr,
             });
         }
     }
@@ -313,11 +325,13 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
     let terrain = |p: [f64; 2]| terrain_at(&heights, &grid, p);
     let smooth: Vec<Option<profile::SmoothWay>> =
         roads.iter().map(|r| profile::smooth_way(&r.points, &terrain)).collect();
-    let node_h = profile::node_heights(&smooth, &pins);
+    let node_h = profile::node_heights(&smooth, &pins, &terrain);
     for (road, sw) in roads.iter_mut().zip(&smooth) {
         if let Some(sw) = sw {
             road.points = sw.pts.clone();
             road.z = profile::pin_way(sw, &node_h);
+            let half_w = tileformat::road_width_m(&road.highway) / 2.0;
+            (road.zl, road.zr) = profile::edge_heights(&road.points, &road.z, half_w, &terrain);
         }
     }
     let road_index = index_by_tile(&roads, |r| &r.points, meta.tile_size_m);
