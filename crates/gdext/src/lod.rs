@@ -56,8 +56,8 @@ pub const RECENTER_M: f64 = 2500.0;
 /// How far the skirts hang below the surface, in meters.
 const SKIRT_M: f32 = 30.0;
 /// Fog: none up to `FOG_BEGIN_M`, opaque from `FOG_END_M` (hides the far edge of the rings).
-const FOG_BEGIN_M: f32 = 3000.0;
-const FOG_END_M: f32 = 9000.0;
+const FOG_BEGIN_M: f32 = 5000.0;
+const FOG_END_M: f32 = 10000.0;
 /// Camera far plane, so the rings are not cut off before the fog takes them.
 const FAR_M: f32 = 12000.0;
 /// Fog color, the horizon color of the sky.
