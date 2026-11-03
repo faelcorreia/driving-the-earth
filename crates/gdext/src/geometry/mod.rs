@@ -4,6 +4,7 @@
 //! `gdext`. `world` and `render` use it; it must not use them.
 
 mod building;
+mod ground;
 mod junction;
 mod mesh;
 mod road;
@@ -15,10 +16,12 @@ pub(crate) mod tests;
 use tileformat::Tile;
 
 use building::building_mesh;
+use ground::terrain_colors;
 use junction::extend_junction_ends;
 pub(crate) use road::ROAD_LIFT_M;
 use road::{lower_under_roads, push_road, ROAD_ORDER_LIFT_M, ROAD_STATIONS_PER_CELL};
 use mesh::{normalize, world};
+pub use ground::GRASS_RGB;
 pub use mesh::{MeshData, TileGeometry};
 pub use terrain::sample_height;
 pub use tileformat::road_width_m;
@@ -64,6 +67,8 @@ pub fn tile_geometry_with(tile: &Tile, tile_m: f64, ground: &dyn Fn(f64, f64) ->
             terrain.indices.extend([a, c, b, b, c, d]);
         }
     }
+
+    terrain.colors = terrain_colors(tile, n);
 
     let mut roads = MeshData::default();
     // Stations every quarter of a grid cell: the ribbon follows the terrain between nodes.
