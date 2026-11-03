@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use tileformat::{read_tile, MapMeta, Tile};
+use tileformat::{read_tile, MapMeta, Polyline, Tile};
 
 use crate::geometry::{sample_height, tile_geometry_with, TileGeometry};
 
@@ -150,6 +150,16 @@ impl MapIndex {
             }
         }
         Ok(Map::new(self.meta.clone(), tiles))
+    }
+
+    /// `cache/<id>/roads.bin`, the road pieces of the whole map. Missing in caches baked before it existed.
+    pub fn roads_file(&self) -> PathBuf {
+        self.dir.join(tileformat::roads::ROADS_FILE)
+    }
+
+    /// Road pieces of tile `(x, y)` only, names included (the 2D map reads these).
+    pub fn read_roads_at(&self, x: i32, y: i32) -> io::Result<Vec<Polyline>> {
+        tileformat::read_tile_roads(&self.dir.join("tiles").join(format!("{x}_{y}.json")))
     }
 
     /// Geometry of tile `(x, y)` as the whole map would give it, reading only its neighborhood.

@@ -145,6 +145,7 @@ pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: 
         if points.len() >= 2 {
             roads.push(Polyline {
                 highway: highway.to_string(),
+                name: e["tags"]["name"].as_str().unwrap_or("").to_string(),
                 points: points.clone(),
                 z: Vec::new(),
                 zl: Vec::new(),
@@ -227,6 +228,7 @@ pub fn build_tile_from(
             };
             tile_roads.push(Polyline {
                 highway: road.highway.clone(),
+                name: road.name.clone(),
                 points,
                 z,
                 zl,
@@ -671,6 +673,7 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
         summary.building_pieces += b;
     }
 
+    write_roads_file(cache_root, id)?;
     meta.complete = true;
     fs::write(
         &meta_path,
@@ -681,10 +684,71 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
     Ok(summary)
 }
 
+/// Writes `cache/<id>/roads.bin` (road pieces only, for the 2D map) from the tiles on disk.
+/// Returns the bytes written.
+pub fn write_roads_file(cache_root: &Path, id: &str) -> io::Result<u64> {
+    let tiles_dir = cache_root.join(id).join("tiles");
+    let mut tiles = Vec::new();
+    for entry in fs::read_dir(&tiles_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let coords = stem
+            .split_once('_')
+            .and_then(|(x, y)| Some((x.parse::<i32>().ok()?, y.parse::<i32>().ok()?)));
+        let Some((x, y)) = coords else {
+            continue;
+        };
+        tiles.push((x, y, tileformat::read_tile_roads(&path)?));
+    }
+    tiles.sort_by_key(|t| (t.0, t.1));
+    tileformat::roads::write_roads_file(&tileformat::roads::roads_path(cache_root, id), &tiles)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dem::CELL_M;
+
+    #[test]
+    fn roads_file_collects_the_road_pieces_of_every_tile() {
+        let root = std::env::temp_dir().join(format!("tilebake-roads-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let tile = |x: i32, y: i32, name: &str| Tile {
+            x,
+            y,
+            height: HeightGrid {
+                cols: 1,
+                rows: 1,
+                values: vec![0.0],
+            },
+            roads: vec![Polyline {
+                highway: "primary".into(),
+                name: name.into(),
+                points: vec![[0.0, 0.0], [1.0, 1.0]],
+                z: vec![],
+                zl: vec![],
+                zr: vec![],
+            }],
+            buildings: vec![],
+            ground: vec![],
+        };
+        tileformat::write_tile(&root, "t", &tile(-2, 5, "Rua A")).unwrap();
+        tileformat::write_tile(&root, "t", &tile(0, 0, "Rua B")).unwrap();
+        write_roads_file(&root, "t").unwrap();
+        let back =
+            tileformat::roads::read_roads_file(&tileformat::roads::roads_path(&root, "t")).unwrap();
+        let coords: Vec<(i32, i32)> = back.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(coords, vec![(-2, 5), (0, 0)]);
+        assert_eq!(back[0].2[0].name, "Rua A");
+        assert_eq!(back[1].2[0].name, "Rua B");
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn real_building_takes_levels_and_stable_palette() {
@@ -887,6 +951,25 @@ mod tests {
     ]}"#;
 
     #[test]
+    fn way_name_is_kept_on_the_road_and_its_pieces() {
+        let grid = MapGrid {
+            lat0: -19.9,
+            lon0: -43.9,
+            tile_m: 250.0,
+            cell_m: CELL_M,
+        };
+        let json = r#"{"elements":[{"type":"way","id":7,"tags":{"highway":"primary","name":"Avenida Afonso Pena"},
+            "geometry":[{"lat":-19.9,"lon":-43.9},{"lat":-19.9,"lon":-43.89}]}]}"#;
+        let (roads, _) = parse_ways(json, &grid).unwrap();
+        assert_eq!(roads[0].name, "Avenida Afonso Pena");
+        let raster = flat_raster(&grid);
+        let (tile, _, _) =
+            build_tile(std::slice::from_ref(&raster), &grid, &roads, &[], &[], 0, 0).unwrap();
+        assert!(!tile.roads.is_empty());
+        assert!(tile.roads.iter().all(|r| r.name == "Avenida Afonso Pena"));
+    }
+
+    #[test]
     fn parse_ways_projects_and_closes_rings() {
         let grid = MapGrid {
             lat0: -19.9,
@@ -897,6 +980,7 @@ mod tests {
         let (roads, buildings) = parse_ways(OSM, &grid).unwrap();
         assert_eq!(roads.len(), 1);
         assert_eq!(roads[0].highway, "residential");
+        assert_eq!(roads[0].name, "", "the fixture way has no name tag");
         assert!(roads[0].points[0][0].abs() < 1e-6 && roads[0].points[0][1].abs() < 1e-6);
         // 0.01 degree of longitude at lat -19.9 is about 1045.6 m.
         assert!(
