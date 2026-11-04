@@ -35,7 +35,10 @@ mod tests {
         let (x, y) = to_unit(0.0, 0.0);
         assert!((x - 0.5).abs() < 1e-12 && (y - 0.5).abs() < 1e-12);
         let (x, y) = to_unit(MAX_LAT, -180.0);
-        assert!(x.abs() < 1e-12 && y < 0.002, "north west corner at ({x}, {y})");
+        assert!(
+            x.abs() < 1e-12 && y < 0.002,
+            "north west corner at ({x}, {y})"
+        );
     }
 
     #[test]

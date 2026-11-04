@@ -26,7 +26,6 @@ pub mod utm;
 
 const USER_AGENT: &str = "driving-the-earth/0.1 (tilebake; projeto pessoal)";
 const NOMINATIM_URL: &str = "https://nominatim.openstreetmap.org/search";
-const OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
 /// Environment variable with the collection radius, in meters (read when `meta.json` is created).
 const RADIUS_ENV: &str = "TILEBAKE_RADIUS_M";
 

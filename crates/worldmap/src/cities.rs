@@ -33,6 +33,16 @@ fn overlaps(a: &[f64; 4], b: &[f64; 4]) -> bool {
     a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
 }
 
+/// Adds a name box `b` if it is inside the screen width and overlaps no box already in `boxes`.
+/// The picker uses it for names from tiles, after the city names (same rule as `place`).
+pub fn reserve(boxes: &mut Vec<[f64; 4]>, b: [f64; 4], width: f64) -> bool {
+    let fits = b[0] >= 0.0 && b[2] <= width && !boxes.iter().any(|o| overlaps(o, &b));
+    if fits {
+        boxes.push(b);
+    }
+    fits
+}
+
 /// Cities on screen at the view's zoom, in the order of `cities` (largest first), with names
 /// placed greedily. Cities outside the screen (with a margin for the name) are skipped.
 pub fn place(cities: &[City], view: &View, font_px: f64) -> Vec<Placed> {
@@ -46,18 +56,29 @@ pub fn place(cities: &[City], view: &View, font_px: f64) -> Vec<Placed> {
         }
         for &k in &copies {
             let (x, y) = view.to_screen(c.x + k as f64, c.y);
-            if x < -font_px || x > view.width + font_px || y < -font_px || y > view.height + font_px {
+            if x < -font_px || x > view.width + font_px || y < -font_px || y > view.height + font_px
+            {
                 continue;
             }
             let w = label_width_px(&c.name, font_px);
-            let b = [x + LABEL_GAP_PX, y - font_px / 2.0, x + LABEL_GAP_PX + w, y + font_px / 2.0];
+            let b = [
+                x + LABEL_GAP_PX,
+                y - font_px / 2.0,
+                x + LABEL_GAP_PX + w,
+                y + font_px / 2.0,
+            ];
             let fits = boxes.len() < MAX_LABELS
                 && b[2] <= view.width
                 && !boxes.iter().any(|o| overlaps(o, &b));
             if fits {
                 boxes.push(b);
             }
-            out.push(Placed { city: i, x, y, label: fits.then_some(b) });
+            out.push(Placed {
+                city: i,
+                x,
+                y,
+                label: fits.then_some(b),
+            });
         }
     }
     out
@@ -70,12 +91,23 @@ mod tests {
 
     fn city(name: &str, tier: u8, lat: f64, lon: f64) -> City {
         let (x, y) = crate::projection::to_unit(lat, lon);
-        City { name: name.into(), tier, lat, lon, x, y }
+        City {
+            name: name.into(),
+            tier,
+            lat,
+            lon,
+            x,
+            y,
+        }
     }
 
     #[test]
     fn only_the_largest_show_at_the_whole_world() {
-        let cities = vec![city("A", 0, 0.0, 0.0), city("B", 1, 10.0, 10.0), city("C", 3, 20.0, 20.0)];
+        let cities = vec![
+            city("A", 0, 0.0, 0.0),
+            city("B", 1, 10.0, 10.0),
+            city("C", 3, 20.0, 20.0),
+        ];
         let view = View::world(800.0, 600.0);
         let placed = place(&cities, &view, 12.0);
         assert_eq!(placed.len(), 1);
@@ -84,7 +116,11 @@ mod tests {
 
     #[test]
     fn smaller_cities_show_as_you_zoom_in() {
-        let cities = vec![city("A", 0, 0.0, 0.0), city("B", 1, 10.0, 10.0), city("C", 3, 5.0, 5.0)];
+        let cities = vec![
+            city("A", 0, 0.0, 0.0),
+            city("B", 1, 10.0, 10.0),
+            city("C", 3, 5.0, 5.0),
+        ];
         let mut view = View::world(800.0, 600.0);
         view.center_on(0.0, 0.0, 2.0);
         let names: Vec<usize> = place(&cities, &view, 12.0).iter().map(|p| p.city).collect();
@@ -120,7 +156,14 @@ mod tests {
     #[test]
     fn labels_are_capped() {
         let cities: Vec<City> = (0..200)
-            .map(|i| city(&format!("C{i}"), 0, (i as f64 % 20.0) * 0.5, (i as f64 / 20.0) * 3.0))
+            .map(|i| {
+                city(
+                    &format!("C{i}"),
+                    0,
+                    (i as f64 % 20.0) * 0.5,
+                    (i as f64 / 20.0) * 3.0,
+                )
+            })
             .collect();
         let mut view = View::world(1600.0, 1200.0);
         view.zoom_at(800.0, 600.0, 4.0);

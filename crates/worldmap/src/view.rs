@@ -4,7 +4,7 @@
 use crate::projection::{clamp_lat, from_unit, to_unit};
 
 /// Zoom levels above "whole world on screen" (2^12 is about 1 m per pixel at 4000 px wide).
-pub const MAX_ZOOM_STEPS: f64 = 12.0;
+pub const MAX_ZOOM_STEPS: f64 = 15.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View {
@@ -18,7 +18,13 @@ pub struct View {
 impl View {
     /// The whole world, centered, on a screen of this size in pixels.
     pub fn world(width: f64, height: f64) -> View {
-        let mut v = View { cx: 0.5, cy: 0.5, px_per_unit: 1.0, width, height };
+        let mut v = View {
+            cx: 0.5,
+            cy: 0.5,
+            px_per_unit: 1.0,
+            width,
+            height,
+        };
         v.px_per_unit = v.min_scale();
         v
     }
@@ -92,7 +98,11 @@ impl View {
     fn clamp_center(&mut self) {
         self.cx = self.cx.rem_euclid(1.0);
         let half = self.height / 2.0 / self.px_per_unit;
-        self.cy = if 2.0 * half >= 1.0 { 0.5 } else { self.cy.clamp(half, 1.0 - half) };
+        self.cy = if 2.0 * half >= 1.0 {
+            0.5
+        } else {
+            self.cy.clamp(half, 1.0 - half)
+        };
     }
 
     /// Horizontal copies of the world (`k` such that the copy spans x in [k, k + 1]) that reach

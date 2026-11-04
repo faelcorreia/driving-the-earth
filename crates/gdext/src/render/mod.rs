@@ -14,6 +14,7 @@ pub(crate) mod far_lights;
 pub(crate) mod lamps;
 pub(crate) mod map2d;
 pub(crate) mod world_map;
+pub(crate) mod world_map_detail;
 
 use crate::geometry::MeshData;
 

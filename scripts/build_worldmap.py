@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the world map asset used by the home picker (F17b).
 
-Source: Natural Earth 1:50m vector data (public domain, https://www.naturalearthdata.com),
+Source: Natural Earth 1:50m vector data (land, borders) and 1:10m populated places (public domain, https://www.naturalearthdata.com),
 read from the GeoJSON mirror in nvkelso/natural-earth-vector at a pinned commit. Each file is
 checked against its sha256 before use. Output: godot/assets/worldmap/world.bin (little endian).
 
@@ -29,7 +29,7 @@ BASE_URL = f"https://raw.githubusercontent.com/nvkelso/natural-earth-vector/{NE_
 SOURCES = {
     "ne_50m_land.geojson": "e874b27a51d146452be360cafb3cc50c86001074a67d534113e6534682f9826b",
     "ne_50m_admin_0_boundary_lines_land.geojson": "2faac4f6b34386f3d21b6e018cf151f241f00e5c936d44dd17d7d9bfb147fa48",
-    "ne_50m_populated_places_simple.geojson": "8e70756b39fae9bcdc1e332bfc510c024c5edd3a13203ffd20092ee37b61d978",
+    "ne_10m_populated_places_simple.geojson": "fd3fa867a320cbd5c5b6bb5bc550afeec2939fb2cef688e508007282a55ac42f",
 }
 LAT_LIMIT = 85.0
 SIMPLIFY_DEG = 0.02          # Douglas-Peucker tolerance, about 2 km
@@ -169,7 +169,7 @@ def build(cache):
             q = quantize(simplify(unwrap(line), SIMPLIFY_DEG))
             if len(q) >= 2:
                 lines.append(q)
-    for feat in load("ne_50m_populated_places_simple.geojson"):
+    for feat in load("ne_10m_populated_places_simple.geojson"):
         props = feat["properties"]
         name = props.get("name")
         pop = props.get("pop_max") or 0

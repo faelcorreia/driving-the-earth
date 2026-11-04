@@ -120,8 +120,13 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "home.attribution",
-        "Map data: Natural Earth (public domain)",
-        "Dados do mapa: Natural Earth (domínio público)",
+        "Map data: Natural Earth (public domain). \u{a9} OpenStreetMap contributors, OpenFreeMap",
+        "Dados do mapa: Natural Earth (domínio público). \u{a9} OpenStreetMap contributors, OpenFreeMap",
+    ),
+    (
+        "home.detail_offline",
+        "Streets and neighborhoods need the internet. Showing cities only.",
+        "Ruas e bairros precisam de internet. Mostrando só as cidades.",
     ),
 ];
 

@@ -97,7 +97,12 @@ impl<'a> Reader<'a> {
 }
 
 fn bbox_of(pts: &[[f64; 2]]) -> [f64; 4] {
-    let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    let mut b = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
     for p in pts {
         b[0] = b[0].min(p[0]);
         b[1] = b[1].min(p[1]);
@@ -147,7 +152,14 @@ pub fn decode(bytes: &[u8]) -> Result<WorldData, AssetError> {
             return Err(AssetError::BadCoord);
         }
         let (x, y) = to_unit(lat, lon);
-        data.cities.push(City { name: name.to_string(), tier, lat, lon, x, y });
+        data.cities.push(City {
+            name: name.to_string(),
+            tier,
+            lat,
+            lon,
+            x,
+            y,
+        });
     }
     if r.pos != bytes.len() {
         return Err(AssetError::Trailing(bytes.len() - r.pos));
@@ -180,9 +192,12 @@ mod tests {
         let w = decode(WORLD).expect("world.bin decodes");
         assert_eq!(w.rings.len(), 1016);
         assert_eq!(w.lines.len(), 393);
-        assert_eq!(w.cities.len(), 1251);
+        assert_eq!(w.cities.len(), 7342);
         assert!(w.cities.windows(2).all(|p| p[0].tier <= p[1].tier));
-        assert!(w.cities.iter().any(|c| c.name == "São Paulo" || c.name == "Sao Paulo"));
+        assert!(w
+            .cities
+            .iter()
+            .any(|c| c.name == "São Paulo" || c.name == "Sao Paulo"));
         for r in &w.rings {
             assert!(r.bbox[0] <= r.bbox[2] && r.bbox[1] <= r.bbox[3]);
         }
@@ -213,7 +228,10 @@ mod tests {
 
     #[test]
     fn rejects_bad_input() {
-        assert_eq!(decode(b"XXXX\x01\x00\x00\x00\x00\x00\x00\x00"), Err(AssetError::BadMagic));
+        assert_eq!(
+            decode(b"XXXX\x01\x00\x00\x00\x00\x00\x00\x00"),
+            Err(AssetError::BadMagic)
+        );
         let mut v2 = header(0);
         v2[4] = 2;
         assert_eq!(decode(&v2), Err(AssetError::BadVersion(2)));

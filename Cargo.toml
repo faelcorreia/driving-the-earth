@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tileformat", "crates/tilebake", "crates/worldmap", "crates/gdext"]
+members = ["crates/tileformat", "crates/overpass", "crates/tilebake", "crates/worldmap", "crates/gdext"]
 
 [workspace.package]
 edition = "2021"
