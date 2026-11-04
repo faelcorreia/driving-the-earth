@@ -4,6 +4,7 @@
 //! uma cena: erro do sol de ~0,01 grau e da lua de ~0,3 grau.
 
 use std::f64::consts::{PI, TAU};
+use std::sync::Mutex;
 
 /// Fuso de Belo Horizonte, UTC-3 (sem horário de verão desde 2019), em segundos.
 pub const LOCAL_UTC_OFFSET_S: f64 = -3.0 * 3600.0;
@@ -17,6 +18,18 @@ pub const SUN_FULL_DEG: f64 = 6.0;
 pub const MOON_MAX_LIGHT: f64 = 0.08;
 /// Altura da lua em que a contribuição lunar é plena, graus.
 pub const MOON_FULL_ALT_DEG: f64 = 20.0;
+
+/// Home of the sky until the player saves one: Praça Sete, Belo Horizonte (public, generic).
+const DEFAULT_HOME_DEG: (f64, f64) = (-19.9191, -43.9386);
+/// Home (lat, lon) in degrees that the sun and moon are computed for. Set from the saved home.
+static SKY_HOME: Mutex<(f64, f64)> = Mutex::new(DEFAULT_HOME_DEG);
+
+/// Sets the home of the sky (sun and moon), in degrees.
+pub fn set_home(lat_deg: f64, lon_deg: f64) {
+    if let Ok(mut home) = SKY_HOME.lock() {
+        *home = (lat_deg, lon_deg);
+    }
+}
 
 const SECONDS_PER_DAY: f64 = 86400.0;
 /// Dia Juliano do instante Unix 0.
@@ -114,10 +127,10 @@ fn sun_ecliptic_lon_rad(jd: f64) -> f64 {
 
 /// Converte ascensão reta e declinação (radianos) em azimute/altura para a posição de casa.
 fn horizontal(jd: f64, ra_rad: f64, dec_rad: f64) -> Horizontal {
-    let home = tilebake::home::home();
-    let lat = home.lat_deg.to_radians();
+    let (home_lat, home_lon) = SKY_HOME.lock().map(|h| *h).unwrap_or(DEFAULT_HOME_DEG);
+    let lat = home_lat.to_radians();
     let gmst_deg = (280.46061837 + 360.98564736629 * (jd - JD_J2000)).rem_euclid(360.0);
-    let ha = (gmst_deg + home.lon_deg - ra_rad.to_degrees()).to_radians();
+    let ha = (gmst_deg + home_lon - ra_rad.to_degrees()).to_radians();
     let sin_alt = lat.sin() * dec_rad.sin() + lat.cos() * dec_rad.cos() * ha.cos();
     // Azimute medido a partir do sul, para oeste; convertido para norte, sentido horário.
     let az_from_south = ha

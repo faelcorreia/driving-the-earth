@@ -23,11 +23,12 @@ use godot::prelude::*;
 use tilebake::dem::MapGrid;
 
 use super::world_map_detail::{Loader, RETRY_AFTER};
+use crate::home_store::{load as load_home, save as save_home};
 use crate::ui_text::{language, text, Lang};
 use worldmap::asset::{decode, WorldData};
 use worldmap::cities::{label_width_px, place, reserve, Placed};
 use worldmap::cull::{bbox_of, boxes_overlap, chunk_ranges};
-use worldmap::home::{home_json, parse_home, Home};
+use worldmap::home::Home;
 use worldmap::labels::zoom_step;
 use worldmap::ribbon::{local_width, Ribbon};
 use worldmap::road_labels;
@@ -39,7 +40,6 @@ use worldmap::triangulate::ear_clip;
 use worldmap::view::{zoom_steps_for_m_per_px, View, MAX_ZOOM_STEPS};
 
 const MAP_PATH: &str = "res://assets/worldmap/world.bin";
-const HOME_PATH: &str = "user://home.json";
 /// Zoom when the map opens on the car, in meters per pixel.
 const OPEN_M_PER_PX: f64 = 2.0;
 /// Zoom factors of one wheel notch.
@@ -432,6 +432,12 @@ impl WorldMapView {
     }
 
     /// Opens or closes the map. Opening pauses the game, frees the mouse and centers on the car.
+    /// Opens the map at start with a message (the game has no home or the home is not loaded).
+    pub(crate) fn open_automatically(&mut self, key: &str) {
+        self.status = self.t(key);
+        self.set_open(true);
+    }
+
     fn set_open(&mut self, open: bool) {
         if open == self.open {
             return;
@@ -622,6 +628,7 @@ impl WorldMapView {
             self.redraw();
             return;
         }
+        crate::environment::sky::set_home(home.lat, home.lon);
         let saved = self.fmt("home.saved", home);
         match self.move_car(home) {
             // No car (the map alone): only the save.
@@ -806,23 +813,6 @@ fn cache_dir() -> PathBuf {
             .globalize_path("user://worldmap_cache")
             .to_string(),
     )
-}
-
-fn load_home() -> Option<Home> {
-    if !FileAccess::file_exists(HOME_PATH) {
-        return None;
-    }
-    let file = FileAccess::open(HOME_PATH, ModeFlags::READ)?;
-    parse_home(&file.get_as_text().to_string()).ok()
-}
-
-fn save_home(home: Home) -> Result<(), ()> {
-    let mut file = FileAccess::open(HOME_PATH, ModeFlags::WRITE).ok_or(())?;
-    if file.store_string(&home_json(home)) {
-        Ok(())
-    } else {
-        Err(())
-    }
 }
 
 /// A ring whose box is under 3 pixels on screen is not drawn (it is invisible, and the fill rejects some).

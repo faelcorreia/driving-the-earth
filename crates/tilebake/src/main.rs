@@ -34,7 +34,7 @@ fn main() {
         Ok(e) if !e.trim().is_empty() => e,
         _ => {
             eprintln!(
-                "Set TILEBAKE_ADDRESS to the start address (or use DTE_HOME / home.local.json)."
+                "Set TILEBAKE_ADDRESS to the start address, or bake by coordinates with `tilebake at <lat> <lon> [id]`."
             );
             std::process::exit(2);
         }

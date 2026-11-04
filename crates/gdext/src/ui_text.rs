@@ -108,6 +108,26 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Este lugar ainda não tem mapa, então o carro não saiu do lugar.",
     ),
     (
+        "home.none_start",
+        "No home saved yet: choose one on the map (M).",
+        "Nenhuma casa salva ainda: escolha uma no mapa (M).",
+    ),
+    (
+        "home.outside_saved",
+        "Your saved home is outside the loaded map: choose a place (M).",
+        "Sua casa salva está fora do mapa carregado: escolha um lugar (M).",
+    ),
+    (
+        "home.no_road_start",
+        "No road near your saved home: choose a place (M).",
+        "Nenhuma via perto da sua casa salva: escolha um lugar (M).",
+    ),
+    (
+        "home.no_map",
+        "No map data for the game yet: choose a place on the map (M).",
+        "Ainda não há dados de mapa para o jogo: escolha um lugar no mapa (M).",
+    ),
+    (
         "home.map_missing",
         "World map data is missing",
         "Dados do mapa-múndi não encontrados",

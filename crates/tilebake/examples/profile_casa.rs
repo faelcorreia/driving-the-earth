@@ -1,13 +1,12 @@
 //! F12 validation: height profile along the street of the home (`cache/casa`), read from the baked
 //! tiles, against an independent reference: the raw contour segments crossed by the street polyline.
 //! The street comes from the OSM cache (`cache/casa/raw/overpass.json`), not from code.
-//! The name is the first argument, or the `street` field of `home.local.json`.
-//! Run: `cargo run --release -p tilebake --example profile_casa [street name]`.
+//! The street name is the first argument (required).
+//! Run: `cargo run --release -p tilebake --example profile_casa -- <street name>`.
 use std::fs;
 use std::path::Path;
 
 use tilebake::dem::MapGrid;
-use tilebake::home::home;
 use tilebake::shp::read_contours;
 use tilebake::utm::{inverse, utm23s, UTM23S_LON0};
 use tileformat::{read_tile, tile_path, MapMeta, Tile};
@@ -50,8 +49,7 @@ fn main() {
     let (home_lat, home_lon) = (meta.center_lat, meta.center_lon);
     let street = std::env::args()
         .nth(1)
-        .or_else(|| home().street.clone())
-        .expect("street: pass the name as argument or set \"street\" in home.local.json");
+        .expect("street: pass the street name as the first argument");
 
     // Street polyline (UTM), nearest way with that name to the home.
     let overpass: serde_json::Value = serde_json::from_str(
