@@ -791,3 +791,246 @@ fn ribbon_mesh_matches_profile_on_axis_and_edges_within_2cm() {
         "worst deviation {worst:.4} m > 0.02 m over {checked} points"
     );
 }
+
+/// Percentile `p` (0..1) by nearest rank; 0 for an empty slice. Sorts `v`.
+fn ribbon_percentile(v: &mut [f64], p: f64) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[((v.len() - 1) as f64 * p).round() as usize]
+}
+
+/// Population standard deviation; 0 for an empty slice.
+fn ribbon_std(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let m = v.iter().sum::<f64>() / v.len() as f64;
+    (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
+}
+
+/// Ribbon metrics on the real baked map (measurement only, not a pass/fail test). Takes the
+/// centerline vertices of every road ribbon (`MEASURE_MAP`, default `casa`), resampled every
+/// 2.5 m, within 500 m of home (the map origin), and prints pitch, steps, lumps, the axis above
+/// the terrain and the 15 worst steps.
+/// Run: `cargo test --release -p driving_the_earth_ext ribbon_metrics -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn ribbon_metrics() {
+    const STEP_M: f64 = 2.5;
+    const HOME_RADIUS_M: f64 = 500.0;
+    const LUMP_HALF_WINDOW: usize = 8; // 8 samples = 20 m each side
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../cache"));
+    let id = std::env::var("MEASURE_MAP").unwrap_or_else(|_| "casa".into());
+    let index = crate::world::open_map(root, &id).expect("open map");
+    let tm = index.meta.tile_size_m;
+
+    // Pass 1: raw centerline runs per tile, and each tile's terrain vertices (row-major n x n).
+    let mut raw_runs: Vec<((i32, i32), Vec<([f64; 2], f64)>)> = Vec::new();
+    let mut terrain: std::collections::HashMap<(i32, i32), Vec<[f32; 3]>> =
+        std::collections::HashMap::new();
+    for &(x, y) in index.coords() {
+        let g = index.tile_geometry(x, y).expect("tile_geometry");
+        let v = &g.roads.vertices;
+        let mut run: Vec<([f64; 2], f64)> = Vec::new();
+        for s in 0..v.len() / 3 {
+            // Center vertex of station s; map y is -z in Godot space.
+            let c = v[3 * s + 1];
+            let p = [c[0] as f64, -(c[2] as f64)];
+            if let Some(last) = run.last() {
+                if (p[0] - last.0[0]).hypot(p[1] - last.0[1]) > 2.6 {
+                    raw_runs.push(((x, y), std::mem::take(&mut run)));
+                }
+            }
+            run.push((p, c[1] as f64));
+        }
+        if !run.is_empty() {
+            raw_runs.push(((x, y), run));
+        }
+        terrain.insert((x, y), g.terrain.vertices);
+    }
+
+    // Terrain height under a map point, from the rendered triangles of its tile (same split as
+    // the mesh: (a, b, c) for u + w <= 1, else (b, c, d)).
+    let terrain_at = |p: [f64; 2]| -> Option<f64> {
+        let key = ((p[0] / tm).floor() as i32, (p[1] / tm).floor() as i32);
+        let verts = terrain.get(&key)?;
+        let n = (verts.len() as f64).sqrt().round() as usize;
+        let cell = tm / (n - 1) as f64;
+        let fx = ((p[0] - key.0 as f64 * tm) / cell).clamp(0.0, (n - 1) as f64 - 1e-9);
+        let fy = ((p[1] - key.1 as f64 * tm) / cell).clamp(0.0, (n - 1) as f64 - 1e-9);
+        let (j, i) = (fx.floor() as usize, fy.floor() as usize);
+        let (u, w) = (fx - j as f64, fy - i as f64);
+        let h = |r: usize, c: usize| verts[r * n + c][1] as f64;
+        let (a, b, c, d) = (h(i, j), h(i, j + 1), h(i + 1, j), h(i + 1, j + 1));
+        Some(if u + w <= 1.0 {
+            a * (1.0 - u - w) + b * u + c * w
+        } else {
+            d * (u + w - 1.0) + b * (1.0 - w) + c * (1.0 - u)
+        })
+    };
+
+    // Pass 2: resample every run every 2.5 m, keeping the tile it came from.
+    let mut samples: Vec<((i32, i32), Vec<([f64; 2], f64)>)> = Vec::new();
+    for (key, run) in &raw_runs {
+        if run.len() < 2 {
+            continue;
+        }
+        let mut out = Vec::new();
+        let (mut s_acc, mut next) = (0.0f64, 0.0f64);
+        for k in 0..run.len() - 1 {
+            let (a, b) = (run[k], run[k + 1]);
+            let len = (b.0[0] - a.0[0]).hypot(b.0[1] - a.0[1]);
+            while next <= s_acc + len + 1e-9 {
+                let t = if len > 0.0 { (next - s_acc) / len } else { 0.0 };
+                out.push((
+                    [
+                        a.0[0] + (b.0[0] - a.0[0]) * t,
+                        a.0[1] + (b.0[1] - a.0[1]) * t,
+                    ],
+                    a.1 + (b.1 - a.1) * t,
+                ));
+                next += STEP_M;
+            }
+            s_acc += len;
+        }
+        samples.push((*key, out));
+    }
+
+    let near = |p: [f64; 2]| p[0].hypot(p[1]) <= HOME_RADIUS_M;
+    let heading = |p: [f64; 2], q: [f64; 2]| (q[1] - p[1]).atan2(q[0] - p[0]);
+    // Heading change in degrees over `k` samples on each side of `i`.
+    let turn = |ps: &[([f64; 2], f64)], i: usize, k: usize| -> f64 {
+        let d = (heading(ps[i - k].0, ps[i].0) - heading(ps[i].0, ps[i + k].0)).abs();
+        d.min(2.0 * std::f64::consts::PI - d).to_degrees()
+    };
+
+    let (mut pitch_straight, mut pitch_curve): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
+    let (mut lump_straight, mut lump_curve): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
+    // Every near step: (second difference in m, position, tile key).
+    let mut steps: Vec<(f64, [f64; 2], (i32, i32))> = Vec::new();
+    let mut axis_above_terrain = (f64::NEG_INFINITY, [0.0f64; 2]);
+    let mut axis_no_terrain = 0usize;
+    for (key, ps) in &samples {
+        let n = ps.len();
+        if n < 12 {
+            continue;
+        }
+        // Slope angle of segment j, in degrees.
+        let slope = |j: usize| {
+            let d = (ps[j + 1].0[0] - ps[j].0[0]).hypot(ps[j + 1].0[1] - ps[j].0[1]);
+            ((ps[j + 1].1 - ps[j].1) / d).atan().to_degrees()
+        };
+        for i in 4..n - 4 {
+            if !near(ps[i].0) {
+                continue;
+            }
+            // Pitch: change of slope between consecutive segments.
+            let pitch = (slope(i) - slope(i - 1)).abs();
+            // Step: second difference of height across the station.
+            let step = (ps[i + 1].1 - 2.0 * ps[i].1 + ps[i - 1].1).abs();
+            steps.push((step, ps[i].0, *key));
+            match terrain_at(ps[i].0) {
+                Some(t) => {
+                    let above = ps[i].1 - t;
+                    if above > axis_above_terrain.0 {
+                        axis_above_terrain = (above, ps[i].0);
+                    }
+                }
+                None => axis_no_terrain += 1,
+            }
+            if turn(ps, i, 4) > 10.0 {
+                pitch_curve.push(pitch);
+            } else {
+                pitch_straight.push(pitch);
+            }
+        }
+        for i in LUMP_HALF_WINDOW + 2..n - LUMP_HALF_WINDOW - 2 {
+            if !near(ps[i].0) {
+                continue;
+            }
+            let window = &ps[i - LUMP_HALF_WINDOW..=i + LUMP_HALF_WINDOW];
+            let mean = window.iter().map(|r| r.1).sum::<f64>() / window.len() as f64;
+            // Lump: height above the 40 m moving mean, in mm.
+            let lump = (ps[i].1 - mean) * 1000.0;
+            let t = turn(ps, i, 4);
+            if t < 5.0 {
+                lump_straight.push(lump);
+            } else if t > 10.0 {
+                lump_curve.push(lump);
+            }
+        }
+    }
+
+    let max = |v: &[f64]| v.iter().cloned().fold(0.0, f64::max);
+    let steps_over_5cm = steps.iter().filter(|s| s.0 > 0.05).count();
+    let step_max = steps.iter().map(|s| s.0).fold(0.0, f64::max);
+    println!(
+        "ribbon {id}: {} runs, {} steps within {HOME_RADIUS_M} m of home",
+        samples.len(),
+        steps.len()
+    );
+    println!(
+        "pitch straight: max {:.2} deg, p95 {:.2} deg ({} steps)",
+        max(&pitch_straight),
+        ribbon_percentile(&mut pitch_straight.clone(), 0.95),
+        pitch_straight.len()
+    );
+    println!(
+        "pitch curve: max {:.2} deg, p95 {:.2} deg ({} steps)",
+        max(&pitch_curve),
+        ribbon_percentile(&mut pitch_curve.clone(), 0.95),
+        pitch_curve.len()
+    );
+    println!(
+        "step (2nd difference): max {:.2} cm, p99 {:.2} cm, steps > 5 cm {} of {}",
+        step_max * 100.0,
+        ribbon_percentile(&mut steps.iter().map(|s| s.0).collect::<Vec<_>>(), 0.99) * 100.0,
+        steps_over_5cm,
+        steps.len()
+    );
+    println!(
+        "lumps: straight std {:.1} mm ({} samples), curve std {:.1} mm ({} samples)",
+        ribbon_std(&lump_straight),
+        lump_straight.len(),
+        ribbon_std(&lump_curve),
+        lump_curve.len()
+    );
+    println!(
+        "axis above terrain: max {:.3} m at ({:.1}, {:.1}), {} samples without terrain",
+        axis_above_terrain.0, axis_above_terrain.1[0], axis_above_terrain.1[1], axis_no_terrain
+    );
+
+    steps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    println!("15 worst steps:");
+    for (rank, (step, at, key)) in steps.iter().take(15).enumerate() {
+        // The OSM way: the nearest road polyline of the tile the step belongs to.
+        let tile = index.read_tile_at(key.0, key.1).expect("read tile");
+        let mut way = (f64::INFINITY, String::from("?"));
+        for road in &tile.roads {
+            for seg in road.points.windows(2) {
+                let (a, b) = (seg[0], seg[1]);
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len2 = dx * dx + dy * dy;
+                let t = if len2 > 0.0 {
+                    (((at[0] - a[0]) * dx + (at[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let d = (at[0] - (a[0] + dx * t)).hypot(at[1] - (a[1] + dy * t));
+                if d < way.0 {
+                    way = (d, format!("{} '{}'", road.highway, road.name));
+                }
+            }
+        }
+        println!(
+            "  {:2}. {:7.2} cm at ({:.1}, {:.1}) way {}",
+            rank + 1,
+            step * 100.0,
+            at[0],
+            at[1],
+            way.1
+        );
+    }
+}

@@ -17,6 +17,9 @@ use tileformat::units::profile::{CURVE_STEP_M, MIN_RAMP_M, NOISE_TOL_M};
 /// Smallest change of grade (percent) that makes a corner; smaller changes are merged away.
 const CURVE_MIN_CHANGE_PCT: f64 = 0.2;
 
+/// Largest vertical distance (m) between a merged ramp and any sample it covers.
+const MERGE_MAX_DEV_M: f64 = 0.3;
+
 /// Class of a road, from its OSM `highway` value. Decides the design speed and the grade ceiling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RoadClass {
@@ -124,7 +127,7 @@ pub(crate) fn smooth_profile(
     }
     v.push(n - 1);
 
-    merge_short_and_flat(&s, &mut v, &mut raw, &slope);
+    merge_short_and_flat(&s, &zf, &mut v, &mut raw, &slope);
 
     // Half-length of the curve at each vertex (0 at the ends and at corners that cannot take a curve).
     let (convex, concave) = k_for_speed(class.speed_kmh());
@@ -219,8 +222,10 @@ fn simplify(s: &[f64], z: &[f64], tol: f64) -> Vec<usize> {
 /// Drops interior vertices between two smooth pieces when one of them is shorter than
 /// `MIN_RAMP_M` or when the grade does not change: the pieces join into one ramp. Pieces marked
 /// `raw` (real steep grade) are never joined. `raw[k]` is the flag of the piece that starts at `v[k]`.
+/// A join only happens when the resulting chord stays within `MERGE_MAX_DEV_M` of every sample it covers.
 fn merge_short_and_flat(
     s: &[f64],
+    z: &[f64],
     v: &mut Vec<usize>,
     raw: &mut Vec<bool>,
     slope: &dyn Fn(usize, usize) -> f64,
@@ -233,9 +238,10 @@ fn merge_short_and_flat(
                 let la = s[v[k]] - s[v[k - 1]];
                 let lb = s[v[k + 1]] - s[v[k]];
                 let (ga, gb) = (slope(v[k - 1], v[k]), slope(v[k], v[k + 1]));
-                if la < MIN_RAMP_M
+                if (la < MIN_RAMP_M
                     || lb < MIN_RAMP_M
-                    || (gb - ga).abs() * 100.0 < CURVE_MIN_CHANGE_PCT
+                    || (gb - ga).abs() * 100.0 < CURVE_MIN_CHANGE_PCT)
+                    && chord_within(s, z, v[k - 1], v[k + 1], MERGE_MAX_DEV_M)
                 {
                     v.remove(k);
                     raw.remove(k);
@@ -249,6 +255,15 @@ fn merge_short_and_flat(
             break;
         }
     }
+}
+
+/// True when the straight chord from sample `a` to sample `b` lies within `tol` (vertical) of
+/// every sample from `a` to `b`.
+fn chord_within(s: &[f64], z: &[f64], a: usize, b: usize, tol: f64) -> bool {
+    (a + 1..b).all(|i| {
+        let t = (s[i] - s[a]) / (s[b] - s[a]);
+        (z[i] - (z[a] + (z[b] - z[a]) * t)).abs() <= tol
+    })
 }
 
 /// The pieces of the design: a straight ramp between consecutive vertices, trimmed by the curve
@@ -385,6 +400,26 @@ mod tests {
             (at_station(&pts, &out, 20.0) - 1.0).abs() < 0.01,
             "ramp kept before the curve"
         );
+    }
+
+    #[test]
+    fn concave_profile_stays_within_0_3_m_of_the_samples() {
+        // Flat for 75 m, then steeper and steeper for 75 m (a sag): the smoothed profile must not
+        // stray more than 0.3 m from the samples it replaces.
+        let (pts, z) = line(0.0, 150.0, 2.5, 0.0, |x| {
+            if x <= 75.0 {
+                0.0
+            } else {
+                0.002 * (x - 75.0) * (x - 75.0)
+            }
+        });
+        let (out, _, _) = smooth_profile(&pts, &z, &[], &[], "residential");
+        let worst = z
+            .iter()
+            .zip(&out)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst <= 0.3, "profile strays {worst} m from the samples");
     }
 
     #[test]
