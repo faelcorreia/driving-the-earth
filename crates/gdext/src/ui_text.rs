@@ -30,21 +30,10 @@ pub fn text(key: &str, lang: Lang) -> &str {
 
 /// Every key with its English and pt-BR text.
 const TABLE: &[(&str, &str, &str)] = &[
-    ("map.loading", "Loading map...", "Carregando mapa..."),
     (
-        "map.hint",
-        "M close  |  wheel: zoom  |  drag: move",
-        "M fecha  |  roda: zoom  |  arrastar: mover",
-    ),
-    (
-        "map.attribution",
-        "Map data © OpenStreetMap contributors",
-        "Dados do mapa © colaboradores do OpenStreetMap",
-    ),
-    (
-        "map.no_roads",
-        "No roads in this map",
-        "Nenhuma via neste mapa",
+        "worldmap.hint",
+        "M or Esc closes  |  wheel: zoom  |  drag: move  |  click: place home  |  Confirm saves",
+        "M ou Esc fecha  |  roda: zoom  |  arrastar: mover  |  clique: marcar casa  |  Confirmar salva",
     ),
     ("time.title", "Game time", "Hora do jogo"),
     (

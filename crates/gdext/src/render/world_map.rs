@@ -1,8 +1,10 @@
-//! World map for choosing the home place (F17b), scene `godot/home_picker.tscn`. A full-screen
+//! World map (F17b, F17c), scene `godot/home_picker.tscn` and the M map in the game. A full-screen
 //! control: the mouse wheel zooms, dragging moves, a click sets the marker, and Confirm saves it
-//! to `user://home.json`. The data is the embedded world asset (`res://assets/worldmap/world.bin`),
-//! read once; only the pieces on screen are drawn, and coastline points closer than a pixel are
-//! dropped. The logic is in the `worldmap` crate. Not connected to the bake yet (F17c).
+//! to `user://home.json`. In the game it starts hidden: M opens it (the game pauses, the mouse is
+//! free, the view centers on the car at about 2 m per pixel), and M or Esc closes it. The data is
+//! the embedded world asset (`res://assets/worldmap/world.bin`), read once; only the pieces on
+//! screen are drawn, and coastline points closer than a pixel are dropped. The logic is in the
+//! `worldmap` crate.
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,13 +12,15 @@ use std::time::{Duration, Instant};
 
 use godot::classes::control::{LayoutPreset, MouseFilter};
 use godot::classes::file_access::ModeFlags;
+use godot::classes::input::MouseMode;
 use godot::classes::node::ProcessMode;
 use godot::classes::{
-    Button, Control, FileAccess, IControl, InputEvent, InputEventMouseButton,
-    InputEventMouseMotion, Os, ProjectSettings, RenderingServer, ThemeDb,
+    Button, Control, FileAccess, IControl, Input, InputEvent, InputEventMouseButton,
+    InputEventMouseMotion, Node3D, Os, ProjectSettings, RenderingServer, ThemeDb,
 };
 use godot::global::{HorizontalAlignment, MouseButton};
 use godot::prelude::*;
+use tilebake::dem::MapGrid;
 
 use super::world_map_detail::{Loader, RETRY_AFTER};
 use crate::ui_text::{language, text, Lang};
@@ -32,10 +36,12 @@ use worldmap::tiles::{
     MINOR_MIN_STEPS,
 };
 use worldmap::triangulate::ear_clip;
-use worldmap::view::{View, MAX_ZOOM_STEPS};
+use worldmap::view::{zoom_steps_for_m_per_px, View, MAX_ZOOM_STEPS};
 
 const MAP_PATH: &str = "res://assets/worldmap/world.bin";
 const HOME_PATH: &str = "user://home.json";
+/// Zoom when the map opens on the car, in meters per pixel.
+const OPEN_M_PER_PX: f64 = 2.0;
 /// Zoom factors of one wheel notch.
 const ZOOM_IN: f64 = 1.25;
 const ZOOM_OUT: f64 = 0.8;
@@ -63,6 +69,7 @@ const CITY: Color = Color::from_rgb(0.15, 0.15, 0.15);
 const LABEL: Color = Color::from_rgb(0.12, 0.12, 0.12);
 const LABEL_OUTLINE: Color = Color::from_rgb(0.97, 0.97, 0.95);
 const MARKER: Color = Color::from_rgb(0.85, 0.12, 0.12);
+const CAR: Color = Color::from_rgb(0.85, 0.12, 0.12);
 const HUD: Color = Color::from_rgb(0.10, 0.10, 0.10);
 
 /// Dot radius by city tier (0 the largest).
@@ -202,6 +209,16 @@ pub struct WorldMapView {
     /// Tiles drawn for the current view.
     shown: Vec<TileId>,
     bench: Option<Bench>,
+    /// The car and the node whose frame is the map's (the earth world), set by `start` in the game.
+    car: Option<Gd<Node3D>>,
+    origin: Option<Gd<Node3D>>,
+    grid: Option<MapGrid>,
+    /// The map is open (M). Only then is it shown, processed and the game paused.
+    open: bool,
+    /// Mouse mode before the map opened, restored when it closes.
+    mouse_before: Option<MouseMode>,
+    /// Center on the car at the next frame with a view (set on open).
+    focus_pending: bool,
 }
 
 #[godot_api]
@@ -229,16 +246,24 @@ impl IControl for WorldMapView {
             roads: HashMap::new(),
             shown: Vec::new(),
             bench: None,
+            car: None,
+            origin: None,
+            grid: None,
+            open: false,
+            mouse_before: None,
+            focus_pending: false,
         }
     }
 
     fn ready(&mut self) {
-        // Input and drawing must run while the tree is paused (the picker pauses the game).
+        // Input and drawing must run while the tree is paused (M pauses the game).
         self.base_mut().set_process_mode(ProcessMode::ALWAYS);
         self.base_mut()
             .set_anchors_and_offsets_preset(LayoutPreset::FULL_RECT);
         self.base_mut().set_mouse_filter(MouseFilter::STOP);
-        self.base_mut().set_process(true);
+        // Hidden and idle until M opens it.
+        self.base_mut().set_visible(false);
+        self.base_mut().set_process(false);
         if std::env::var_os(BENCH_ENV).is_some() {
             self.bench = Some(Bench {
                 started: Some(Instant::now()),
@@ -292,6 +317,9 @@ impl IControl for WorldMapView {
     fn process(&mut self, _delta: f64) {
         self.bench_step();
         self.pump_detail();
+        if self.focus_pending {
+            self.focus_car();
+        }
         let size = self.base().get_size();
         if size.x <= 0.0 || size.y <= 0.0 || size == self.last_size {
             return;
@@ -317,6 +345,18 @@ impl IControl for WorldMapView {
             button.set_position(Vector2::new(size.x - 176.0, size.y - 56.0));
         }
         self.redraw();
+    }
+
+    fn unhandled_input(&mut self, event: Gd<InputEvent>) {
+        if event.is_action_pressed("map_toggle") {
+            self.set_open(!self.open);
+        } else if self.open && event.is_action_pressed("ui_cancel") {
+            self.set_open(false);
+            // The car's own Esc (mouse mode) must not also run.
+            if let Some(mut viewport) = self.base().get_viewport() {
+                viewport.set_input_as_handled();
+            }
+        }
     }
 
     fn gui_input(&mut self, event: Gd<InputEvent>) {
@@ -383,6 +423,69 @@ impl IControl for WorldMapView {
 }
 
 impl WorldMapView {
+    /// Hands the map the car, the node whose frame is the map's, and the grid from that frame to
+    /// lat/lon. Call before the node enters the tree (the game's M map).
+    pub(crate) fn start(&mut self, car: Gd<Node3D>, origin: Gd<Node3D>, grid: MapGrid) {
+        self.car = Some(car);
+        self.origin = Some(origin);
+        self.grid = Some(grid);
+    }
+
+    /// Opens or closes the map. Opening pauses the game, frees the mouse and centers on the car.
+    fn set_open(&mut self, open: bool) {
+        if open == self.open {
+            return;
+        }
+        self.open = open;
+        self.press = None;
+        self.dragging = false;
+        self.base_mut().set_visible(open);
+        self.base_mut().set_process(open);
+        let mut tree = self.base().get_tree();
+        tree.set_pause(open);
+        let mut input = Input::singleton();
+        if open {
+            self.mouse_before = Some(input.get_mouse_mode());
+            input.set_mouse_mode(MouseMode::VISIBLE);
+            self.focus_pending = true;
+            self.focus_car();
+        } else if let Some(mode) = self.mouse_before.take() {
+            input.set_mouse_mode(mode);
+        }
+        self.redraw();
+    }
+
+    /// Centers the view on the car at `OPEN_M_PER_PX`. Waits for the view when it does not exist
+    /// yet (its size comes with the first frame).
+    fn focus_car(&mut self) {
+        let fix = self.car_fix();
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        self.focus_pending = false;
+        if let Some((lat, lon, _)) = fix {
+            let steps = zoom_steps_for_m_per_px(lat, OPEN_M_PER_PX, view.min_scale());
+            view.center_on(lat, lon, steps);
+        }
+        self.redraw();
+    }
+
+    /// The car's place (lat, lon) and its heading (unit vector, east and north), if the car is set.
+    fn car_fix(&self) -> Option<(f64, f64, [f64; 2])> {
+        let car = self.car.as_ref()?;
+        let origin = self.origin.as_ref()?;
+        let grid = self.grid?;
+        let local = origin.to_local(car.get_global_position());
+        let (lat, lon) = grid.latlon(local.x as f64, -local.z as f64);
+        // The car drives along its -Z axis; in the map (x east, y north = -z) that is (-z.x, z.z),
+        // where z is the car's own +Z axis (the basis column).
+        let basis = origin.get_global_basis().inverse() * car.get_global_basis();
+        let z = basis.col_c();
+        let (hx, hy) = (-(z.x as f64), z.z as f64);
+        let n = hx.hypot(hy).max(1e-9);
+        Some((lat, lon, [hx / n, hy / n]))
+    }
+
     /// Benchmark: waits until every covering tile is loaded (or the wait times out), then warms up,
     /// pans slowly, and when done prints the draw times and quits.
     fn bench_step(&mut self) {
@@ -497,6 +600,10 @@ impl WorldMapView {
             ctrl.draw_circle(pos, 7.0, MARKER);
             ctrl.draw_circle(pos, 2.5, Color::from_rgb(1.0, 1.0, 1.0));
         }
+        if let Some((lat, lon, heading)) = self.car_fix() {
+            let (x, y) = view.screen_of(lat, lon);
+            draw_car(ctrl, [x, y], heading);
+        }
         labels
     }
 }
@@ -531,7 +638,12 @@ impl WorldMapView {
         let show_detail = self.view.is_some_and(|v| zoom_for_view(&v).is_some());
         let offline_msg = (self.offline && show_detail).then(|| self.t("home.detail_offline"));
         let status = self.status.clone();
-        let hint = self.t("home.hint");
+        // In the game (the car is set) the hint says how to close the map.
+        let hint = self.t(if self.car.is_some() {
+            "worldmap.hint"
+        } else {
+            "home.hint"
+        });
         let attribution = self.t("home.attribution");
         overlay
             .draw_string_ex(
@@ -929,6 +1041,21 @@ fn sync_roads(
 }
 
 /// Average, 95th percentile and maximum of times in milliseconds.
+/// The car as an arrow at screen point `c`, pointing along `heading` (east, north; north is up).
+fn draw_car(ctrl: &mut Gd<Control>, c: [f64; 2], heading: [f64; 2]) {
+    // Screen direction: x as is, y flipped.
+    let d = (heading[0], -heading[1]);
+    let p = (-d.1, d.0);
+    let at = |f: f64, s: f64| {
+        Vector2::new(
+            (c[0] + d.0 * f + p.0 * s) as f32,
+            (c[1] + d.1 * f + p.1 * s) as f32,
+        )
+    };
+    let points = PackedVector2Array::from([at(14.0, 0.0), at(-8.0, 8.0), at(-8.0, -8.0)]);
+    ctrl.draw_colored_polygon(&points, CAR);
+}
+
 fn stats(times: &[f64]) -> (f64, f64, f64) {
     let mut t = times.to_vec();
     let n = t.len().max(1) as f64;

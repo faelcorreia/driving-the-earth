@@ -23,13 +23,14 @@ use crate::geometry::lamps::LampPost;
 use crate::geometry::{TileGeometry, GRASS_RGB};
 use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
-use crate::render::map2d::MapView;
+use crate::render::world_map::WorldMapView;
 use crate::render::{building_material, material, solid_body, spawn_car};
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::find_spawn;
 use crate::world::streaming::{is_stale, tiles_in_range};
 use crate::world::{open_map, MapIndex};
+use tilebake::dem::MapGrid;
 use tileformat::units::lamps::LAMP_REAL_REACH_M;
 
 /// Height of the car above the terrain when spawned, in meters.
@@ -460,17 +461,18 @@ impl EarthWorld {
         self.loaded.insert(t, node);
     }
 
-    /// The car in map coordinates `[x, y]` (x east, y north), if it exists.
-    /// Adds the 2D map (M) on its own canvas layer, reading the roads in the background.
+    /// Adds the world map (M) on its own canvas layer. It starts hidden; the car and the map's
+    /// frame give it the car's place in lat/lon.
     fn add_map_view(&mut self) {
         let (Some(index), Some(car)) = (self.index.clone(), self.car.clone()) else {
             return;
         };
         let origin = self.to_gd().upcast::<Node3D>();
+        let grid = MapGrid::from_meta(&index.meta);
         let mut layer = CanvasLayer::new_alloc();
         layer.set_layer(MAP_CANVAS_LAYER);
-        let mut map = MapView::new_alloc();
-        map.bind_mut().start(index, car, origin);
+        let mut map = WorldMapView::new_alloc();
+        map.bind_mut().start(car, origin, grid);
         layer.add_child(&map);
         self.base_mut().add_child(&layer);
     }
