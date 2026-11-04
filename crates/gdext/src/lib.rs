@@ -3,6 +3,7 @@ use godot::prelude::*;
 mod earth_world;
 mod environment;
 mod geometry;
+mod home_store;
 #[cfg(test)]
 mod measure;
 mod render;

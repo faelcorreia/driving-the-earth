@@ -30,21 +30,10 @@ pub fn text(key: &str, lang: Lang) -> &str {
 
 /// Every key with its English and pt-BR text.
 const TABLE: &[(&str, &str, &str)] = &[
-    ("map.loading", "Loading map...", "Carregando mapa..."),
     (
-        "map.hint",
-        "M close  |  wheel: zoom  |  drag: move",
-        "M fecha  |  roda: zoom  |  arrastar: mover",
-    ),
-    (
-        "map.attribution",
-        "Map data © OpenStreetMap contributors",
-        "Dados do mapa © colaboradores do OpenStreetMap",
-    ),
-    (
-        "map.no_roads",
-        "No roads in this map",
-        "Nenhuma via neste mapa",
+        "worldmap.hint",
+        "M or Esc closes  |  wheel: zoom  |  drag: move  |  click: place home  |  Confirm saves",
+        "M ou Esc fecha  |  roda: zoom  |  arrastar: mover  |  clique: marcar casa  |  Confirmar salva",
     ),
     ("time.title", "Game time", "Hora do jogo"),
     (
@@ -112,6 +101,31 @@ const TABLE: &[(&str, &str, &str)] = &[
         "home.save_error",
         "Could not save your home",
         "Não foi possível salvar sua casa",
+    ),
+    (
+        "home.outside_map",
+        "This place has no map yet, so the car did not move.",
+        "Este lugar ainda não tem mapa, então o carro não saiu do lugar.",
+    ),
+    (
+        "home.none_start",
+        "No home saved yet: choose one on the map (M).",
+        "Nenhuma casa salva ainda: escolha uma no mapa (M).",
+    ),
+    (
+        "home.outside_saved",
+        "Your saved home is outside the loaded map: choose a place (M).",
+        "Sua casa salva está fora do mapa carregado: escolha um lugar (M).",
+    ),
+    (
+        "home.no_road_start",
+        "No road near your saved home: choose a place (M).",
+        "Nenhuma via perto da sua casa salva: escolha um lugar (M).",
+    ),
+    (
+        "home.no_map",
+        "No map data for the game yet: choose a place on the map (M).",
+        "Ainda não há dados de mapa para o jogo: escolha um lugar no mapa (M).",
     ),
     (
         "home.map_missing",

@@ -150,9 +150,32 @@ impl View {
     }
 }
 
+/// Equator length in meters: the width of the world at `px_per_unit` pixels (Mercator).
+pub const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
+
+/// Zoom steps (doublings above the whole world, 0 to `MAX_ZOOM_STEPS`) at which one pixel is
+/// `m_per_px` meters at latitude `lat_deg`, for a view whose whole world is `min_scale` pixels.
+pub fn zoom_steps_for_m_per_px(lat_deg: f64, m_per_px: f64, min_scale: f64) -> f64 {
+    let px_per_unit = EARTH_CIRCUMFERENCE_M * lat_deg.to_radians().cos() / m_per_px;
+    (px_per_unit / min_scale).log2().clamp(0.0, MAX_ZOOM_STEPS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_steps_give_the_wanted_meters_per_pixel() {
+        let min = 1000.0;
+        for lat in [0.0, 45.0, -19.9] {
+            let steps = zoom_steps_for_m_per_px(lat, 2.0, min);
+            let px_per_unit = min * 2f64.powf(steps);
+            let m_per_px = EARTH_CIRCUMFERENCE_M * lat.to_radians().cos() / px_per_unit;
+            assert!((m_per_px - 2.0).abs() < 1e-9, "lat {lat}: {m_per_px}");
+        }
+        // Wider than the whole world is not reachable: the steps stop at 0.
+        assert_eq!(zoom_steps_for_m_per_px(0.0, 1e9, min), 0.0);
+    }
 
     #[test]
     fn starts_with_whole_world() {

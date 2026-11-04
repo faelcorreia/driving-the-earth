@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn default_home_tile_name() {
-        let n = tile_name(crate::home::DEFAULT_LAT_DEG, crate::home::DEFAULT_LON_DEG);
+        let n = tile_name(-19.9191, -43.9386);
         assert_eq!(n, "Copernicus_DSM_COG_10_S20_00_W044_00_DEM");
     }
 

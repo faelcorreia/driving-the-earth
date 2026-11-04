@@ -17,9 +17,10 @@ Status: early work in progress. Priorities: 1) performance, 2) realistic driving
 - `godot/`: Godot project (scenes, shaders, scripts).
 
 ## Running
-1. Pick a start point: set `DTE_HOME="lat,lon"` or create an untracked `home.local.json`
-   (`{"lat": -19.9191, "lon": -43.9386, "street": "optional"}`). Default: Praça Sete, Belo Horizonte.
-2. Bake tiles into `cache/` (not versioned) with `tilebake` (see `crates/tilebake/src/main.rs`).
+1. Pick your home on the world map: press M, click a place, Confirm. It is saved to the game's
+   preferences (`user://home.json`), the only source of the home. Without a saved home, or with one
+   outside the loaded map, the world map opens at start.
+2. Bake tiles into `cache/` (not versioned) with `tilebake` (`tilebake at <lat> <lon>`, see `crates/tilebake/src/main.rs`).
 3. Build the extension (`cargo build`) and open `godot/` in Godot 4.
 
 ## Release builds

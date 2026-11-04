@@ -4,13 +4,13 @@
 //! For each compass azimuth (0 = north, clockwise) from `AZ_FROM` to `AZ_TO`, the terrain is sampled
 //! every `STEP_D_M` up to `MAX_D_M` from the home. The eye is 1.5 m above the ground at home. The
 //! crest is the sample with the highest angular altitude seen from the eye; the peak is the highest
-//! terrain sample on the ray. Run: `cargo run --release -p tilebake --example horizon`.
+//! terrain sample on the ray. Run: `cargo run --release -p tilebake --example horizon -- <lat> <lon>`.
 use std::f64::consts::PI;
 use std::fs;
 use std::path::PathBuf;
 
+use std::sync::OnceLock;
 use tilebake::dem::{height_at_any, read_smoothed_dem, Raster};
-use tilebake::home::home;
 
 const EYE_M: f64 = 1.5;
 const MAX_D_M: f64 = 15_000.0;
@@ -67,7 +67,27 @@ fn hm(h: f64) -> String {
     format!("{:02}:{:02}", m / 60, m % 60)
 }
 
+/// Home (lat, lon) in degrees, from the command line: `horizon <lat> <lon>`.
+static HOME: OnceLock<(f64, f64)> = OnceLock::new();
+
+fn home_lat() -> f64 {
+    HOME.get().expect("home set in main").0
+}
+
+fn home_lon() -> f64 {
+    HOME.get().expect("home set in main").1
+}
+
 fn main() {
+    let parsed = (
+        std::env::args().nth(1).and_then(|s| s.parse::<f64>().ok()),
+        std::env::args().nth(2).and_then(|s| s.parse::<f64>().ok()),
+    );
+    let (Some(lat), Some(lon)) = parsed else {
+        eprintln!("usage: cargo run --release -p tilebake --example horizon -- <lat> <lon>");
+        std::process::exit(2);
+    };
+    HOME.set((lat, lon)).expect("set once");
     let dir: PathBuf = [
         env!("CARGO_MANIFEST_DIR"),
         "..",
@@ -91,13 +111,12 @@ fn main() {
         .collect();
     println!("DEM rasters: {}", rasters.len());
 
-    let ground =
-        height_at_any(&rasters, home().lat_deg, home().lon_deg).expect("no DEM at home") as f64;
+    let ground = height_at_any(&rasters, home_lat(), home_lon()).expect("no DEM at home") as f64;
     let eye = ground + EYE_M;
     println!("home ground {ground:.1} m, eye {eye:.1} m");
 
     let m_lat = EARTH_RADIUS_M.to_radians();
-    let m_lon = m_lat * home().lat_deg.to_radians().cos();
+    let m_lon = m_lat * home_lat().to_radians().cos();
     let steps = (MAX_D_M / STEP_D_M).round() as usize;
     let n_az = ((AZ_TO - AZ_FROM) / AZ_STEP).round() as usize + 1;
     let mut nodata = 0usize;
@@ -115,8 +134,8 @@ fn main() {
         let (mut crest, mut peak) = (empty, empty);
         for k in 1..=steps {
             let d = k as f64 * STEP_D_M;
-            let lat = home().lat_deg + d * cos / m_lat;
-            let lon = home().lon_deg + d * sin / m_lon;
+            let lat = home_lat() + d * cos / m_lat;
+            let lon = home_lon() + d * sin / m_lon;
             let Some(h) = height_at_any(&rasters, lat, lon) else {
                 nodata += 1;
                 continue;
@@ -210,7 +229,7 @@ fn main() {
     println!("azimutes com crista >= {RIDGE_MIN_DEG}°: {visible} de {n_az}; distancia max da crista visivel: {:.2} km", max_visible_dist / 1000.0);
     println!("amostras sem DEM: {nodata}");
 
-    let (set_h, set_az) = sunset(home().lat_deg, home().lon_deg, SUN_DAY_OF_YEAR, TZ_HOURS);
+    let (set_h, set_az) = sunset(home_lat(), home_lon(), SUN_DAY_OF_YEAR, TZ_HOURS);
     println!();
     println!(
         "por do sol 15/11/2026 BH: ocaso {} (local), azimute {set_az:.1}°",
@@ -249,10 +268,7 @@ fn points_stats(rasters: &[Raster], path: &str, m_lat: f64, m_lon: f64) {
     }
     let total = text.lines().count().max(1) as f64;
     let (clat, clon) = (clat / total, clon / total);
-    let (dx, dy) = (
-        (clon - home().lon_deg) * m_lon,
-        (clat - home().lat_deg) * m_lat,
-    );
+    let (dx, dy) = ((clon - home_lon()) * m_lon, (clat - home_lat()) * m_lat);
     let dist = dx.hypot(dy);
     let az = dx.atan2(dy).to_degrees().rem_euclid(360.0);
     println!();

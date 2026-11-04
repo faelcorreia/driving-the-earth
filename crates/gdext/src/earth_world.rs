@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Instant;
 
 use godot::classes::{
-    CanvasLayer, INode3D, MeshInstance3D, Node3D, ProjectSettings, ShaderMaterial,
+    CanvasLayer, INode3D, MeshInstance3D, Node3D, ProjectSettings, RigidBody3D, ShaderMaterial,
     StandardMaterial3D,
 };
 use godot::prelude::*;
@@ -21,15 +21,17 @@ use crate::environment::lamps::{delay_s, is_lit};
 use crate::environment::EnvironmentClock;
 use crate::geometry::lamps::LampPost;
 use crate::geometry::{TileGeometry, GRASS_RGB};
+use crate::home_store;
 use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
-use crate::render::map2d::MapView;
+use crate::render::world_map::WorldMapView;
 use crate::render::{building_material, material, solid_body, spawn_car};
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
-use crate::world::spawn::find_spawn;
+use crate::world::spawn::{find_spawn, find_spawn_near, inside_loaded_map};
 use crate::world::streaming::{is_stale, tiles_in_range};
 use crate::world::{open_map, MapIndex};
+use tilebake::dem::MapGrid;
 use tileformat::units::lamps::LAMP_REAL_REACH_M;
 
 /// Height of the car above the terrain when spawned, in meters.
@@ -128,9 +130,78 @@ pub struct EarthWorld {
 }
 
 #[godot_api]
+impl EarthWorld {
+    /// Puts the car on the road nearest to (`lat`, `lon`) when that point is inside the loaded
+    /// map (F17c). The car is stopped and its tiles are built before it arrives; the streaming
+    /// then follows it. Returns false when the point is outside the map or has no road, and
+    /// the car stays where it was.
+    #[func]
+    fn move_car_to_latlon(&mut self, lat: f64, lon: f64) -> bool {
+        let (inside, road, result) = self.move_car_checked(lat, lon);
+        godot_print!(
+            "confirm move: lat {lat:.6} lon {lon:.6} inside_loaded_map {inside} road_found {road} result {result}"
+        );
+        result == "moved"
+    }
+
+    /// The steps of a car move, without the log line: (inside the loaded map, road found, result).
+    fn move_car_checked(&mut self, lat: f64, lon: f64) -> (bool, bool, String) {
+        let (Some(index), Some(mut car)) = (self.index.clone(), self.car.clone()) else {
+            return (false, false, "no_map_or_car".into());
+        };
+        let tile_m = index.meta.tile_size_m;
+        let grid = MapGrid::from_meta(&index.meta);
+        let Some(local) = inside_loaded_map(&grid, index.meta.radius_m, lat, lon, |t| {
+            index.has_tile(t.0, t.1)
+        }) else {
+            return (false, false, "outside_loaded_map".into());
+        };
+        let pose = match find_spawn_near(&index, local, self.view_radius_m as f64) {
+            Ok(Some(pose)) => pose,
+            Ok(None) => return (true, false, "no_road".into()),
+            Err(e) => {
+                godot_error!("cannot read map for the car move: {e}");
+                return (true, false, format!("error_map: {e}"));
+            }
+        };
+        let spawn_tile = (
+            (pose.x / tile_m).floor() as i32,
+            (pose.y / tile_m).floor() as i32,
+        );
+        let near = match index.neighborhood(spawn_tile.0, spawn_tile.1) {
+            Ok(map) => map,
+            Err(e) => {
+                godot_error!("cannot read tiles at the new road: {e}");
+                return (true, true, format!("error_tiles: {e}"));
+            }
+        };
+        let Some(height) = near.height_at(pose.x, pose.y) else {
+            return (true, true, "no_terrain".into());
+        };
+        for ty in spawn_tile.1 - 1..=spawn_tile.1 + 1 {
+            for tx in spawn_tile.0 - 1..=spawn_tile.0 + 1 {
+                self.load_now(&index, (tx, ty));
+            }
+        }
+        let position = Vector3::new(pose.x as f32, height + SPAWN_LIFT_M, -(pose.y as f32));
+        car.set_position(position);
+        car.set_rotation(Vector3::new(0.0, pose.yaw, 0.0));
+        if let Ok(mut body) = car.clone().try_cast::<RigidBody3D>() {
+            body.set_linear_velocity(Vector3::ZERO);
+            body.set_angular_velocity(Vector3::ZERO);
+        }
+        (true, true, "moved".into())
+    }
+}
+
+#[godot_api]
 impl INode3D for EarthWorld {
     fn ready(&mut self) {
         self.base_mut().set_process(true);
+        let home = home_store::load();
+        if let Some(h) = home {
+            crate::environment::sky::set_home(h.lat, h.lon);
+        }
         let id = self.map_id.to_string();
         let cache_root = PathBuf::from(
             ProjectSettings::singleton()
@@ -141,6 +212,7 @@ impl INode3D for EarthWorld {
             Ok(index) => index,
             Err(e) => {
                 godot_error!("cannot open map '{id}' from {}: {e}", cache_root.display());
+                self.add_map_view(Some("home.no_map"));
                 return;
             }
         };
@@ -167,12 +239,39 @@ impl INode3D for EarthWorld {
             self.far_loader = Some(spawn_load(path, self.far_lights_max.max(0) as usize));
         }
 
-        // Spawn on the road nearest to home (the local origin), facing south. Without any
-        // road, fall back to home itself facing south.
-        let (x, y, yaw) = match find_spawn(&index, self.view_radius_m as f64) {
+        // Spawn on the road nearest to the saved home when it is inside the loaded map. Without a
+        // saved home, or with one outside the map, spawn on the road nearest to the map center
+        // and open the world map so the player chooses (no grey screen).
+        let grid = MapGrid::from_meta(&index.meta);
+        let saved_local = home.and_then(|h| {
+            inside_loaded_map(&grid, index.meta.radius_m, h.lat, h.lon, |t| {
+                index.has_tile(t.0, t.1)
+            })
+        });
+        let saved_pose = match saved_local {
+            Some(local) => match find_spawn_near(&index, local, self.view_radius_m as f64) {
+                Ok(pose) => pose,
+                Err(e) => {
+                    godot_error!("cannot read map '{id}': {e}");
+                    return;
+                }
+            },
+            None => None,
+        };
+        let picker_key = match (home, saved_pose) {
+            (Some(_), Some(_)) => None,
+            (Some(_), None) if saved_local.is_some() => Some("home.no_road_start"),
+            (Some(_), None) => Some("home.outside_saved"),
+            (None, _) => Some("home.none_start"),
+        };
+        let pose = match saved_pose {
+            Some(pose) => Ok(Some(pose)),
+            None => find_spawn(&index, self.view_radius_m as f64),
+        };
+        let (x, y, yaw) = match pose {
             Ok(Some(pose)) => (pose.x, pose.y, pose.yaw),
             Ok(None) => {
-                godot_warn!("map '{id}' has no road to spawn on, spawning at home");
+                godot_warn!("map '{id}' has no road to spawn on, spawning at the map center");
                 (0.0, 0.0, std::f32::consts::PI)
             }
             Err(e) => {
@@ -222,7 +321,7 @@ impl INode3D for EarthWorld {
             ));
         }
         self.start_loader(Arc::new(index));
-        self.add_map_view();
+        self.add_map_view(picker_key);
     }
 
     fn process(&mut self, delta: f64) {
@@ -460,19 +559,27 @@ impl EarthWorld {
         self.loaded.insert(t, node);
     }
 
-    /// The car in map coordinates `[x, y]` (x east, y north), if it exists.
-    /// Adds the 2D map (M) on its own canvas layer, reading the roads in the background.
-    fn add_map_view(&mut self) {
-        let (Some(index), Some(car)) = (self.index.clone(), self.car.clone()) else {
-            return;
-        };
+    /// Adds the world map (M) on its own canvas layer. It starts hidden; the car and the map's
+    /// frame give it the car's place in lat/lon, when there is a loaded map. `open_with` opens it
+    /// at once with that message (the player has no home yet, or it is outside the map).
+    fn add_map_view(&mut self, open_with: Option<&str>) {
+        let grid = self
+            .index
+            .as_ref()
+            .map(|index| MapGrid::from_meta(&index.meta));
+        let car = self.car.clone();
         let origin = self.to_gd().upcast::<Node3D>();
         let mut layer = CanvasLayer::new_alloc();
         layer.set_layer(MAP_CANVAS_LAYER);
-        let mut map = MapView::new_alloc();
-        map.bind_mut().start(index, car, origin);
+        let mut map = WorldMapView::new_alloc();
+        if let (Some(car), Some(grid)) = (car, grid) {
+            map.bind_mut().start(car, origin, grid);
+        }
         layer.add_child(&map);
         self.base_mut().add_child(&layer);
+        if let Some(key) = open_with {
+            map.bind_mut().open_automatically(key);
+        }
     }
 
     /// Adds the `Environment` clock node. It drives the scene's WorldEnvironment and replaces
