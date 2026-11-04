@@ -984,8 +984,9 @@ fn ribbon_metrics() {
         pitch_curve.len()
     );
     println!(
-        "step (2nd difference): max {:.2} cm, steps > 5 cm {} of {}",
+        "step (2nd difference): max {:.2} cm, p99 {:.2} cm, steps > 5 cm {} of {}",
         step_max * 100.0,
+        ribbon_percentile(&mut steps.iter().map(|s| s.0).collect::<Vec<_>>(), 0.99) * 100.0,
         steps_over_5cm,
         steps.len()
     );
