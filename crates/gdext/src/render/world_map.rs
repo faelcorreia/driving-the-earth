@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use godot::classes::control::{LayoutPreset, MouseFilter};
 use godot::classes::file_access::ModeFlags;
+use godot::classes::node::ProcessMode;
 use godot::classes::{
     Button, Control, FileAccess, IControl, InputEvent, InputEventMouseButton,
     InputEventMouseMotion, Os, ProjectSettings, RenderingServer, ThemeDb,
@@ -232,6 +233,8 @@ impl IControl for WorldMapView {
     }
 
     fn ready(&mut self) {
+        // Input and drawing must run while the tree is paused (the picker pauses the game).
+        self.base_mut().set_process_mode(ProcessMode::ALWAYS);
         self.base_mut()
             .set_anchors_and_offsets_preset(LayoutPreset::FULL_RECT);
         self.base_mut().set_mouse_filter(MouseFilter::STOP);
