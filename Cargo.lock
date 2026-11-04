@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "driving_the_earth_ext"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "godot",
  "serde_json",
@@ -451,7 +451,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "overpass"
-version = "0.2.1"
+version = "0.4.0"
 dependencies = [
  "ureq",
 ]
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "tilebake"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "overpass",
  "serde",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "tileformat"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -907,7 +907,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "worldmap"
-version = "0.2.1"
+version = "0.4.0"
 dependencies = [
  "geo-types",
  "mvt-reader",
