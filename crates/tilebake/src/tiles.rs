@@ -14,6 +14,7 @@ use crate::lots::{self, AreaKind};
 use crate::osm;
 use crate::profile;
 use crate::region::{apply_regions, Region};
+use crate::{Hooks, STAGE_DEM, STAGE_ROADS, STAGE_TILES};
 use tileformat::units::{FLOOR_HEIGHT_M, WATERWAY_CANAL_M, WATERWAY_RIVER_M, WATERWAY_STREAM_M};
 
 fn invalid_data<E: std::fmt::Display>(e: E) -> io::Error {
@@ -534,6 +535,12 @@ fn terrain_at(
 }
 
 pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
+    crate::run_quiet(|h| bake_tiles_with(cache_root, id, h))
+}
+
+/// Like `bake_tiles`, with cancellation and progress (see `Hooks`): reports the stages `dem`
+/// (one Copernicus tile per step), `tiles` (one tile per step) and `roads`.
+pub fn bake_tiles_with(cache_root: &Path, id: &str, hooks: &mut Hooks) -> io::Result<BakeSummary> {
     let started = Instant::now();
     let dir = cache_root.join(id);
     let meta_path = dir.join("meta.json");
@@ -564,11 +571,17 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
     // One Copernicus tile per 1 degree cell that the terrain touches; missing ones are downloaded.
     let (south, west, north, east) = tiles_bbox(&terrain_list, &grid);
     let mut rasters = Vec::new();
-    for la in south.floor() as i32..=north.floor() as i32 {
-        for lo in west.floor() as i32..=east.floor() as i32 {
-            let (tif, _) = download_dem(cache_root, id, la as f64 + 0.5, lo as f64 + 0.5)?;
-            rasters.push(read_smoothed_dem(&tif)?);
-        }
+    let dem_cells: Vec<(i32, i32)> = (south.floor() as i32..=north.floor() as i32)
+        .flat_map(|la| (west.floor() as i32..=east.floor() as i32).map(move |lo| (la, lo)))
+        .collect();
+    for (i, &(la, lo)) in dem_cells.iter().enumerate() {
+        hooks.check()?;
+        let (tif, _) =
+            download_dem(cache_root, id, la as f64 + 0.5, lo as f64 + 0.5).map_err(|e| {
+                io::Error::new(e.kind(), format!("Copernicus DEM cell ({la}, {lo}): {e}"))
+            })?;
+        rasters.push(read_smoothed_dem(&tif)?);
+        hooks.report(STAGE_DEM, i + 1, dem_cells.len());
     }
     let regions = load_regions(cache_root)?;
     let areas = read_areas(&dir.join("raw").join("osm_areas"), &meta, &grid)?;
@@ -625,7 +638,9 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
         tiles_bytes: 0,
         elapsed: Duration::ZERO,
     };
-    for (x, y) in covering_tiles(meta.radius_m, meta.tile_size_m) {
+    let tile_list = covering_tiles(meta.radius_m, meta.tile_size_m);
+    for (i, &(x, y)) in tile_list.iter().enumerate() {
+        hooks.check()?;
         // Only the ways whose bounding box touches the tile: the others clip to nothing.
         let tile_roads: Vec<Polyline> = road_index
             .get(&(x, y))
@@ -671,9 +686,13 @@ pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
         summary.tiles += 1;
         summary.road_pieces += r;
         summary.building_pieces += b;
+        hooks.report(STAGE_TILES, i + 1, tile_list.len());
     }
 
+    hooks.check()?;
+    hooks.report(STAGE_ROADS, 0, 1);
     write_roads_file(cache_root, id)?;
+    hooks.report(STAGE_ROADS, 1, 1);
     meta.complete = true;
     fs::write(
         &meta_path,

@@ -65,7 +65,26 @@ pub fn download_missing_blocks(
     meta: &MapMeta,
     dl: &Downloader,
 ) -> io::Result<BlockStats> {
-    osm::download_blocks(dir, meta, dl, "areas", &areas_query, &check_areas_body)
+    crate::run_quiet(|h| download_missing_blocks_with(dir, meta, dl, h))
+}
+
+/// Like `download_missing_blocks`, with cancellation and progress (see `Hooks`).
+pub fn download_missing_blocks_with(
+    dir: &Path,
+    meta: &MapMeta,
+    dl: &Downloader,
+    hooks: &mut crate::Hooks,
+) -> io::Result<BlockStats> {
+    osm::download_blocks(
+        dir,
+        meta,
+        dl,
+        "areas",
+        &areas_query,
+        &check_areas_body,
+        hooks,
+        crate::STAGE_OSM_AREAS,
+    )
 }
 
 /// Category of an element of the layer (first match wins). Anything else is `other`.

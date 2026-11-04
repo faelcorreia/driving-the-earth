@@ -12,6 +12,7 @@ use tileformat::MapMeta;
 
 use crate::dem::MapGrid;
 use crate::tiles::covering_tiles;
+use crate::{run_quiet, Hooks, STAGE_OSM};
 
 /// Side of one OSM block, in meters. Blocks are cells of a grid anchored at the home,
 /// so a block file name means the same area for every radius.
@@ -181,6 +182,8 @@ pub fn download_blocks(
     layer: &str,
     query_for: &dyn Fn((f64, f64, f64, f64)) -> String,
     check: &dyn Fn(&Value) -> io::Result<()>,
+    hooks: &mut Hooks,
+    stage: &'static str,
 ) -> io::Result<BlockStats> {
     fs::create_dir_all(dir)?;
     let grid = MapGrid::from_meta(meta);
@@ -190,10 +193,12 @@ pub fn download_blocks(
         ..BlockStats::default()
     };
     let mut last_start: Option<Instant> = None;
-    for &(bx, by) in &blocks {
+    for (i, &(bx, by)) in blocks.iter().enumerate() {
+        hooks.check()?;
         let name = block_file_name(bx, by);
         let path = dir.join(&name);
         if path.exists() {
+            hooks.report(stage, i + 1, blocks.len());
             continue;
         }
         if let Some(t) = last_start {
@@ -219,6 +224,7 @@ pub fn download_blocks(
             stats.downloaded,
             blocks.len()
         );
+        hooks.report(stage, i + 1, blocks.len());
     }
     Ok(stats)
 }
@@ -229,7 +235,38 @@ pub fn download_missing_blocks(
     meta: &MapMeta,
     dl: &Downloader,
 ) -> io::Result<(usize, usize)> {
-    let s = download_blocks(dir, meta, dl, "osm", &overpass_query, &check_elements)?;
+    let s = run_quiet(|h| {
+        download_blocks(
+            dir,
+            meta,
+            dl,
+            "osm",
+            &overpass_query,
+            &check_elements,
+            h,
+            STAGE_OSM,
+        )
+    })?;
+    Ok((s.blocks, s.downloaded))
+}
+
+/// Like `download_missing_blocks`, with cancellation and progress (see `Hooks`).
+pub fn download_missing_blocks_with(
+    dir: &Path,
+    meta: &MapMeta,
+    dl: &Downloader,
+    hooks: &mut Hooks,
+) -> io::Result<(usize, usize)> {
+    let s = download_blocks(
+        dir,
+        meta,
+        dl,
+        "osm",
+        &overpass_query,
+        &check_elements,
+        hooks,
+        STAGE_OSM,
+    )?;
     Ok((s.blocks, s.downloaded))
 }
 
