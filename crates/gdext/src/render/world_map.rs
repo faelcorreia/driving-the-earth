@@ -612,15 +612,44 @@ impl WorldMapView {
 impl WorldMapView {
     #[func]
     fn on_confirm(&mut self) {
-        let msg = match self.home {
-            None => self.t("home.pick_first"),
-            Some(home) => match save_home(home) {
-                Ok(()) => self.fmt("home.saved", home),
-                Err(()) => self.t("home.save_error"),
-            },
+        let Some(home) = self.home else {
+            self.status = self.t("home.pick_first");
+            self.redraw();
+            return;
         };
-        self.status = msg;
+        if save_home(home).is_err() {
+            self.status = self.t("home.save_error");
+            self.redraw();
+            return;
+        }
+        let saved = self.fmt("home.saved", home);
+        match self.move_car(home) {
+            // No car (the map alone): only the save.
+            None => self.status = saved,
+            // The car is on the road of the chosen place: the map closes.
+            Some(true) => {
+                self.status = saved;
+                self.set_open(false);
+            }
+            // The place has no baked map yet: the car stays where it is.
+            Some(false) => self.status = format!("{saved} {}", self.t("home.outside_map")),
+        }
         self.redraw();
+    }
+
+    /// Moves the car to the chosen place (F17c). `None` when there is no car; `Some(false)` when
+    /// the place is not inside the loaded map (or has no road), so the car did not move.
+    fn move_car(&self, home: Home) -> Option<bool> {
+        let (Some(_), Some(origin)) = (self.car.as_ref(), self.origin.as_ref()) else {
+            return None;
+        };
+        let args = [home.lat.to_variant(), home.lon.to_variant()];
+        let moved = origin
+            .clone()
+            .call("move_car_to_latlon", &args)
+            .try_to::<bool>()
+            .unwrap_or(false);
+        Some(moved)
     }
 
     /// Draws the overlay above the roads: names, cities, the home marker and the texts.

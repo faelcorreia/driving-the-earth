@@ -103,6 +103,11 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Não foi possível salvar sua casa",
     ),
     (
+        "home.outside_map",
+        "This place has no map yet, so the car did not move.",
+        "Este lugar ainda não tem mapa, então o carro não saiu do lugar.",
+    ),
+    (
         "home.map_missing",
         "World map data is missing",
         "Dados do mapa-múndi não encontrados",

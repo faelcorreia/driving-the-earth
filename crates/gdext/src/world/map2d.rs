@@ -2,6 +2,9 @@
 //! from map meters to screen pixels, zoom limits, and which road classes and labels show at each
 //! zoom. Pure: no Godot types. Map coordinates are the bake's local plane (x east, y north, in
 //! meters); the screen is north up. The roads are read in the background from the map on disk.
+// The road classes, zoom limits and label rules here are kept for the pending drawing of the
+// cached roads and names in WorldMapView (F17b6); until that lands, their warnings are allowed.
+#![allow(dead_code)]
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};

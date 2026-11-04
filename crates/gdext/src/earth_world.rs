@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Instant;
 
 use godot::classes::{
-    CanvasLayer, INode3D, MeshInstance3D, Node3D, ProjectSettings, ShaderMaterial,
+    CanvasLayer, INode3D, MeshInstance3D, Node3D, ProjectSettings, RigidBody3D, ShaderMaterial,
     StandardMaterial3D,
 };
 use godot::prelude::*;
@@ -27,7 +27,7 @@ use crate::render::world_map::WorldMapView;
 use crate::render::{building_material, material, solid_body, spawn_car};
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
-use crate::world::spawn::find_spawn;
+use crate::world::spawn::{find_spawn, find_spawn_near, inside_loaded_map};
 use crate::world::streaming::{is_stale, tiles_in_range};
 use crate::world::{open_map, MapIndex};
 use tilebake::dem::MapGrid;
@@ -126,6 +126,66 @@ pub struct EarthWorld {
     worst_frame: f64,
     worst_build: f64,
     stats_timer: f64,
+}
+
+#[godot_api]
+impl EarthWorld {
+    /// Puts the car on the road nearest to (`lat`, `lon`) when that point is inside the loaded
+    /// map (F17c). The car is stopped and its tiles are built before it arrives; the streaming
+    /// then follows it. Returns false when the point is outside the map or has no road, and
+    /// the car stays where it was.
+    #[func]
+    fn move_car_to_latlon(&mut self, lat: f64, lon: f64) -> bool {
+        let (Some(index), Some(mut car)) = (self.index.clone(), self.car.clone()) else {
+            return false;
+        };
+        let tile_m = index.meta.tile_size_m;
+        let grid = MapGrid::from_meta(&index.meta);
+        let Some(local) = inside_loaded_map(&grid, index.meta.radius_m, lat, lon, |t| {
+            index.has_tile(t.0, t.1)
+        }) else {
+            return false;
+        };
+        let pose = match find_spawn_near(&index, local, self.view_radius_m as f64) {
+            Ok(Some(pose)) => pose,
+            Ok(None) => {
+                godot_warn!("no road near the chosen point, the car stays where it is");
+                return false;
+            }
+            Err(e) => {
+                godot_error!("cannot read map for the car move: {e}");
+                return false;
+            }
+        };
+        let spawn_tile = (
+            (pose.x / tile_m).floor() as i32,
+            (pose.y / tile_m).floor() as i32,
+        );
+        let near = match index.neighborhood(spawn_tile.0, spawn_tile.1) {
+            Ok(map) => map,
+            Err(e) => {
+                godot_error!("cannot read tiles at the new road: {e}");
+                return false;
+            }
+        };
+        let Some(height) = near.height_at(pose.x, pose.y) else {
+            godot_error!("no terrain at the new road, the car stays where it is");
+            return false;
+        };
+        for ty in spawn_tile.1 - 1..=spawn_tile.1 + 1 {
+            for tx in spawn_tile.0 - 1..=spawn_tile.0 + 1 {
+                self.load_now(&index, (tx, ty));
+            }
+        }
+        let position = Vector3::new(pose.x as f32, height + SPAWN_LIFT_M, -(pose.y as f32));
+        car.set_position(position);
+        car.set_rotation(Vector3::new(0.0, pose.yaw, 0.0));
+        if let Ok(mut body) = car.clone().try_cast::<RigidBody3D>() {
+            body.set_linear_velocity(Vector3::ZERO);
+            body.set_angular_velocity(Vector3::ZERO);
+        }
+        true
+    }
 }
 
 #[godot_api]
