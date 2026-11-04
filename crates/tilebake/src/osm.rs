@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::Value;
 use tileformat::MapMeta;
@@ -14,97 +14,16 @@ use crate::dem::MapGrid;
 use crate::tiles::covering_tiles;
 use crate::{run_quiet, Hooks, STAGE_OSM};
 
-/// Side of one OSM block, in meters. Blocks are cells of a grid anchored at the home,
-/// so a block file name means the same area for every radius.
-pub const BLOCK_M: f64 = 2000.0;
-/// Minimum gap between the start of two Overpass requests.
-pub const MIN_GAP: Duration = Duration::from_secs(1);
-/// Attempts per block (the first try included) on 429, 502, 503 or 504.
-pub const MAX_ATTEMPTS: u32 = 6;
-/// Wait before the first retry; doubled on each following retry.
-pub const BACKOFF_BASE: Duration = Duration::from_secs(5);
-
 fn other_err<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e.to_string())
 }
 
-/// Failed HTTP request: the status when the server answered, `None` for transport errors.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpError {
-    pub status: Option<u16>,
-    pub message: String,
-}
-
-/// Sends an Overpass query (the `data` form field) and returns the response body.
-pub trait OverpassClient {
-    fn post(&self, query: &str) -> Result<String, HttpError>;
-}
-
-/// Overpass over HTTP, with the same User-Agent as the other downloads.
-pub struct UreqOverpass;
-
-impl OverpassClient for UreqOverpass {
-    fn post(&self, query: &str) -> Result<String, HttpError> {
-        match ureq::post(crate::OVERPASS_URL)
-            .set("User-Agent", crate::USER_AGENT)
-            .send_form(&[("data", query)])
-        {
-            Ok(resp) => resp.into_string().map_err(|e| HttpError {
-                status: None,
-                message: e.to_string(),
-            }),
-            Err(ureq::Error::Status(code, _)) => Err(HttpError {
-                status: Some(code),
-                message: format!("HTTP {code}"),
-            }),
-            Err(e) => Err(HttpError {
-                status: None,
-                message: e.to_string(),
-            }),
-        }
-    }
-}
-
-/// How blocks are fetched: client, pacing and retry. `sleep` is injected so tests do not wait.
-pub struct Downloader<'a> {
-    pub client: &'a dyn OverpassClient,
-    pub sleep: &'a dyn Fn(Duration),
-    pub min_gap: Duration,
-    pub max_attempts: u32,
-    pub backoff_base: Duration,
-}
-
-impl Downloader<'_> {
-    /// Posts `query`, retrying with doubling backoff on 429, 502, 503 and 504. Other errors fail at once.
-    pub fn post_with_retry(&self, query: &str) -> io::Result<String> {
-        self.post_with_retry_counted(query).map(|(body, _)| body)
-    }
-
-    /// Like `post_with_retry`, and also returns how many retries were needed.
-    pub fn post_with_retry_counted(&self, query: &str) -> io::Result<(String, u32)> {
-        let mut delay = self.backoff_base;
-        let mut retries = 0;
-        for attempt in 1..=self.max_attempts {
-            match self.client.post(query) {
-                Ok(body) => return Ok((body, retries)),
-                Err(e)
-                    if matches!(e.status, Some(429 | 502 | 503 | 504))
-                        && attempt < self.max_attempts =>
-                {
-                    eprintln!(
-                        "tilebake: Overpass answered {} (attempt {attempt}/{}), retrying in {delay:?}",
-                        e.message, self.max_attempts
-                    );
-                    (self.sleep)(delay);
-                    delay *= 2;
-                    retries += 1;
-                }
-                Err(e) => return Err(other_err(format!("Overpass request failed: {}", e.message))),
-            }
-        }
-        Err(other_err("Overpass: max_attempts is zero"))
-    }
-}
+/// Side of one OSM block, in meters. Blocks are cells of a grid anchored at the home,
+/// so a block file name means the same area for every radius.
+pub const BLOCK_M: f64 = 2000.0;
+pub use overpass::{
+    Downloader, HttpError, OverpassClient, UreqOverpass, BACKOFF_BASE, MAX_ATTEMPTS, MIN_GAP,
+};
 
 /// What one run of `download_blocks` did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +221,7 @@ pub fn visit_ways(dir: &Path, meta: &MapMeta, mut f: impl FnMut(&Value)) -> io::
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::time::Duration;
 
     fn meta(radius_m: f64) -> MapMeta {
         MapMeta {

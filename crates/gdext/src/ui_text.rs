@@ -94,6 +94,40 @@ const TABLE: &[(&str, &str, &str)] = &[
         "T or Esc closes the panel",
         "T ou Esc fecha o painel",
     ),
+    (
+        "home.hint",
+        "Wheel: zoom  |  drag: move  |  click: choose a place",
+        "Roda: zoom  |  arrastar: mover  |  clique: escolher um lugar",
+    ),
+    ("home.confirm", "Confirm", "Confirmar"),
+    (
+        "home.pick_first",
+        "Click on the map to choose your home",
+        "Clique no mapa para escolher sua casa",
+    ),
+    ("home.selected", "Selected: {lat}, {lon}", "Escolhido: {lat}, {lon}"),
+    ("home.current", "Current home: {lat}, {lon}", "Casa atual: {lat}, {lon}"),
+    ("home.saved", "Home saved: {lat}, {lon}", "Casa salva: {lat}, {lon}"),
+    (
+        "home.save_error",
+        "Could not save your home",
+        "Não foi possível salvar sua casa",
+    ),
+    (
+        "home.map_missing",
+        "World map data is missing",
+        "Dados do mapa-múndi não encontrados",
+    ),
+    (
+        "home.attribution",
+        "Map data: Natural Earth (public domain). \u{a9} OpenStreetMap contributors, OpenFreeMap",
+        "Dados do mapa: Natural Earth (domínio público). \u{a9} OpenStreetMap contributors, OpenFreeMap",
+    ),
+    (
+        "home.detail_offline",
+        "Streets and neighborhoods need the internet. Showing cities only.",
+        "Ruas e bairros precisam de internet. Mostrando só as cidades.",
+    ),
 ];
 
 #[cfg(test)]

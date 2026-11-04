@@ -1,0 +1,7 @@
+[package]
+name = "overpass"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+ureq = "2"
