@@ -74,30 +74,35 @@ pub(super) fn push_road(
     // different triangles; on a steep stretch they differ by a fraction of the height step
     // between neighbors. The ribbon rises by that fraction so the terrain never shows through.
     let n = stations.len();
+    let raw: Vec<f32> = (0..n)
+        .map(|s| {
+            let mut step = 0.0f32;
+            for c in 0..3 {
+                let h = heights[3 * s + c];
+                if s > 0 {
+                    step = step.max((h - heights[3 * (s - 1) + c]).abs());
+                }
+                if s + 1 < n {
+                    step = step.max((h - heights[3 * (s + 1) + c]).abs());
+                }
+            }
+            step = step
+                .max((heights[3 * s] - heights[3 * s + 1]).abs())
+                .max((heights[3 * s + 1] - heights[3 * s + 2]).abs());
+            // A step beyond `ROAD_STEP_CLIFF_M` is a cliff (a tile border over a different terrain), not a slope.
+            if step > ROAD_STEP_CLIFF_M {
+                0.0
+            } else {
+                (ROAD_STEP_LIFT * (step - ROAD_STEP_FREE_M).max(0.0)).min(ROAD_STEP_LIFT_MAX_M)
+            }
+        })
+        .collect();
+    let extra = smooth_extra(&raw);
     for s in 0..n {
-        let mut step = 0.0f32;
-        for c in 0..3 {
-            let h = heights[3 * s + c];
-            if s > 0 {
-                step = step.max((h - heights[3 * (s - 1) + c]).abs());
-            }
-            if s + 1 < n {
-                step = step.max((h - heights[3 * (s + 1) + c]).abs());
-            }
-        }
-        step = step
-            .max((heights[3 * s] - heights[3 * s + 1]).abs())
-            .max((heights[3 * s + 1] - heights[3 * s + 2]).abs());
-        // A step beyond `ROAD_STEP_CLIFF_M` is a cliff (a tile border over a different terrain), not a slope.
-        let extra = if step > ROAD_STEP_CLIFF_M {
-            0.0
-        } else {
-            (ROAD_STEP_LIFT * (step - ROAD_STEP_FREE_M).max(0.0)).min(ROAD_STEP_LIFT_MAX_M)
-        };
         for c in 0..3 {
             let [x, y] = xy[3 * s + c];
             mesh.vertices
-                .push(world(x, y, heights[3 * s + c] + lift + extra));
+                .push(world(x, y, heights[3 * s + c] + lift + extra[s]));
             mesh.normals.push([0.0, 1.0, 0.0]);
         }
     }
@@ -110,4 +115,21 @@ pub(super) fn push_road(
         push_up_facing(mesh, l0 + 1, l0 + 2, l1 + 2);
         push_up_facing(mesh, l0 + 1, l1 + 2, l1 + 1);
     }
+}
+
+/// Largest change of the lift between neighboring stations, in meters.
+const EXTRA_STEP_LIMIT_M: f32 = 0.02;
+
+/// Smallest lift that keeps the ribbon above `raw` and changes by at most `EXTRA_STEP_LIMIT_M`
+/// per station: the upper envelope of the cones `raw[j] - EXTRA_STEP_LIMIT_M * |s - j|`, computed
+/// by a forward and a backward pass.
+fn smooth_extra(raw: &[f32]) -> Vec<f32> {
+    let mut env = raw.to_vec();
+    for s in 1..env.len() {
+        env[s] = env[s].max(env[s - 1] - EXTRA_STEP_LIMIT_M);
+    }
+    for s in (0..env.len().saturating_sub(1)).rev() {
+        env[s] = env[s].max(env[s + 1] - EXTRA_STEP_LIMIT_M);
+    }
+    env
 }

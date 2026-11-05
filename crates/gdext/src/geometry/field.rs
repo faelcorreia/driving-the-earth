@@ -6,8 +6,15 @@
 //! road's corridor (half the width on each side of its axis) it is the profile: `z` on the axis,
 //! linear across to `zl` and `zr` on the edges. Over the next `ROAD_BLEND_M` it blends from the
 //! edge height to the grid. Where corridors overlap, a flat-zone candidate wins over a blend-band
-//! candidate of another road, and between equal kinds the lowest wins, so a terrain vertex never
-//! rises above a ribbon in a corridor. Roads with no profile do not change the grid.
+//! candidate of another road; between two flat-zone candidates the one nearer its axis wins, and
+//! between two blend-band candidates the lowest wins. Roads with no profile do not change the grid.
+//!
+//! Where roads share a node (same point, `NODE_KEY_M`), the profiles are reconciled first: the
+//! node takes one height, the mean of the roads through it (of all of them when every road ends
+//! there), and each road eases that offset back to zero over `NODE_EASE_M` along its own axis.
+//! So two roads meeting at a node leave it at the same height.
+use std::collections::HashMap;
+
 use tileformat::units::{ROAD_BLEND_M, TERRAIN_FINE_CELL_M, TILE_M};
 use tileformat::Tile;
 
@@ -24,11 +31,32 @@ const BUCKET_M: f64 = 10.0;
 /// its slope, in meters. Beyond it the cap is flat again.
 const OPEN_END_EXTEND_M: f64 = 4.0;
 
-/// Whether surface candidate `a` beats `b`, each given as `(flat, height)`. A candidate of a flat
-/// zone beats one of a blend band of another road; between candidates of the same kind the lower
-/// height wins.
-fn beats(a: (bool, f32), b: (bool, f32)) -> bool {
-    (a.0 && !b.0) || (a.0 == b.0 && a.1 < b.1)
+/// Grid of the shared-node keys: two road nodes within half of this are the same node.
+const NODE_KEY_M: f64 = 0.1;
+
+/// Distance along a road over which the offset of a shared node decays linearly to zero.
+const NODE_EASE_M: f64 = 12.0;
+
+/// One surface candidate at a point: whether it is in its road's flat zone, the distance to that
+/// road's axis, and the height it gives.
+#[derive(Clone, Copy)]
+struct Cand {
+    flat: bool,
+    dist: f64,
+    h: f32,
+}
+
+/// Whether candidate `a` beats `b` (candidates of different roads). A flat-zone candidate beats a
+/// blend-band one; between two flat-zone candidates the nearer axis wins; between two blend-band
+/// candidates the lower height wins.
+fn beats(a: Cand, b: Cand) -> bool {
+    if a.flat != b.flat {
+        a.flat
+    } else if a.flat {
+        a.dist < b.dist
+    } else {
+        a.h < b.h
+    }
 }
 
 /// Half-width of the flat zone of a road: the ribbon edge plus one blend cell, rounded up to
@@ -122,6 +150,123 @@ impl Seg {
     }
 }
 
+/// A road with a profile, smoothed and ready to become segments. `z`, `zl` and `zr` are the
+/// smoothed heights at each point (`zl` and `zr` equal `z` when the road has no edge heights).
+struct Profile<'a> {
+    road: u32,
+    points: &'a [[f64; 2]],
+    /// Arc length from the first point to each point, in meters.
+    arc: Vec<f64>,
+    z: Vec<f32>,
+    zl: Vec<f32>,
+    zr: Vec<f32>,
+    half: f64,
+    flat: f64,
+}
+
+impl<'a> Profile<'a> {
+    /// The profile of `road` (index `road_id` among the roads of the block), or `None` when the
+    /// road has no profile.
+    fn of(road: &'a Polyline, road_id: u32) -> Option<Profile<'a>> {
+        let n = road.points.len();
+        if n < 2 || road.z.len() != n {
+            return None;
+        }
+        // The profile the field samples is the runtime-smoothed one (same points, same stations).
+        let (z, zl, zr) = smooth_profile(&road.points, &road.z, &road.zl, &road.zr, &road.highway);
+        let (zl, zr) = if zl.len() == n && zr.len() == n {
+            (zl, zr)
+        } else {
+            (z.clone(), z.clone())
+        };
+        let mut arc = Vec::with_capacity(n);
+        let mut s = 0.0;
+        for (k, p) in road.points.iter().enumerate() {
+            if k > 0 {
+                let q = road.points[k - 1];
+                s += (p[0] - q[0]).hypot(p[1] - q[1]);
+            }
+            arc.push(s);
+        }
+        let half = road_width_m(&road.highway) / 2.0;
+        Some(Profile {
+            road: road_id,
+            points: &road.points,
+            arc,
+            z,
+            zl,
+            zr,
+            half,
+            flat: flat_zone_m(half),
+        })
+    }
+}
+
+/// Gives every shared node of the profiles one height and eases the offset back along each road
+/// (see the module docs). A node is shared when two roads have points within `NODE_KEY_M` of it;
+/// a road's own node, or one no other road shares, has no offset.
+fn reconcile_nodes(profiles: &mut [Profile]) {
+    // Node key -> (profile index, point index, passes through: not an end of its road).
+    let mut nodes: HashMap<(i64, i64), Vec<(usize, usize, bool)>> = HashMap::new();
+    for (p_idx, p) in profiles.iter().enumerate() {
+        let n = p.points.len();
+        for (k, q) in p.points.iter().enumerate() {
+            let key = (
+                (q[0] / NODE_KEY_M).round() as i64,
+                (q[1] / NODE_KEY_M).round() as i64,
+            );
+            nodes
+                .entry(key)
+                .or_default()
+                .push((p_idx, k, k > 0 && k + 1 < n));
+        }
+    }
+    // Per profile and point: the offset its height needs to reach the node target.
+    let mut offsets: Vec<Vec<f32>> = profiles.iter().map(|p| vec![0.0; p.points.len()]).collect();
+    for entries in nodes.values() {
+        if entries.len() < 2 {
+            continue;
+        }
+        let through: Vec<&(usize, usize, bool)> = entries.iter().filter(|e| e.2).collect();
+        let group: Vec<&(usize, usize, bool)> = if through.is_empty() {
+            entries.iter().collect()
+        } else {
+            through
+        };
+        let sum: f64 = group.iter().map(|e| profiles[e.0].z[e.1] as f64).sum();
+        let target = (sum / group.len() as f64) as f32;
+        for &(p_idx, k, _) in entries {
+            offsets[p_idx][k] = target - profiles[p_idx].z[k];
+        }
+    }
+    for (p, offs) in profiles.iter_mut().zip(&offsets) {
+        if offs.iter().all(|&o| o == 0.0) {
+            continue;
+        }
+        // Each point takes the sum of the offsets of the nodes of its road within `NODE_EASE_M`
+        // of it, each decayed linearly with the arc distance to it.
+        let n = p.points.len();
+        let mut best_o = vec![0.0f32; n];
+        for (k, &o) in offs.iter().enumerate() {
+            let s = p.arc[k];
+            let lo = p.arc.partition_point(|&a| a <= s - NODE_EASE_M);
+            for j in lo..n {
+                if p.arc[j] >= s + NODE_EASE_M {
+                    break;
+                }
+                let d = (p.arc[j] - s).abs();
+                best_o[j] += o * (1.0 - d / NODE_EASE_M) as f32;
+            }
+        }
+        for j in 0..n {
+            let o = best_o[j];
+            p.z[j] += o;
+            p.zl[j] += o;
+            p.zr[j] += o;
+        }
+    }
+}
+
 /// Segments of the roads with a profile, indexed in buckets over the tile and its neighbors.
 pub(super) struct Field {
     segs: Vec<Seg>,
@@ -131,8 +276,6 @@ pub(super) struct Field {
     buckets: Vec<Vec<u32>>,
     /// Largest distance from an axis at which a segment still has a candidate.
     reach: f64,
-    /// Number of roads added so far (the next road's index).
-    roads: u32,
 }
 
 impl Field {
@@ -147,58 +290,41 @@ impl Field {
             rows: cols,
             buckets: vec![Vec::new(); cols * cols],
             reach: 0.0,
-            roads: 0,
         };
-        for road in roads {
-            field.add_road(road);
+        let mut profiles: Vec<Profile> = roads
+            .enumerate()
+            .filter_map(|(road_id, road)| Profile::of(road, road_id as u32))
+            .collect();
+        reconcile_nodes(&mut profiles);
+        for p in &profiles {
+            field.add_profile(p);
         }
         field
     }
 
-    fn add_road(&mut self, road: &Polyline) {
-        let road_id = self.roads;
-        self.roads += 1;
-        let n = road.points.len();
-        if n < 2 || road.z.len() != n {
-            return;
-        }
-        // The profile the field samples is the runtime-smoothed one (same points, same stations).
-        let (z_all, zl_all, zr_all) =
-            smooth_profile(&road.points, &road.z, &road.zl, &road.zr, &road.highway);
-        let has_edges = zl_all.len() == n && zr_all.len() == n;
-        let half = road_width_m(&road.highway) / 2.0;
-        let flat = flat_zone_m(half);
-        self.reach = self.reach.max(flat + ROAD_BLEND_M);
+    fn add_profile(&mut self, p: &Profile) {
+        let n = p.points.len();
+        self.reach = self.reach.max(p.flat + ROAD_BLEND_M);
         for k in 0..n - 1 {
-            let (a, b) = (road.points[k], road.points[k + 1]);
+            let (a, b) = (p.points[k], p.points[k + 1]);
             let len = (b[0] - a[0]).hypot(b[1] - a[1]);
             if len <= 1e-9 {
                 continue;
             }
-            let (z, zl, zr) = if has_edges {
-                (
-                    [z_all[k], z_all[k + 1]],
-                    [zl_all[k], zl_all[k + 1]],
-                    [zr_all[k], zr_all[k + 1]],
-                )
-            } else {
-                let z = [z_all[k], z_all[k + 1]];
-                (z, z, z)
-            };
             let seg = Seg {
                 a,
                 dir: [(b[0] - a[0]) / len, (b[1] - a[1]) / len],
                 len,
                 nrm: unit_normal(a, b),
-                road: road_id,
+                road: p.road,
                 joint: [k > 0, k + 2 < n],
-                half,
-                flat,
-                z,
-                zl,
-                zr,
+                half: p.half,
+                flat: p.flat,
+                z: [p.z[k], p.z[k + 1]],
+                zl: [p.zl[k], p.zl[k + 1]],
+                zr: [p.zr[k], p.zr[k + 1]],
             };
-            let reach = flat + ROAD_BLEND_M;
+            let reach = p.flat + ROAD_BLEND_M;
             let (c0, r0) = self.cell(a[0].min(b[0]) - reach, a[1].min(b[1]) - reach);
             let (c1, r1) = self.cell(a[0].max(b[0]) + reach, a[1].max(b[1]) + reach);
             let idx = self.segs.len() as u32;
@@ -266,9 +392,13 @@ impl Field {
         inline[..inline_len]
             .iter()
             .chain(spill.iter())
-            .map(|e| (e.3, e.2))
+            .map(|e| Cand {
+                flat: e.3,
+                dist: e.1,
+                h: e.2,
+            })
             .reduce(|a, b| if beats(b, a) { b } else { a })
-            .map_or(g, |best| best.1)
+            .map_or(g, |best| best.h)
     }
 }
 
@@ -307,12 +437,15 @@ impl Surface {
             }
         }
         // Per vertex: the winning candidate of the roads finished so far (`best`), and the nearest
-        // segment of the road being visited (`cur_*`), each as `(flat, height)`. Roads are
-        // contiguous in `field.segs`.
-        let mut best = vec![(false, f32::INFINITY); n * n];
+        // segment of the road being visited (`cur`). Roads are contiguous in `field.segs`.
+        let none = Cand {
+            flat: false,
+            dist: f64::INFINITY,
+            h: f32::INFINITY,
+        };
+        let mut best = vec![none; n * n];
         let mut cur_road = vec![u32::MAX; n * n];
-        let mut cur_dist = vec![f64::INFINITY; n * n];
-        let mut cur_val = vec![(false, f32::INFINITY); n * n];
+        let mut cur = vec![none; n * n];
         for seg in &field.segs {
             let reach = seg.flat + ROAD_BLEND_M;
             let x0 = seg.a[0].min(seg.a[0] + seg.dir[0] * seg.len) - reach;
@@ -329,30 +462,33 @@ impl Surface {
                     let g = grid[i * n + j];
                     if let Some((v, d, flat)) = seg.value(x, y, g) {
                         let idx = i * n + j;
+                        let cand = Cand {
+                            flat,
+                            dist: d,
+                            h: v,
+                        };
                         if cur_road[idx] != seg.road {
                             // The previous road at this vertex is finished: it competes by its candidate.
-                            if beats(cur_val[idx], best[idx]) {
-                                best[idx] = cur_val[idx];
+                            if beats(cur[idx], best[idx]) {
+                                best[idx] = cur[idx];
                             }
                             cur_road[idx] = seg.road;
-                            cur_dist[idx] = d;
-                            cur_val[idx] = (flat, v);
-                        } else if d < cur_dist[idx] {
-                            cur_dist[idx] = d;
-                            cur_val[idx] = (flat, v);
+                            cur[idx] = cand;
+                        } else if d < cur[idx].dist {
+                            cur[idx] = cand;
                         }
                     }
                 }
             }
         }
         for idx in 0..n * n {
-            if beats(cur_val[idx], best[idx]) {
-                best[idx] = cur_val[idx];
+            if beats(cur[idx], best[idx]) {
+                best[idx] = cur[idx];
             }
         }
         for (h, b) in grid.iter_mut().zip(&best) {
-            if b.1.is_finite() {
-                *h = b.1;
+            if b.h.is_finite() {
+                *h = b.h;
             }
         }
         Surface {
@@ -413,5 +549,44 @@ mod tests {
         let x = 50.0 + flat + ROAD_BLEND_M / 2.0;
         let field = Field::new([a, b].iter(), [-100.0, -100.0]);
         assert_eq!(field.height(&|_, _| 0.0, x, 0.0), 10.0);
+    }
+
+    /// A T junction at (0, 0): the main road passes through the node, the stem ends there. Their
+    /// smoothed profiles differ at the node; after reconciliation both leave it at the same `z`.
+    #[test]
+    fn t_junction_node_has_one_height() {
+        let main = Polyline {
+            highway: "residential".into(),
+            name: String::new(),
+            points: vec![[-50.0, 0.0], [0.0, 0.0], [50.0, 0.0]],
+            z: vec![4.0, 6.0, 9.0],
+            zl: Vec::new(),
+            zr: Vec::new(),
+        };
+        let stem = Polyline {
+            highway: "residential".into(),
+            name: String::new(),
+            points: vec![[0.0, 0.0], [0.0, 20.0], [0.0, 40.0]],
+            z: vec![1.0, 2.0, 3.0],
+            zl: Vec::new(),
+            zr: Vec::new(),
+        };
+        let roads = [main, stem];
+        let mut profiles: Vec<Profile> = roads
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| Profile::of(r, i as u32))
+            .collect();
+        assert_ne!(
+            profiles[0].z[1], profiles[1].z[0],
+            "the profiles differ before reconciling"
+        );
+        reconcile_nodes(&mut profiles);
+        assert!(
+            (profiles[0].z[1] - profiles[1].z[0]).abs() < 1e-6,
+            "node heights {} and {}",
+            profiles[0].z[1],
+            profiles[1].z[0]
+        );
     }
 }

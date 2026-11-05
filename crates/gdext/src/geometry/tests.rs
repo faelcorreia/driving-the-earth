@@ -528,8 +528,8 @@ fn reference_tile_geometry_is_unchanged() {
     assert_eq!(mesh_hash(&g.roads), REFERENCE_ROADS_HASH);
 }
 
-const REFERENCE_TERRAIN_HASH: u64 = 0x2db7fcade2991972;
-const REFERENCE_ROADS_HASH: u64 = 0x651e307aec89a4a6;
+const REFERENCE_TERRAIN_HASH: u64 = 0x3277fb90883f3355;
+const REFERENCE_ROADS_HASH: u64 = 0xef82548fbdfcf747;
 
 /// A tile with no roads has the 10 m grid, bilinear, at every fine vertex (2,5 m).
 #[test]
@@ -813,7 +813,7 @@ fn ribbon_std(v: &[f64]) -> f64 {
 /// Ribbon metrics on the real baked map (measurement only, not a pass/fail test). Takes the
 /// centerline vertices of every road ribbon (`MEASURE_MAP`, default `casa`), resampled every
 /// 2.5 m, within 500 m of home (the map origin), and prints pitch, steps, lumps, the axis above
-/// the terrain and the 15 worst steps.
+/// the sample_height grid and the 15 worst steps.
 /// Run: `cargo test --release -p driving_the_earth_ext ribbon_metrics -- --ignored --nocapture`.
 #[test]
 #[ignore]
@@ -826,10 +826,9 @@ fn ribbon_metrics() {
     let index = crate::world::open_map(root, &id).expect("open map");
     let tm = index.meta.tile_size_m;
 
-    // Pass 1: raw centerline runs per tile, and each tile's terrain vertices (row-major n x n).
+    // Pass 1: raw centerline runs per tile, and each tile's grid (the 10 m heights `sample_height` reads).
     let mut raw_runs: Vec<((i32, i32), Vec<([f64; 2], f64)>)> = Vec::new();
-    let mut terrain: std::collections::HashMap<(i32, i32), Vec<[f32; 3]>> =
-        std::collections::HashMap::new();
+    let mut grids: std::collections::HashMap<(i32, i32), Tile> = std::collections::HashMap::new();
     for &(x, y) in index.coords() {
         let g = index.tile_geometry(x, y).expect("tile_geometry");
         let v = &g.roads.vertices;
@@ -848,27 +847,21 @@ fn ribbon_metrics() {
         if !run.is_empty() {
             raw_runs.push(((x, y), run));
         }
-        terrain.insert((x, y), g.terrain.vertices);
+        grids.insert((x, y), index.read_tile_at(x, y).expect("read tile"));
     }
 
-    // Terrain height under a map point, from the rendered triangles of its tile (same split as
-    // the mesh: (a, b, c) for u + w <= 1, else (b, c, d)).
+    // Grid height under a map point: `sample_height` of the tile that contains it (the 10 m grid,
+    // not the drawn terrain). `None` when no tile covers the point.
     let terrain_at = |p: [f64; 2]| -> Option<f64> {
         let key = ((p[0] / tm).floor() as i32, (p[1] / tm).floor() as i32);
-        let verts = terrain.get(&key)?;
-        let n = (verts.len() as f64).sqrt().round() as usize;
-        let cell = tm / (n - 1) as f64;
-        let fx = ((p[0] - key.0 as f64 * tm) / cell).clamp(0.0, (n - 1) as f64 - 1e-9);
-        let fy = ((p[1] - key.1 as f64 * tm) / cell).clamp(0.0, (n - 1) as f64 - 1e-9);
-        let (j, i) = (fx.floor() as usize, fy.floor() as usize);
-        let (u, w) = (fx - j as f64, fy - i as f64);
-        let h = |r: usize, c: usize| verts[r * n + c][1] as f64;
-        let (a, b, c, d) = (h(i, j), h(i, j + 1), h(i + 1, j), h(i + 1, j + 1));
-        Some(if u + w <= 1.0 {
-            a * (1.0 - u - w) + b * u + c * w
-        } else {
-            d * (u + w - 1.0) + b * (1.0 - w) + c * (1.0 - u)
-        })
+        let tile = grids.get(&key)?;
+        Some(sample_height(tile, tm, p[0], p[1]) as f64)
+    };
+    // Distance in m from a map point to the nearest tile border.
+    let border_gap = |p: [f64; 2]| -> f64 {
+        let fx = p[0] - (p[0] / tm).floor() * tm;
+        let fy = p[1] - (p[1] / tm).floor() * tm;
+        fx.min(tm - fx).min(fy).min(tm - fy)
     };
 
     // Pass 2: resample every run every 2.5 m, keeping the tile it came from.
@@ -998,8 +991,19 @@ fn ribbon_metrics() {
         lump_curve.len()
     );
     println!(
-        "axis above terrain: max {:.3} m at ({:.1}, {:.1}), {} samples without terrain",
+        "axis above sample_height: max {:.3} m at ({:.1}, {:.1}), {} samples without terrain",
         axis_above_terrain.0, axis_above_terrain.1[0], axis_above_terrain.1[1], axis_no_terrain
+    );
+    let mut border_steps: Vec<f64> = steps
+        .iter()
+        .filter(|s| border_gap(s.1) < 5.0)
+        .map(|s| s.0)
+        .collect();
+    println!(
+        "step p99 within 5 m of a tile border: {:.2} cm over {} steps (all steps p99 {:.2} cm)",
+        ribbon_percentile(&mut border_steps, 0.99) * 100.0,
+        border_steps.len(),
+        ribbon_percentile(&mut steps.iter().map(|s| s.0).collect::<Vec<_>>(), 0.99) * 100.0
     );
 
     steps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
