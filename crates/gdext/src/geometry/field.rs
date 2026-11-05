@@ -5,8 +5,9 @@
 //! The field is the 10 m grid (`ground`), except beside a road that has a profile. Over the
 //! road's corridor (half the width on each side of its axis) it is the profile: `z` on the axis,
 //! linear across to `zl` and `zr` on the edges. Over the next `ROAD_BLEND_M` it blends from the
-//! edge height to the grid. Where corridors overlap, the lowest candidate wins, so a terrain
-//! vertex never rises above a ribbon in a corridor. Roads with no profile do not change the grid.
+//! edge height to the grid. Where corridors overlap, a flat-zone candidate wins over a blend-band
+//! candidate of another road, and between equal kinds the lowest wins, so a terrain vertex never
+//! rises above a ribbon in a corridor. Roads with no profile do not change the grid.
 use tileformat::units::{ROAD_BLEND_M, TERRAIN_FINE_CELL_M, TILE_M};
 use tileformat::Tile;
 
@@ -18,6 +19,17 @@ use super::vec2::unit_normal;
 
 /// Side of a bucket of the segment index, in meters.
 const BUCKET_M: f64 = 10.0;
+
+/// Length beyond an open end of a road (no neighbor segment there) over which the profile keeps
+/// its slope, in meters. Beyond it the cap is flat again.
+const OPEN_END_EXTEND_M: f64 = 4.0;
+
+/// Whether surface candidate `a` beats `b`, each given as `(flat, height)`. A candidate of a flat
+/// zone beats one of a blend band of another road; between candidates of the same kind the lower
+/// height wins.
+fn beats(a: (bool, f32), b: (bool, f32)) -> bool {
+    (a.0 && !b.0) || (a.0 == b.0 && a.1 < b.1)
+}
 
 /// Half-width of the flat zone of a road: the ribbon edge plus one blend cell, rounded up to
 /// whole fine cells. Every grid vertex that a ribbon triangle touches then takes the profile
@@ -48,11 +60,25 @@ struct Seg {
 }
 
 impl Seg {
-    /// The field candidate of this segment at `(x, y)`, given the grid height `g` there, and the
-    /// distance from `(x, y)` to this segment's axis. `None` outside the corridor and its blend band.
-    fn value(&self, x: f64, y: f64, g: f32) -> Option<(f32, f64)> {
+    /// The field candidate of this segment at `(x, y)`, given the grid height `g` there, the
+    /// distance from `(x, y)` to this segment's axis, and whether it lies in the flat zone. `None`
+    /// outside the corridor and its blend band.
+    fn value(&self, x: f64, y: f64, g: f32) -> Option<(f32, f64, bool)> {
         let p = [x - self.a[0], y - self.a[1]];
         let t_raw = (p[0] * self.dir[0] + p[1] * self.dir[1]) / self.len;
+        // Along the axis the profile stops at a joint (the neighbor segment takes over there) and
+        // runs on its own slope up to `OPEN_END_EXTEND_M` past an open end.
+        let lo = if self.joint[0] {
+            0.0
+        } else {
+            -OPEN_END_EXTEND_M / self.len
+        };
+        let hi = if self.joint[1] {
+            1.0
+        } else {
+            1.0 + OPEN_END_EXTEND_M / self.len
+        };
+        let t_z = t_raw.clamp(lo, hi);
         let t = t_raw.clamp(0.0, 1.0);
         let (qx, qy) = (
             p[0] - self.dir[0] * self.len * t,
@@ -78,8 +104,8 @@ impl Seg {
             side
         };
         let s = lateral.clamp(-self.half, self.half);
-        let t = t as f32;
-        let at = |v: [f32; 2]| v[0] + (v[1] - v[0]) * t;
+        let t_z = t_z as f32;
+        let at = |v: [f32; 2]| v[0] + (v[1] - v[0]) * t_z;
         let (zc, zl, zr) = (at(self.z), at(self.zl), at(self.zr));
         let k = (s / self.half) as f32;
         let edge = if k >= 0.0 {
@@ -88,10 +114,10 @@ impl Seg {
             zc + (zr - zc) * -k
         };
         if dist <= self.flat {
-            Some((edge, dist))
+            Some((edge, dist, true))
         } else {
             let u = ((dist - self.flat) / ROAD_BLEND_M).clamp(0.0, 1.0) as f32;
-            Some((edge + (g - edge) * u, dist))
+            Some((edge + (g - edge) * u, dist, false))
         }
     }
 }
@@ -196,24 +222,25 @@ impl Field {
         (c as usize, r as usize)
     }
 
-    /// The surface height at map point `(x, y)`: the lowest road candidate, or the grid `ground`.
+    /// The surface height at map point `(x, y)`: the winning road candidate, or the grid `ground`.
     /// Within one road only the candidate of its segment nearest to `(x, y)` counts, so the end
     /// cap of a segment never stands in for a point beside the next segment of the same road.
+    /// Between roads a flat-zone candidate beats a blend-band one, then the lowest wins (`beats`).
     pub(super) fn height(&self, ground: &dyn Fn(f64, f64) -> f32, x: f64, y: f64) -> f32 {
         let g = ground(x, y);
         let (c0, r0) = self.cell(x - self.reach, y - self.reach);
         let (c1, r1) = self.cell(x + self.reach, y + self.reach);
-        // Per road: (road, distance to its nearest axis, candidate there). A point sees a few
-        // roads, so the first `INLINE_ROADS` live on the stack and no heap block is allocated.
+        // Per road: (road, distance to its nearest axis, candidate there, flat zone). A point sees
+        // a few roads, so the first `INLINE_ROADS` live on the stack and no heap block is allocated.
         const INLINE_ROADS: usize = 8;
-        let mut inline = [(u32::MAX, f64::INFINITY, 0.0f32); INLINE_ROADS];
+        let mut inline = [(u32::MAX, f64::INFINITY, 0.0f32, false); INLINE_ROADS];
         let mut inline_len = 0usize;
-        let mut spill: Vec<(u32, f64, f32)> = Vec::new();
+        let mut spill: Vec<(u32, f64, f32, bool)> = Vec::new();
         for r in r0..=r1 {
             for c in c0..=c1 {
                 for &k in &self.buckets[r * self.cols + c] {
                     let seg = &self.segs[k as usize];
-                    if let Some((v, d)) = seg.value(x, y, g) {
+                    if let Some((v, d, flat)) = seg.value(x, y, g) {
                         let slot = inline[..inline_len]
                             .iter_mut()
                             .chain(spill.iter_mut())
@@ -223,13 +250,14 @@ impl Field {
                                 if d < e.1 {
                                     e.1 = d;
                                     e.2 = v;
+                                    e.3 = flat;
                                 }
                             }
                             None if inline_len < INLINE_ROADS => {
-                                inline[inline_len] = (seg.road, d, v);
+                                inline[inline_len] = (seg.road, d, v, flat);
                                 inline_len += 1;
                             }
-                            None => spill.push((seg.road, d, v)),
+                            None => spill.push((seg.road, d, v, flat)),
                         }
                     }
                 }
@@ -238,9 +266,9 @@ impl Field {
         inline[..inline_len]
             .iter()
             .chain(spill.iter())
-            .map(|e| e.2)
-            .reduce(f32::min)
-            .unwrap_or(g)
+            .map(|e| (e.3, e.2))
+            .reduce(|a, b| if beats(b, a) { b } else { a })
+            .map_or(g, |best| best.1)
     }
 }
 
@@ -278,12 +306,13 @@ impl Surface {
                 };
             }
         }
-        // Per vertex: the lowest candidate of the roads finished so far (`best`), and the nearest
-        // segment of the road being visited (`cur_*`). Roads are contiguous in `field.segs`.
-        let mut best = vec![f32::INFINITY; n * n];
+        // Per vertex: the winning candidate of the roads finished so far (`best`), and the nearest
+        // segment of the road being visited (`cur_*`), each as `(flat, height)`. Roads are
+        // contiguous in `field.segs`.
+        let mut best = vec![(false, f32::INFINITY); n * n];
         let mut cur_road = vec![u32::MAX; n * n];
         let mut cur_dist = vec![f64::INFINITY; n * n];
-        let mut cur_val = vec![f32::INFINITY; n * n];
+        let mut cur_val = vec![(false, f32::INFINITY); n * n];
         for seg in &field.segs {
             let reach = seg.flat + ROAD_BLEND_M;
             let x0 = seg.a[0].min(seg.a[0] + seg.dir[0] * seg.len) - reach;
@@ -298,32 +327,32 @@ impl Surface {
                 for j in j0..=j1 {
                     let (x, y) = (origin[0] + j as f64 * cell, origin[1] + i as f64 * cell);
                     let g = grid[i * n + j];
-                    if let Some((v, d)) = seg.value(x, y, g) {
+                    if let Some((v, d, flat)) = seg.value(x, y, g) {
                         let idx = i * n + j;
                         if cur_road[idx] != seg.road {
                             // The previous road at this vertex is finished: it competes by its candidate.
-                            if cur_val[idx] < best[idx] {
+                            if beats(cur_val[idx], best[idx]) {
                                 best[idx] = cur_val[idx];
                             }
                             cur_road[idx] = seg.road;
                             cur_dist[idx] = d;
-                            cur_val[idx] = v;
+                            cur_val[idx] = (flat, v);
                         } else if d < cur_dist[idx] {
                             cur_dist[idx] = d;
-                            cur_val[idx] = v;
+                            cur_val[idx] = (flat, v);
                         }
                     }
                 }
             }
         }
         for idx in 0..n * n {
-            if cur_val[idx] < best[idx] {
+            if beats(cur_val[idx], best[idx]) {
                 best[idx] = cur_val[idx];
             }
         }
         for (h, b) in grid.iter_mut().zip(&best) {
-            if b.is_finite() {
-                *h = *b;
+            if b.1.is_finite() {
+                *h = b.1;
             }
         }
         Surface {
@@ -355,5 +384,34 @@ impl Surface {
         } else {
             d + (c - d) * (1.0 - fu) + (b - d) * (1.0 - fv)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn road(highway: &str, points: Vec<[f64; 2]>, z: f32) -> Polyline {
+        let n = points.len();
+        Polyline {
+            highway: highway.into(),
+            name: String::new(),
+            points,
+            z: vec![z; n],
+            zl: vec![z; n],
+            zr: vec![z; n],
+        }
+    }
+
+    /// Road A (z 10) runs along x. Road B (z 2) crosses it at x = 50, and A's axis lies in B's
+    /// blend band at mid-band, so B's candidate there is lower than A's. A's flat zone wins.
+    #[test]
+    fn flat_zone_of_a_road_beats_blend_band_of_another() {
+        let a = road("residential", vec![[0.0, 0.0], [100.0, 0.0]], 10.0);
+        let b = road("residential", vec![[50.0, -50.0], [50.0, 50.0]], 2.0);
+        let flat = flat_zone_m(road_width_m("residential") / 2.0);
+        let x = 50.0 + flat + ROAD_BLEND_M / 2.0;
+        let field = Field::new([a, b].iter(), [-100.0, -100.0]);
+        assert_eq!(field.height(&|_, _| 0.0, x, 0.0), 10.0);
     }
 }

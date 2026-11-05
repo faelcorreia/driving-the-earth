@@ -528,8 +528,8 @@ fn reference_tile_geometry_is_unchanged() {
     assert_eq!(mesh_hash(&g.roads), REFERENCE_ROADS_HASH);
 }
 
-const REFERENCE_TERRAIN_HASH: u64 = 0x96963f0a2b17c47f;
-const REFERENCE_ROADS_HASH: u64 = 0x768baad5f156b576;
+const REFERENCE_TERRAIN_HASH: u64 = 0x2db7fcade2991972;
+const REFERENCE_ROADS_HASH: u64 = 0x651e307aec89a4a6;
 
 /// A tile with no roads has the 10 m grid, bilinear, at every fine vertex (2,5 m).
 #[test]
