@@ -10,10 +10,16 @@ use crate::geometry::MeshData;
 use crate::world::far_lights::{lit_count, FarLoad};
 use crate::world::lod::{FOG_BEGIN_M, FOG_END_M};
 
-/// Fade of the distant lights near the car, in meters: none within `FADE_BEGIN_M`, full beyond
-/// `FADE_END_M` (closer than that, real buildings and lamps stand there).
-const FADE_BEGIN_M: f32 = 600.0;
-const FADE_END_M: f32 = 800.0;
+/// Handover to the real street lamp: the distant light fades out over `SWAP_BAND_M` centred on
+/// `SWAP_M` meters from the car (closer than that, the real lamp stands there).
+const SWAP_M: f32 = 600.0;
+const SWAP_BAND_M: f32 = 20.0;
+/// Height added to a distant light, in meters, so that the relief of the coarse rings does not
+/// hide it.
+const LIFT_M: f32 = 4.0;
+/// Soft floor on the radius of a light on screen, in pixels: a sub-pixel light is not allowed to
+/// flicker by aliasing (its diameter is about 2.5 px at the floor).
+const MIN_RADIUS_PX: f32 = 1.25;
 /// Angular size of a light, in radians (about 2.5 px at 1080p with a 75 degree vertical fov).
 const ANGULAR_SIZE_RAD: f32 = 0.0030;
 /// Brightness of a lit light (HDR, unshaded).
@@ -44,8 +50,10 @@ impl DistantLights {
         mat.set_shader_parameter("color_warm", &rgb(WARM_RGB));
         mat.set_shader_parameter("fog_begin", &FOG_BEGIN_M.to_variant());
         mat.set_shader_parameter("fog_end", &FOG_END_M.to_variant());
-        mat.set_shader_parameter("fade_begin", &FADE_BEGIN_M.to_variant());
-        mat.set_shader_parameter("fade_end", &FADE_END_M.to_variant());
+        mat.set_shader_parameter("swap_m", &SWAP_M.to_variant());
+        mat.set_shader_parameter("swap_band_m", &SWAP_BAND_M.to_variant());
+        mat.set_shader_parameter("lift_m", &LIFT_M.to_variant());
+        mat.set_shader_parameter("min_radius_px", &MIN_RADIUS_PX.to_variant());
         mat.set_shader_parameter("angular_size", &ANGULAR_SIZE_RAD.to_variant());
         mat.set_shader_parameter("intensity", &INTENSITY.to_variant());
         mat.set_shader_parameter("ramp_s", &RAMP_S.to_variant());

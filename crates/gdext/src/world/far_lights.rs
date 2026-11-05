@@ -47,6 +47,23 @@ pub fn select_by_weight(points: &[FarLight], max: usize) -> Vec<(u32, FarLight)>
     order.into_iter().map(|i| (i as u32, points[i])).collect()
 }
 
+/// Smoothstep of the distance `d` (m) across the handover band centred on `swap_m`: 0 nearer than
+/// `swap_m - band_m / 2` (the real street lamp takes over), 1 farther than `swap_m + band_m / 2`
+/// (the distant light shows). The shader computes this; the test pins the formula.
+#[cfg(test)]
+pub fn handover_fade(d: f64, swap_m: f64, band_m: f64) -> f64 {
+    let t = ((d - (swap_m - band_m / 2.0)) / band_m).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Radius of a light on screen, in pixels, with a soft floor: `sqrt(r^2 + min^2)` is about `r` for
+/// large lights and about `min` for sub-pixel ones, so the size never jumps across the floor.
+/// The shader computes this; the test pins the formula.
+#[cfg(test)]
+pub fn soft_min_radius_px(radius_px: f64, min_px: f64) -> f64 {
+    (radius_px * radius_px + min_px * min_px).sqrt()
+}
+
 /// The MultiMesh buffer of the kept lights and their sorted delays (seconds).
 pub fn build(points: &[(u32, FarLight)]) -> (Vec<f32>, Vec<f32>) {
     let mut buffer = Vec::with_capacity(points.len() * FLOATS_PER_INSTANCE);
@@ -150,6 +167,29 @@ mod tests {
         assert!((buffer[13] - 128.0 / 255.0).abs() < 1e-6);
         assert_eq!(buffer[14], 1.0);
         assert_eq!(delays, vec![far_delay_s(7) as f32]);
+    }
+
+    #[test]
+    fn handover_fade_is_zero_near_and_one_far_within_the_band() {
+        assert_eq!(handover_fade(500.0, 600.0, 20.0), 0.0);
+        assert_eq!(handover_fade(590.0, 600.0, 20.0), 0.0);
+        assert_eq!(handover_fade(610.0, 600.0, 20.0), 1.0);
+        assert_eq!(handover_fade(900.0, 600.0, 20.0), 1.0);
+        assert!((handover_fade(600.0, 600.0, 20.0) - 0.5).abs() < 1e-12);
+        let mut last = 0.0;
+        for i in 0..=200 {
+            let f = handover_fade(590.0 + i as f64 * 0.1, 600.0, 20.0);
+            assert!(f >= last, "not monotonic at step {i}");
+            last = f;
+        }
+    }
+
+    #[test]
+    fn soft_min_radius_keeps_large_lights_and_floors_small_ones() {
+        assert!((soft_min_radius_px(100.0, 1.25) - 100.0).abs() < 0.01);
+        assert!((soft_min_radius_px(0.0, 1.25) - 1.25).abs() < 1e-12);
+        let r = soft_min_radius_px(0.5, 1.25);
+        assert!(r > 1.25 && r < 1.35, "{r}");
     }
 
     #[test]
