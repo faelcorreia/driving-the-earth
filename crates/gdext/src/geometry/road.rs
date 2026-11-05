@@ -10,6 +10,10 @@ use super::vec2::{dist, miter, scale, unit_normal};
 pub(crate) const ROAD_LIFT_M: f32 = 0.1;
 /// Extra lift per road index (modulo 8), so overlapping ribbons do not z-fight.
 pub(super) const ROAD_ORDER_LIFT_M: f32 = 0.002;
+/// Lift of the ribbon's left and right edges above the terrain, in meters. The center keeps the
+/// full lift, so the road is a crown that falls to the terrain at its edges: no lip for a wheel or
+/// the chassis to catch on when the car leaves the road.
+pub(crate) const ROAD_EDGE_LIFT_M: f32 = 0.01;
 /// Extra ribbon lift per meter of height step to the neighboring stations beyond
 /// `ROAD_STEP_FREE_M` (about 6% grade at 2.5 m stations; gentler stretches keep the plain lift), capped.
 const ROAD_STEP_FREE_M: f32 = 0.15;
@@ -98,11 +102,14 @@ pub(super) fn push_road(
         })
         .collect();
     let extra = smooth_extra(&raw);
+    // Edge columns (c = 0 and 2) take the edge lift; the center column (c = 1) takes the full lift.
+    let edge_lift = lift - ROAD_LIFT_M + ROAD_EDGE_LIFT_M;
     for s in 0..n {
         for c in 0..3 {
             let [x, y] = xy[3 * s + c];
+            let base_lift = if c == 1 { lift } else { edge_lift };
             mesh.vertices
-                .push(world(x, y, heights[3 * s + c] + lift + extra[s]));
+                .push(world(x, y, heights[3 * s + c] + base_lift + extra[s]));
             mesh.normals.push([0.0, 1.0, 0.0]);
         }
     }

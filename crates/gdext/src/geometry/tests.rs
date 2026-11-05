@@ -415,8 +415,10 @@ fn road_becomes_front_up_ribbon_on_terrain() {
         g.roads.indices.len() / 3,
         (g.roads.vertices.len() / 3 - 1) * 4
     );
-    for v in &g.roads.vertices {
-        assert!((v[1] - (50.0 + ROAD_LIFT_M)).abs() < 1e-4);
+    // Vertices come in (left edge, center, right edge) triples: the center keeps the lift, the edges fall to the terrain.
+    for (i, v) in g.roads.vertices.iter().enumerate() {
+        let want = if i % 3 == 1 { ROAD_LIFT_M } else { super::road::ROAD_EDGE_LIFT_M };
+        assert!((v[1] - (50.0 + want)).abs() < 1e-4);
     }
     // Ribbon is 6 m wide: corners at z = -(10 +- 3).
     let zs: Vec<f32> = g.roads.vertices.iter().map(|v| v[2]).collect();
@@ -529,7 +531,7 @@ fn reference_tile_geometry_is_unchanged() {
 }
 
 const REFERENCE_TERRAIN_HASH: u64 = 0x3277fb90883f3355;
-const REFERENCE_ROADS_HASH: u64 = 0xef82548fbdfcf747;
+const REFERENCE_ROADS_HASH: u64 = 0x194505d14a164e0e;
 
 /// A tile with no roads has the 10 m grid, bilinear, at every fine vertex (2,5 m).
 #[test]
@@ -764,6 +766,7 @@ fn ribbon_mesh_matches_profile_on_axis_and_edges_within_2cm() {
     let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
     let g = tile_geometry(&t, 250.0);
     let lift = ROAD_LIFT_M as f64;
+    let edge_lift = super::road::ROAD_EDGE_LIFT_M as f64;
     let axis_z = |x: f64| {
         if x <= 100.0 {
             (x - 30.0) / 70.0 * 0.7
@@ -778,8 +781,10 @@ fn ribbon_mesh_matches_profile_on_axis_and_edges_within_2cm() {
             let Some(h) = ribbon_height(&g.roads, x, y0 + s) else {
                 continue;
             };
-            // `offset` is the edge's cross slope; the lateral share of it is |s| / half.
-            let want = axis_z(x) + offset * (s.abs() / half) + lift;
+            // `offset` is the edge's cross slope; the lateral share of it is |s| / half. The lift falls
+            // from the center's to the edge's linearly over the half width (the crown).
+            let f = s.abs() / half;
+            let want = axis_z(x) + offset * f + lift + (edge_lift - lift) * f;
             checked += 1;
             worst = worst.max((h - want).abs());
         }

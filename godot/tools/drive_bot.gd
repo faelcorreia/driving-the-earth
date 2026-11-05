@@ -19,6 +19,9 @@ const LOOKAHEAD_BASE_M := 4.0
 ## Lateral acceleration the bot allows itself in curves, m/s².
 const CURVE_LAT_ACCEL := 4.0
 const SEARCH_AHEAD := 80
+## A stop: throttle held while speed stays under STOP_SPEED_MS for more than STOP_HOLD_S (simulated s).
+const STOP_SPEED_MS := 1.0
+const STOP_HOLD_S := 1.0
 
 
 func _initialize() -> void:
@@ -32,6 +35,8 @@ func _parse_args() -> Dictionary:
 		"settle": "3",
 		"length": "900",
 		"cruise": "33.3",
+		"offset": "0",
+		"sweep": "0",
 	}
 	var args := OS.get_cmdline_user_args()
 	var i := 0
@@ -84,6 +89,7 @@ func run() -> void:
 		push_error("drive bot: no route from the start point on map '%s'" % opts["map"])
 		quit(1)
 		return
+	waypoints = _offset_route(waypoints, float(opts["offset"]), float(opts["sweep"]) > 0.0)
 	var route_m := 0.0
 	var cum := PackedFloat32Array([0.0])
 	for i in range(1, waypoints.size()):
@@ -103,6 +109,12 @@ func run() -> void:
 	var prev_pos := start_pos
 	var distance_m := 0.0
 	var ys := PackedFloat64Array()
+	# Contacts of the body are reported only for the bot, so the stops can name what the car hit.
+	car.contact_monitor = true
+	car.max_contacts_reported = 16
+	var stop_ticks := int(round(STOP_HOLD_S * tps))
+	var stuck_ticks := 0
+	var stops := 0
 	for i in span_ticks:
 		_steer_and_throttle(car, state)
 		await physics_frame
@@ -110,7 +122,14 @@ func run() -> void:
 		distance_m += Vector2(pos.x - prev_pos.x, pos.z - prev_pos.z).length()
 		prev_pos = pos
 		ys.append(pos.y)
-
+		var speed := car.linear_velocity.length()
+		if float(state["throttle"]) > 0.0 and speed < STOP_SPEED_MS:
+			stuck_ticks += 1
+			if stuck_ticks == stop_ticks:
+				stops += 1
+				_report_stop(car, state, stops, float(i + 1) / tps)
+		else:
+			stuck_ticks = 0
 	_release_all()
 	var seconds := float(span_ticks) / tps
 	var mean_y := 0.0
@@ -136,7 +155,51 @@ func run() -> void:
 		avg /= float(hi - lo)
 		resid_var += (ys[i] - avg) * (ys[i] - avg)
 	print("drive bot: chassis y bounce stdev %.4f m (residual of a 1 s moving mean)" % sqrt(resid_var / maxf(ys.size(), 1)))
+	print("drive bot: stops %d (speed < %.1f m/s with throttle for > %.1f s)" % [stops, STOP_SPEED_MS, STOP_HOLD_S])
 	quit(0)
+
+
+## Probe only: shifts the route sideways by `offset` m (positive = left), easing in and out over
+## 20 points so the start stays at the car. Used to drive onto the sidewalk on purpose.
+## With `sweep`, the shift grows linearly from 0 at the start to `offset` at the end: the car crosses
+## the road edge at an angle instead of parallel to it.
+func _offset_route(route: PackedVector2Array, offset: float, sweep: bool) -> PackedVector2Array:
+	if is_zero_approx(offset):
+		return route
+	var n := route.size()
+	var shifted := PackedVector2Array()
+	shifted.resize(n)
+	for i in n:
+		var prev := route[maxi(i - 1, 0)]
+		var next := route[mini(i + 1, n - 1)]
+		var tangent := (next - prev).normalized()
+		var left := Vector2(-tangent.y, tangent.x)
+		var ramp := float(i) / float(n - 1) if sweep else minf(1.0, minf(float(i) / 20.0, float(n - 1 - i) / 20.0))
+		shifted[i] = route[i] + left * offset * ramp
+	return shifted
+
+
+## Logs one stop: position, route progress, and what each wheel and the body touch.
+func _report_stop(car: VehicleBody3D, state: Dictionary, number: int, t_s: float) -> void:
+	var pos := car.global_position
+	var route: PackedVector2Array = state["route"]
+	var index: int = state["index"]
+	var wheels: PackedStringArray = []
+	for child in car.get_children():
+		var wheel := child as VehicleWheel3D
+		if wheel == null:
+			continue
+		var contact := "air"
+		if wheel.is_in_contact():
+			var body := wheel.get_contact_body()
+			contact = "%s (%s) at y=%.2f" % [body.get_path() if body else "?", body.get_class() if body else "?", wheel.get_contact_point().y]
+		wheels.append("%s: %s" % [wheel.name, contact])
+	var bodies: PackedStringArray = []
+	for body in car.get_colliding_bodies():
+		bodies.append("%s (%s)" % [body.get_path(), body.get_class()])
+	print("drive bot: STOP %d at t=%.2f s, x=%.2f y=%.2f z=%.2f, speed %.2f m/s, route point %d of %d" % [number, t_s, pos.x, -pos.z, pos.y, car.linear_velocity.length(), index, route.size() - 1])
+	print("drive bot:   wheels: %s" % ", ".join(wheels))
+	print("drive bot:   bodies: %s" % (", ".join(bodies) if not bodies.is_empty() else "none"))
 
 
 ## One control step: picks the route point ahead, steers toward it and sets the throttle.
@@ -188,6 +251,7 @@ func _steer_and_throttle(car: VehicleBody3D, state: Dictionary) -> void:
 	if index >= route.size() - 1:
 		throttle = 0.0
 
+	state["throttle"] = throttle
 	_set_action("drive_forward", throttle)
 	_set_action("drive_back", 0.0)
 	_set_action("drive_left", maxf(steer, 0.0))

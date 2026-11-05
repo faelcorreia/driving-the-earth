@@ -530,23 +530,30 @@ impl EarthWorld {
             return;
         };
         let mut node = Node3D::new_alloc();
+        // Named by tile and body, so the drive bot's stop reports say what the car touched.
+        node.set_name(&format!("Tile_{}_{}", t.0, t.1));
         // Terrain of tiles with ground cover carries its colors; older tiles keep the albedo.
         let terrain = if geometry.terrain.colors.is_empty() {
             &terrain_mat
         } else {
             &vertex_mat
         };
-        node.add_child(&solid_body(&geometry.terrain, terrain));
+        let mut terrain_body = solid_body(&geometry.terrain, terrain);
+        terrain_body.set_name("Terrain");
+        node.add_child(&terrain_body);
         if !geometry.roads.is_empty() {
             // Roads are solid too, so the wheels rest on them instead of on the terrain below.
-            node.add_child(&solid_body(&geometry.roads, &road_mat));
+            let mut road_body = solid_body(&geometry.roads, &road_mat);
+            road_body.set_name("Roads");
+            node.add_child(&road_body);
         }
         if !geometry.buildings.is_empty() {
             // One mesh and one collision body per tile, for the buildings of that tile.
-            let body = match &self.building_mat {
+            let mut body = match &self.building_mat {
                 Some(mat) => solid_body(&geometry.buildings, mat),
                 None => solid_body(&geometry.buildings, &vertex_mat),
             };
+            body.set_name("Buildings");
             node.add_child(&body);
         }
         if let Some(mats) = &self.lamp_mats {
