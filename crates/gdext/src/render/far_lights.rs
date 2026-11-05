@@ -7,12 +7,14 @@ use godot::prelude::*;
 
 use super::array_mesh;
 use crate::geometry::MeshData;
-use crate::world::far_lights::{lit_count, FarLoad};
+use crate::world::far_lights::{handover_swap_m, lit_count, FarLoad};
 use crate::world::lod::{FOG_BEGIN_M, FOG_END_M};
 
-/// Handover to the real street lamp: the distant light fades out over `SWAP_BAND_M` centred on
-/// `SWAP_M` meters from the car (closer than that, the real lamp stands there).
-const SWAP_M: f32 = 600.0;
+/// Default `view_radius_m` of `EarthWorld` (the loaded tiles' radius, in meters). The handover to
+/// the real street lamp is at this radius: the distant light fades out over `SWAP_BAND_M` centred
+/// on it (closer than that, the real lamp stands there).
+const VIEW_RADIUS_M: f64 = 1000.0;
+const SWAP_M: f32 = handover_swap_m(VIEW_RADIUS_M) as f32;
 const SWAP_BAND_M: f32 = 20.0;
 /// Height added to a distant light, in meters, so that the relief of the coarse rings does not
 /// hide it.

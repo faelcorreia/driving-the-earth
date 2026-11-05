@@ -20,7 +20,7 @@ uniform float fog_begin = 5000.0;
 uniform float fog_end = 10000.0;
 // Handover to the real street lamp: the light is off nearer than swap_m - swap_band_m / 2 and full
 // farther than swap_m + swap_band_m / 2. Mirrors `handover_fade` in world/far_lights.rs.
-uniform float swap_m = 600.0;
+uniform float swap_m = 1000.0;
 uniform float swap_band_m = 20.0;
 // Height added to the light, in meters (the lamp heads are the reference, the relief is not).
 uniform float lift_m = 4.0;

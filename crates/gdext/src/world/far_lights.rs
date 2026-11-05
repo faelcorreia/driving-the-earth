@@ -47,6 +47,14 @@ pub fn select_by_weight(points: &[FarLight], max: usize) -> Vec<(u32, FarLight)>
     order.into_iter().map(|i| (i as u32, points[i])).collect()
 }
 
+/// Distance (m) from the car where a distant light gives way to the real street lamp: the edge of
+/// the loaded tiles. A tile starts loading (and its lamp heads appear) at `view_radius_m`, so the
+/// distant light is off inside that edge. The unload hysteresis is not added: it would leave a
+/// gap of that width on the way in, where neither the head nor the distant light is drawn.
+pub const fn handover_swap_m(view_radius_m: f64) -> f64 {
+    view_radius_m
+}
+
 /// Smoothstep of the distance `d` (m) across the handover band centred on `swap_m`: 0 nearer than
 /// `swap_m - band_m / 2` (the real street lamp takes over), 1 farther than `swap_m + band_m / 2`
 /// (the distant light shows). The shader computes this; the test pins the formula.
@@ -181,6 +189,29 @@ mod tests {
             let f = handover_fade(590.0 + i as f64 * 0.1, 600.0, 20.0);
             assert!(f >= last, "not monotonic at step {i}");
             last = f;
+        }
+    }
+
+    #[test]
+    fn handover_swaps_at_the_loaded_radius_with_a_continuous_band() {
+        // Defaults of EarthWorld: view_radius_m = 1000, unload hysteresis 150.
+        let (radius, hysteresis, band) = (1000.0, 150.0, 20.0);
+        let swap = handover_swap_m(radius);
+        assert_eq!(swap, 1000.0);
+        // Swap sits at the load edge, before the unload edge: no gap on the way in.
+        assert!(swap < radius + hysteresis);
+        // Band of 20 m: the distant light is fully off at 990 and fully on at 1010.
+        assert_eq!(handover_fade(swap - band / 2.0 - 0.1, swap, band), 0.0);
+        assert_eq!(handover_fade(swap + band / 2.0 + 0.1, swap, band), 1.0);
+        assert!((handover_fade(swap, swap, band) - 0.5).abs() < 1e-12);
+        // Continuous: steps of 0.5 m across the band never jump more than 0.1 in fade.
+        let mut last = handover_fade(swap - band, swap, band);
+        let mut d = swap - band;
+        while d <= swap + band {
+            let f = handover_fade(d, swap, band);
+            assert!((f - last).abs() <= 0.1, "jump at {d} m");
+            last = f;
+            d += 0.5;
         }
     }
 
