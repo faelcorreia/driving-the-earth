@@ -53,6 +53,7 @@ const BRAKE_MIN_SPEED := 0.5
 @onready var _tails: Array[MeshInstance3D] = [$TailLeft, $TailRight]
 var _tail_mats: Array[StandardMaterial3D] = []
 var _braking := false
+var _clock: Node = null
 
 
 func _ready() -> void:
@@ -202,11 +203,14 @@ func _physics_process(_delta: float) -> void:
 	_braking = (throttle < 0.0 and forward_speed > BRAKE_MIN_SPEED) or (throttle > 0.0 and forward_speed < -BRAKE_MIN_SPEED)
 
 
-## True while the street lamps are on. Reads the shader global the lamps use, so the car lights
-## switch on the same frame as the threshold crossing, without the per-pole delay.
+## True while the street lamps are on: asks the environment clock (the state the lamps use, without
+## the per-pole delay). Found by name among the world's children, once the clock exists.
 func _lamps_on() -> bool:
-	var state: Variant = RenderingServer.global_shader_parameter_get("lamp_state")
-	return state != null and float(state) > 0.5
+	if _clock == null:
+		_clock = get_parent().find_child("Environment", false, false)
+		if _clock == null:
+			return false
+	return _clock.lamps_on()
 
 
 func _process(_delta: float) -> void:

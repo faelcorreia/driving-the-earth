@@ -127,6 +127,13 @@ impl EnvironmentClock {
     #[signal]
     fn light_threshold_crossed(name: GString, descending: bool);
 
+    /// True while the street lamps are on (the same state the lamp shaders read, without the
+    /// per-pole delay). The car's lights poll this each frame instead of the shader global.
+    #[func]
+    fn lamps_on(&self) -> bool {
+        self.lamp_on_since.is_some()
+    }
+
     /// Botão "Aplicar" do painel de hora: lê data e hora dos campos.
     #[func]
     fn on_set_pressed(&mut self) {
