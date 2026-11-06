@@ -5,19 +5,32 @@ use godot::classes::base_material_3d::CullMode;
 use godot::classes::light_3d::Param;
 use godot::classes::multi_mesh::TransformFormat;
 use godot::classes::{
-    MultiMesh, MultiMeshInstance3D, Node3D, OmniLight3D, Shader, ShaderMaterial, StandardMaterial3D,
+    MultiMesh, MultiMeshInstance3D, Node3D, Shader, ShaderMaterial, SpotLight3D, StandardMaterial3D,
 };
 use godot::prelude::*;
 
 use super::{array_mesh, material};
 use crate::geometry::lamps::{glow_model, head_model, pole_model, LampPost};
-use tileformat::units::lamps::{LAMP_ARM_M, LAMP_HEIGHT_M, LAMP_REAL_RANGE_M};
+use tileformat::units::lamps::{LAMP_ARM_M, LAMP_HEIGHT_M};
 
 /// Colour of the lamp head and the light pool when lit: sodium yellow.
 pub(crate) const LAMP_HEAD_RGB: (f32, f32, f32) = (1.0, 0.72, 0.35);
 /// Energy of a lit lamp head (emission) and of a real light.
 const HEAD_EMISSION: f32 = 4.0;
-const REAL_LIGHT_ENERGY: f32 = 2.0;
+const REAL_LIGHT_ENERGY: f32 = 1.0;
+/// Half-angle of the pool cone, in degrees: a spot aimed straight down from the arm tip (8 m up),
+/// wide enough to reach the midpoint between two lamps (17.5 m out on the ground, half of
+/// `LAMP_SPACING_M`), so the road lights up continuously between the poles.
+const POOL_CONE_DEG: f32 = 80.0;
+/// Angular falloff of the cone (Godot's `spot_attenuation`): below 1 the light is flatter from the
+/// axis to the rim, so the road far from the pole is not much darker than under it.
+const POOL_SPOT_ATTENUATION: f32 = 0.3;
+/// Range of a real light, in meters: the midpoint between two poles is 19.2 m from the light
+/// (sqrt(17.5^2 + 8^2)), and the falloff must not cut the light before that.
+const POOL_RANGE_M: f32 = 26.0;
+/// Distance falloff of a real light (Godot's `attenuation`, 1.0 is the default): below 1 the
+/// light fades more slowly with distance, so the road midway between two poles stays lit.
+const POOL_ATTENUATION: f32 = 0.0;
 /// Real lights in the pool (the export `lamp_real_lights` turns some or all of them off).
 pub(crate) const LAMP_POOL: usize = 4;
 const POLE_RGB: (f32, f32, f32) = (0.18, 0.18, 0.2);
@@ -126,23 +139,27 @@ pub(crate) fn head_position(post: &LampPost) -> Vector3 {
     )
 }
 
-/// The fixed pool of real lights: created once, moved to the lit lamps nearest the car.
+/// The fixed pool of real lights: created once, moved to the lit lamps nearest the car. Each is a
+/// spot without shadow, aimed straight down from the arm tip (a spot points along its -Z).
 pub(crate) struct LampLights {
-    lights: Vec<Gd<OmniLight3D>>,
+    lights: Vec<Gd<SpotLight3D>>,
 }
 
 impl LampLights {
     pub(crate) fn new() -> Self {
         let lights = (0..LAMP_POOL)
             .map(|_| {
-                let mut light = OmniLight3D::new_alloc();
+                let mut light = SpotLight3D::new_alloc();
                 light.set_color(Color::from_rgb(
                     LAMP_HEAD_RGB.0,
                     LAMP_HEAD_RGB.1,
                     LAMP_HEAD_RGB.2,
                 ));
                 light.set_param(Param::ENERGY, REAL_LIGHT_ENERGY);
-                light.set_param(Param::RANGE, LAMP_REAL_RANGE_M as f32);
+                light.set_param(Param::RANGE, POOL_RANGE_M);
+                light.set_param(Param::SPOT_ANGLE, POOL_CONE_DEG);
+                light.set_param(Param::SPOT_ATTENUATION, POOL_SPOT_ATTENUATION);
+                light.set_param(Param::ATTENUATION, POOL_ATTENUATION);
                 light.set_shadow(false);
                 light.set_visible(false);
                 light
@@ -152,7 +169,7 @@ impl LampLights {
     }
 
     /// Nodes to add to the scene (the pool is owned by the caller's tree).
-    pub(crate) fn nodes(&self) -> Vec<Gd<OmniLight3D>> {
+    pub(crate) fn nodes(&self) -> Vec<Gd<SpotLight3D>> {
         self.lights.clone()
     }
 
@@ -162,7 +179,9 @@ impl LampLights {
         for (i, light) in self.lights.iter_mut().enumerate() {
             match heads.get(i).filter(|_| i < active) {
                 Some(&p) => {
-                    light.set_position(p);
+                    // Rotate -Z (the spot direction) to straight down: a turn of -90 deg about X.
+                    let down = Basis::from_axis_angle(Vector3::RIGHT, -std::f32::consts::FRAC_PI_2);
+                    light.set_transform(Transform3D::new(down, p));
                     light.set_visible(true);
                 }
                 None => light.set_visible(false),

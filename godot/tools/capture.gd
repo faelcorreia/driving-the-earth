@@ -6,6 +6,11 @@ extends SceneTree
 ## com o mundo parado, antes do primeiro horário), --az 160 (ou lista 160,250: uma foto da
 ## câmera por azimute), --fast 60 (velocidade do avanço do relógio), --moon 1 (foto apontada
 ## para o disco da lua). Horário anterior ao --start é lido como do dia seguinte (ex.: 04:30).
+## Diagnóstico (opcionais, sem efeito quando ausentes): --exposure 6.0 (tonemap_exposure do
+## WorldEnvironment), --pool 0 (lamp_real_lights do World: 0 desliga as luzes reais do poste),
+## --top 1 (fotos de cima a TOP_HEIGHT_M: <HHMM>_top_car.png, _top_pole.png, _top_between.png;
+## pole = luz acesa mais próxima do carro, near = 6 m à frente dela, between = 17,5 m à frente
+## dela, na direção do carro). --car-under-pole 1 põe o carro sob essa luz antes das fotos de cima.
 ##
 ## Para cada horário: o relógio anda em tempo acelerado até o horário e para (speed 0). Então
 ## salva PNGs:
@@ -17,6 +22,7 @@ extends SceneTree
 const SIZE := Vector2i(1280, 720)
 const EYE_HEIGHT_M := 1.2
 const SETTLE_FRAMES := 60
+const TOP_HEIGHT_M := 14.0
 
 
 func _initialize() -> void:
@@ -33,17 +39,34 @@ func _parse_args() -> Dictionary:
 		"az": "160",
 		"fast": "60",
 		"moon": "0",
+		"exposure": "",
+		"pool": "",
+		"top": "0",
+		"car_under_pole": "0",
 	}
 	var args := OS.get_cmdline_user_args()
 	var i := 0
 	while i < args.size():
-		var key := args[i].trim_prefix("--")
+		var key := args[i].trim_prefix("--").replace("-", "_")
 		if opts.has(key) and i + 1 < args.size():
 			opts[key] = args[i + 1]
 			i += 2
 		else:
 			i += 1
 	return opts
+
+
+## Lit pool light (omni or spot) nearest to `from`, or null when none is lit within reach.
+func _nearest_pool_light(world: Node, from: Vector3) -> Node3D:
+	var best: Node3D = null
+	var best_d := INF
+	for n in world.find_children("*", "", true, false):
+		if (n is OmniLight3D or n is SpotLight3D) and (n as Node3D).is_visible_in_tree():
+			var d := (n as Node3D).global_position.distance_squared_to(from)
+			if d < best_d:
+				best_d = d
+				best = n
+	return best
 
 
 func _hm_to_min(hm: String) -> float:
@@ -80,6 +103,8 @@ func run() -> void:
 	var world := main.get_node("World")
 	# map_id vai no nó antes de entrar na árvore, então o mundo nasce com o mapa certo.
 	world.set("map_id", opts["map"])
+	if opts["pool"] != "":
+		world.set("lamp_real_lights", opts["pool"].to_int())
 	root.add_child(main)
 
 	# Nodes added during the first frames are set up at the next frame, so the clock shows up later.
@@ -109,6 +134,9 @@ func run() -> void:
 		quit(1)
 		return
 	var car := car_cam.get_parent() as Node3D
+	var wenv := main.find_child("WorldEnvironment", true, false) as WorldEnvironment
+	if opts["exposure"] != "" and wenv != null and wenv.environment != null:
+		wenv.environment.tonemap_exposure = float(opts["exposure"])
 
 	var start_min := _hm_to_min(opts["start"])
 	var fast := float(opts["fast"])
@@ -156,6 +184,39 @@ func run() -> void:
 			print("capture: shooting az %s" % az)
 			await _snap(out_dir.path_join("%s_az%s.png" % [tag, az]))
 			print("capture: az %s done" % az)
+
+		# (b2) diagnóstico: de cima, a TOP_HEIGHT_M, sobre o carro, sobre a luz do poste mais
+		# próxima e a meio caminho entre duas luzes acesas vizinhas.
+		if opts["top"] == "1":
+			# Between: half a lamp spacing (35 m, tileformat LAMP_SPACING_M) along the car's heading
+			# from the nearest lit pool light; an estimate, the next pole is not known here.
+			var pole := _nearest_pool_light(world, car.global_position)
+			if pole != null and opts["car_under_pole"] == "1":
+				# The body's state lives in the physics server: a plain node move is undone at the
+				# next physics sync, so teleport through the server and stop the car.
+				var at := Vector3(pole.global_position.x, car.global_position.y, pole.global_position.z)
+				var rid: RID = car.get_rid()
+				PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_TRANSFORM, Transform3D(car.global_transform.basis, at))
+				PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, Vector3.ZERO)
+				PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY, Vector3.ZERO)
+				for i in 30:
+					await physics_frame
+			var centers := {"car": car.global_position}
+			if pole != null:
+				centers["pole"] = pole.global_position
+				var ahead := -car.global_transform.basis.z
+				ahead.y = 0.0
+				ahead = ahead.normalized()
+				centers["near"] = pole.global_position + ahead * 6.0
+				centers["between"] = pole.global_position + ahead * 17.5
+			for key in centers:
+				var c: Vector3 = centers[key]
+				car_cam.global_position = Vector3(c.x, car.global_position.y + TOP_HEIGHT_M, c.z)
+				car_cam.look_at(Vector3(c.x, car.global_position.y, c.z), Vector3.FORWARD)
+				for i in 5:
+					await process_frame
+				await _snap(out_dir.path_join("%s_top_%s.png" % [tag, key]))
+				print("capture: top %s at %s, car body now at %s" % [key, c, car.global_position])
 
 		# (c) a lua, se pedida: a câmera aponta para o disco (mesmo que esteja abaixo do horizonte).
 		if opts["moon"] == "1" and moon_light != null:
