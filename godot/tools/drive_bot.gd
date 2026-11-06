@@ -66,12 +66,12 @@ func run() -> void:
 			break
 	if cam == null:
 		push_error("drive bot: no car camera under World (spawn failed?)")
-		quit(1)
+		await _finish(main, 1)
 		return
 	var car := cam.get_parent() as VehicleBody3D
 	if car == null:
 		push_error("drive bot: the camera is not under the car")
-		quit(1)
+		await _finish(main, 1)
 		return
 
 	var cache_root := ProjectSettings.globalize_path(str(world.get("cache_root")))
@@ -82,12 +82,12 @@ func run() -> void:
 	var route_tool: Object = ClassDB.instantiate(&"DriveRoute")
 	if route_tool == null:
 		push_error("drive bot: class DriveRoute is not registered (extension not loaded?)")
-		quit(1)
+		await _finish(main, 1)
 		return
 	var waypoints: PackedVector2Array = route_tool.call("waypoints", cache_root, opts["map"], start, heading, length_m)
 	if waypoints.size() < 2:
 		push_error("drive bot: no route from the start point on map '%s'" % opts["map"])
-		quit(1)
+		await _finish(main, 1)
 		return
 	waypoints = _offset_route(waypoints, float(opts["offset"]), float(opts["sweep"]) > 0.0)
 	var route_m := 0.0
@@ -156,7 +156,16 @@ func run() -> void:
 		resid_var += (ys[i] - avg) * (ys[i] - avg)
 	print("drive bot: chassis y bounce stdev %.4f m (residual of a 1 s moving mean)" % sqrt(resid_var / maxf(ys.size(), 1)))
 	print("drive bot: stops %d (speed < %.1f m/s with throttle for > %.1f s)" % [stops, STOP_SPEED_MS, STOP_HOLD_S])
-	quit(0)
+	await _finish(main, 0)
+
+
+## Frees the scene and quits on the next frame. Quitting with the world still alive let its background
+## loaders (tile geometry, far lights) run while the engine and the extension were shutting down: exit 139.
+## Freed first, their senders close and the world's Drop joins the terrain loader before the process ends.
+func _finish(main: Node, code: int) -> void:
+	main.queue_free()
+	await process_frame
+	quit(code)
 
 
 ## Probe only: shifts the route sideways by `offset` m (positive = left), easing in and out over
