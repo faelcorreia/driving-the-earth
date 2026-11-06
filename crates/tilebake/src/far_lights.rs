@@ -140,6 +140,7 @@ mod tests {
             roads: vec![],
             buildings: vec![],
             ground: vec![],
+            fine_height: None,
         }
     }
 

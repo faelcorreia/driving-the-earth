@@ -196,10 +196,11 @@ pub fn build_tile(
     let rect = tile_rect(x, y, grid.tile_m);
     let mut height = tile_heights_any(rasters, grid, x, y)?;
     apply_regions(&mut height, grid, regions, rect.x0, rect.y0);
-    Ok(build_tile_from(height, grid, roads, buildings, x, y))
+    build_tile_from(height, grid, roads, buildings, x, y)
 }
 
-/// Tile `(x, y)` from its final height grid (regions already applied).
+/// Tile `(x, y)` from its final height grid (regions already applied). The fine heightfield is
+/// read from that same grid, so it carries the regions too.
 pub fn build_tile_from(
     height: HeightGrid,
     grid: &MapGrid,
@@ -207,7 +208,9 @@ pub fn build_tile_from(
     buildings: &[Polygon],
     x: i32,
     y: i32,
-) -> (Tile, usize, usize) {
+) -> io::Result<(Tile, usize, usize)> {
+    let fine_height = tileformat::terrain::fine_heightfield(&height, grid.tile_m)
+        .map_err(invalid_data)?;
     let rect = tile_rect(x, y, grid.tile_m);
     let mut tile_roads = Vec::new();
     for road in roads {
@@ -258,8 +261,9 @@ pub fn build_tile_from(
         roads: tile_roads,
         buildings: tile_buildings,
         ground: Vec::new(),
+        fine_height: Some(fine_height),
     };
-    (tile, counts.0, counts.1)
+    Ok((tile, counts.0, counts.1))
 }
 
 /// Green and water areas of the OSM, and waterway centerlines, in the local plane of the bake.
@@ -654,7 +658,7 @@ pub fn bake_tiles_with(cache_root: &Path, id: &str, hooks: &mut Hooks) -> io::Re
             .remove(&(x, y))
             .ok_or_else(|| invalid_data("tile without terrain"))?;
         let (mut tile, r, b) =
-            build_tile_from(final_heights, &grid, &tile_roads, &tile_buildings, x, y);
+            build_tile_from(final_heights, &grid, &tile_roads, &tile_buildings, x, y)?;
         // Lots and ground from the 3 x 3 window around the tile: a lot is the same whichever tile sees it.
         let win_roads: Vec<(usize, &Polyline)> = window_ids(&road_index, x, y)
             .into_iter()
@@ -756,6 +760,7 @@ mod tests {
             }],
             buildings: vec![],
             ground: vec![],
+            fine_height: None,
         };
         tileformat::write_tile(&root, "t", &tile(-2, 5, "Rua A")).unwrap();
         tileformat::write_tile(&root, "t", &tile(0, 0, "Rua B")).unwrap();

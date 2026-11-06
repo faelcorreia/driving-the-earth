@@ -148,6 +148,7 @@ mod tests {
                 .collect(),
             buildings: vec![],
             ground: vec![],
+            fine_height: None,
         }
     }
 
@@ -221,6 +222,7 @@ mod point_tests {
             }],
             buildings: vec![],
             ground: vec![],
+            fine_height: None,
         }
     }
 

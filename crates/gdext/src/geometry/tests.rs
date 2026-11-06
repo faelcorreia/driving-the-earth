@@ -27,6 +27,7 @@ pub(crate) fn tile(x: i32, y: i32, height: HeightGrid, roads: Vec<Polyline>) -> 
         roads,
         buildings: Vec::new(),
         ground: Vec::new(),
+        fine_height: None,
     }
 }
 
