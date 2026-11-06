@@ -43,8 +43,28 @@ const CABIN_HALF_WIDTH := 0.725
 
 var _reset_requested := false
 
+## Lights. Headlights and tail lamps follow the street lamps' global (`lamp_state`, no per-pole
+## delay). The brake light is brighter while braking or reversing against the motion.
+const TAIL_EMISSION_ON := 1.2
+const TAIL_EMISSION_BRAKE := 4.0
+## Speed (m/s) above which an input against the motion counts as braking.
+const BRAKE_MIN_SPEED := 0.5
+@onready var _headlights: Array[SpotLight3D] = [$HeadlightLeft, $HeadlightRight]
+@onready var _tails: Array[MeshInstance3D] = [$TailLeft, $TailRight]
+var _tail_mats: Array[StandardMaterial3D] = []
+var _braking := false
+var _clock: Node = null
+
 
 func _ready() -> void:
+	for tail in _tails:
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.35, 0.02, 0.02)
+		mat.emission_enabled = true
+		mat.emission = Color(1.0, 0.05, 0.02)
+		mat.emission_energy_multiplier = 0.0
+		tail.material_override = mat
+		_tail_mats.append(mat)
 	var points := PackedVector3Array()
 	for p in _cabin_profile:
 		points.append(Vector3(-CABIN_HALF_WIDTH, p.y, p.x))
@@ -180,3 +200,25 @@ func _physics_process(_delta: float) -> void:
 	brake = max_brake_force if is_zero_approx(throttle) else 0.0
 	var speed_ratio := clampf(linear_velocity.length() / full_steer_speed, 0.0, 1.0)
 	steering = steer_input * max_steer * lerpf(1.0, min_steer_factor, speed_ratio)
+	_braking = (throttle < 0.0 and forward_speed > BRAKE_MIN_SPEED) or (throttle > 0.0 and forward_speed < -BRAKE_MIN_SPEED)
+
+
+## True while the street lamps are on: asks the environment clock (the state the lamps use, without
+## the per-pole delay). Found by name among the world's children, once the clock exists.
+func _lamps_on() -> bool:
+	if _clock == null:
+		_clock = get_parent().find_child("Environment", false, false)
+		if _clock == null:
+			return false
+	return _clock.lamps_on()
+
+
+func _process(_delta: float) -> void:
+	var on := _lamps_on()
+	for light in _headlights:
+		light.visible = on
+	for mat in _tail_mats:
+		if _braking:
+			mat.emission_energy_multiplier = TAIL_EMISSION_BRAKE
+		else:
+			mat.emission_energy_multiplier = TAIL_EMISSION_ON if on else 0.0

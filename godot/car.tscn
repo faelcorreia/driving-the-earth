@@ -15,6 +15,9 @@ top_radius = 0.29
 bottom_radius = 0.29
 height = 0.2
 
+[sub_resource type="BoxMesh" id="BoxMesh_tail"]
+size = Vector3(0.4, 0.1, 0.04)
+
 [node name="Car" type="VehicleBody3D"]
 mass = 850.0
 center_of_mass_mode = 1
@@ -32,6 +35,34 @@ mesh = SubResource("BoxMesh_body")
 [node name="CabinShape" type="CollisionShape3D" parent="."]
 
 [node name="CabinMesh" type="MeshInstance3D" parent="."]
+
+[node name="HeadlightLeft" type="SpotLight3D" parent="."]
+position = Vector3(-0.6, 0.3, -1.9)
+rotation_degrees = Vector3(-4, 0, 0)
+visible = false
+light_color = Color(1, 0.95, 0.85, 1)
+light_energy = 3.0
+spot_range = 45.0
+spot_angle = 30.0
+shadow_enabled = false
+
+[node name="HeadlightRight" type="SpotLight3D" parent="."]
+position = Vector3(0.6, 0.3, -1.9)
+rotation_degrees = Vector3(-4, 0, 0)
+visible = false
+light_color = Color(1, 0.95, 0.85, 1)
+light_energy = 3.0
+spot_range = 45.0
+spot_angle = 30.0
+shadow_enabled = false
+
+[node name="TailLeft" type="MeshInstance3D" parent="."]
+position = Vector3(-0.55, 0.15, 1.87)
+mesh = SubResource("BoxMesh_tail")
+
+[node name="TailRight" type="MeshInstance3D" parent="."]
+position = Vector3(0.55, 0.15, 1.87)
+mesh = SubResource("BoxMesh_tail")
 
 [node name="FrontLeft" type="VehicleWheel3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.7, 0, -1.18)
