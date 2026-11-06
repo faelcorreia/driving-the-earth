@@ -45,6 +45,10 @@ pub struct Tile {
     /// `units::GROUND_CELL_M`. Empty when the bake gave no ground map (old caches).
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "ground_rle")]
     pub ground: Vec<u8>,
+    /// Heightfield at `units::TERRAIN_FINE_CELL_M` (2.5 m), stored as a base64 string of its binary
+    /// blob (see `encode_fine`). `None` in tiles baked before it existed: readers then use `height`.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "fine_codec")]
+    pub fine_height: Option<Heightfield>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +56,183 @@ pub struct HeightGrid {
     pub cols: u32,
     pub rows: u32,
     pub values: Vec<f32>,
+}
+
+/// A fine heightfield of one tile: `cols` x `rows` samples, edges included, row-major. Sample `k`
+/// is `base_cm + cm[k]` centimeters. The base keeps the absolute altitude (about 900 m in Belo
+/// Horizonte) inside the i16 range: `cm` covers `base_cm` plus or minus 327 m.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Heightfield {
+    pub cols: u32,
+    pub rows: u32,
+    pub base_cm: i32,
+    pub cm: Vec<i16>,
+}
+
+impl Heightfield {
+    /// Quantizes heights in meters (row-major, `cols` x `rows`) to centimeters, rounded.
+    pub fn from_meters(cols: u32, rows: u32, values: &[f32]) -> Result<Heightfield, String> {
+        if values.len() != (cols as usize) * (rows as usize) || values.is_empty() {
+            return Err(format!(
+                "heightfield {cols}x{rows} needs {} values, got {}",
+                cols as usize * rows as usize,
+                values.len()
+            ));
+        }
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err("heightfield has a non-finite height".into());
+        }
+        let min = values.iter().fold(f32::INFINITY, |a, &b| a.min(b)) as f64;
+        let max = values.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)) as f64;
+        let base_cm = (((min + max) / 2.0) * 100.0).round() as i32;
+        let mut cm = Vec::with_capacity(values.len());
+        for &v in values {
+            let rel = (v as f64 * 100.0).round() - base_cm as f64;
+            if rel < i16::MIN as f64 || rel > i16::MAX as f64 {
+                return Err(format!(
+                    "heightfield relief {:.1} m does not fit in i16 cm around its base",
+                    (max - min)
+                ));
+            }
+            cm.push(rel as i16);
+        }
+        Ok(Heightfield {
+            cols,
+            rows,
+            base_cm,
+            cm,
+        })
+    }
+
+    /// Height of sample `k` in meters.
+    pub fn meters(&self, k: usize) -> f32 {
+        ((self.base_cm as i64 + self.cm[k] as i64) as f64 / 100.0) as f32
+    }
+}
+
+/// Version of the binary heightfield blob. Readers reject any other version.
+pub const FINE_VERSION: u8 = 1;
+/// Bytes before the samples: version u8, cols u16, rows u16, base_cm i32.
+const FINE_HEADER_LEN: usize = 9;
+
+/// Binary blob of a heightfield, little endian: `version u8 | cols u16 | rows u16 | base_cm i32 |
+/// cm i16 x (cols * rows)`, row-major.
+pub fn encode_fine(f: &Heightfield) -> Vec<u8> {
+    debug_assert!(f.cols <= u16::MAX as u32 && f.rows <= u16::MAX as u32);
+    let mut out = Vec::with_capacity(FINE_HEADER_LEN + 2 * f.cm.len());
+    out.push(FINE_VERSION);
+    out.extend((f.cols as u16).to_le_bytes());
+    out.extend((f.rows as u16).to_le_bytes());
+    out.extend(f.base_cm.to_le_bytes());
+    for v in &f.cm {
+        out.extend(v.to_le_bytes());
+    }
+    out
+}
+
+/// Reads a blob written by `encode_fine`.
+pub fn decode_fine(bytes: &[u8]) -> Result<Heightfield, String> {
+    if bytes.len() < FINE_HEADER_LEN {
+        return Err(format!("heightfield blob too short: {} bytes", bytes.len()));
+    }
+    if bytes[0] != FINE_VERSION {
+        return Err(format!("unknown heightfield version {}", bytes[0]));
+    }
+    let cols = u16::from_le_bytes([bytes[1], bytes[2]]) as u32;
+    let rows = u16::from_le_bytes([bytes[3], bytes[4]]) as u32;
+    let base_cm = i32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
+    let count = cols as usize * rows as usize;
+    if bytes.len() != FINE_HEADER_LEN + 2 * count {
+        return Err(format!(
+            "heightfield blob is {} bytes, expected {} for {cols}x{rows}",
+            bytes.len(),
+            FINE_HEADER_LEN + 2 * count
+        ));
+    }
+    let cm = bytes[FINE_HEADER_LEN..]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    Ok(Heightfield {
+        cols,
+        rows,
+        base_cm,
+        cm,
+    })
+}
+
+/// Standard base64 (RFC 4648, padded), so the binary heightfield can sit in the JSON tile.
+mod base64 {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b1 = *chunk.get(1).unwrap_or(&0);
+            let b2 = *chunk.get(2).unwrap_or(&0);
+            let n = (chunk[0] as u32) << 16 | (b1 as u32) << 8 | b2 as u32;
+            for k in 0..4 {
+                if k <= chunk.len() {
+                    out.push(ALPHABET[(n >> (18 - 6 * k)) as usize & 63] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    pub fn decode(text: &str) -> Result<Vec<u8>, String> {
+        if text.len() % 4 != 0 {
+            return Err("base64 length is not a multiple of 4".into());
+        }
+        let body = text.trim_end_matches('=');
+        if text.len() - body.len() > 2 {
+            return Err("too much base64 padding".into());
+        }
+        let mut out = Vec::with_capacity(body.len() * 3 / 4);
+        let (mut acc, mut bits) = (0u32, 0u32);
+        for c in body.bytes() {
+            let v = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => return Err(format!("invalid base64 byte {c}")),
+            };
+            acc = (acc << 6) | v as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+                acc &= (1 << bits) - 1;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The heightfield travels in the tile JSON as a base64 string of its binary blob.
+mod fine_codec {
+    use super::{base64, decode_fine, encode_fine, Heightfield};
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(fine: &Option<Heightfield>, s: S) -> Result<S::Ok, S::Error> {
+        match fine {
+            Some(f) => s.serialize_str(&base64::encode(&encode_fine(f))),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Heightfield>, D::Error> {
+        let Some(text) = Option::<String>::deserialize(d)? else {
+            return Ok(None);
+        };
+        let bytes = base64::decode(&text).map_err(D::Error::custom)?;
+        decode_fine(&bytes).map(Some).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +407,7 @@ mod tests {
                 tint: 7,
             }],
             ground: vec![GROUND_CONCRETE; units::GROUND_N * units::GROUND_N],
+            fine_height: None,
         }
     }
 
@@ -317,11 +499,128 @@ mod ground_rle_tests {
             roads: vec![],
             buildings: vec![],
             ground: ground.clone(),
+            fine_height: None,
         };
         let json = serde_json::to_string(&tile).unwrap();
         // Runs: grass 7, concrete 2, grass 2490, water 1 -> 8 numbers, far below 2500 cells.
         assert!(json.contains("[0,7,1,2,0,2490,4,1]"), "{json}");
         let back: Tile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.ground, ground);
+    }
+}
+
+#[cfg(test)]
+mod fine_height_tests {
+    use super::*;
+
+    fn tile_with(fine: Option<Heightfield>) -> Tile {
+        Tile {
+            x: 0,
+            y: 0,
+            height: HeightGrid {
+                cols: 1,
+                rows: 1,
+                values: vec![900.0],
+            },
+            roads: vec![],
+            buildings: vec![],
+            ground: Vec::new(),
+            fine_height: fine,
+        }
+    }
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        let cases = [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ];
+        for (plain, coded) in cases {
+            assert_eq!(base64::encode(plain.as_bytes()), coded);
+            assert_eq!(base64::decode(coded).unwrap(), plain.as_bytes());
+        }
+        assert!(base64::decode("Zm9").is_err());
+        assert!(base64::decode("Zm!v").is_err());
+    }
+
+    #[test]
+    fn blob_has_version_header_and_little_endian_samples() {
+        let f = Heightfield {
+            cols: 2,
+            rows: 1,
+            base_cm: 90_012,
+            cm: vec![-5, 0x0102],
+        };
+        let bytes = encode_fine(&f);
+        assert_eq!(bytes.len(), 9 + 4);
+        assert_eq!(bytes[0], FINE_VERSION);
+        assert_eq!(&bytes[1..3], &2u16.to_le_bytes());
+        assert_eq!(&bytes[3..5], &1u16.to_le_bytes());
+        assert_eq!(&bytes[5..9], &90_012i32.to_le_bytes());
+        assert_eq!(&bytes[9..], &[0xFB, 0xFF, 0x02, 0x01]);
+        assert_eq!(decode_fine(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn unknown_version_and_short_blob_are_rejected() {
+        let f = Heightfield {
+            cols: 1,
+            rows: 1,
+            base_cm: 0,
+            cm: vec![1],
+        };
+        let mut bytes = encode_fine(&f);
+        bytes[0] = FINE_VERSION + 1;
+        assert!(decode_fine(&bytes).is_err());
+        bytes[0] = FINE_VERSION;
+        assert!(decode_fine(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn fine_height_round_trips_through_tile_json() {
+        let f = Heightfield {
+            cols: 2,
+            rows: 2,
+            base_cm: 90_012,
+            cm: vec![-5, 0, 7, i16::MAX],
+        };
+        let tile = tile_with(Some(f.clone()));
+        let text = serde_json::to_string(&tile).unwrap();
+        assert!(text.contains("\"fine_height\":\""), "{text}");
+        let back: Tile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.fine_height, Some(f));
+        assert_eq!(back, tile);
+    }
+
+    #[test]
+    fn tile_without_fine_height_reads_as_none_and_writes_no_key() {
+        let json = r#"{"x":0,"y":0,"height":{"cols":1,"rows":1,"values":[1.0]},
+            "roads":[],"buildings":[]}"#;
+        let tile: Tile = serde_json::from_str(json).unwrap();
+        assert!(tile.fine_height.is_none());
+        let text = serde_json::to_string(&tile).unwrap();
+        assert!(!text.contains("fine_height"), "{text}");
+    }
+
+    #[test]
+    fn from_meters_rounds_to_cm_and_keeps_absolute_height() {
+        let values = [900.004f32, 900.006, 912.5, 927.0];
+        let f = Heightfield::from_meters(2, 2, &values).unwrap();
+        for (k, &v) in values.iter().enumerate() {
+            assert!((f.meters(k) - v).abs() <= 0.005 + 1e-4, "sample {k}: {}", f.meters(k));
+        }
+        assert_eq!(f.base_cm, 91_350);
+    }
+
+    #[test]
+    fn from_meters_rejects_relief_beyond_i16_and_bad_input() {
+        assert!(Heightfield::from_meters(2, 1, &[0.0, 700.0]).is_err());
+        assert!(Heightfield::from_meters(2, 1, &[0.0, f32::NAN]).is_err());
+        assert!(Heightfield::from_meters(2, 2, &[0.0, 1.0, 2.0]).is_err());
     }
 }
