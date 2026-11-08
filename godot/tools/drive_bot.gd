@@ -22,6 +22,11 @@ const SEARCH_AHEAD := 80
 ## A stop: throttle held while speed stays under STOP_SPEED_MS for more than STOP_HOLD_S (simulated s).
 const STOP_SPEED_MS := 1.0
 const STOP_HOLD_S := 1.0
+## What a wheel touches, per tick (bounce probe): in the air, the terrain, a road ribbon or anything else.
+const SURFACE_AIR := 0
+const SURFACE_TERRAIN := 1
+const SURFACE_ROAD := 2
+const SURFACE_OTHER := 3
 
 
 func _initialize() -> void:
@@ -109,6 +114,20 @@ func run() -> void:
 	var prev_pos := start_pos
 	var distance_m := 0.0
 	var ys := PackedFloat64Array()
+	# Per wheel, per tick: the wheel's height in the chassis frame (suspension) and the height of its
+	# contact point (ground: terrain or road). NAN when the wheel is in the air.
+	var wheels: Array[VehicleWheel3D] = []
+	for child in car.get_children():
+		var wheel := child as VehicleWheel3D
+		if wheel != null:
+			wheels.append(wheel)
+	var wheel_local_y: Array[PackedFloat64Array] = []
+	var wheel_ground_y: Array[PackedFloat64Array] = []
+	var wheel_surface: Array[PackedByteArray] = []
+	for wheel in wheels:
+		wheel_local_y.append(PackedFloat64Array())
+		wheel_ground_y.append(PackedFloat64Array())
+		wheel_surface.append(PackedByteArray())
 	# Contacts of the body are reported only for the bot, so the stops can name what the car hit.
 	car.contact_monitor = true
 	car.max_contacts_reported = 16
@@ -122,6 +141,17 @@ func run() -> void:
 		distance_m += Vector2(pos.x - prev_pos.x, pos.z - prev_pos.z).length()
 		prev_pos = pos
 		ys.append(pos.y)
+		for k in wheels.size():
+			var wheel := wheels[k]
+			wheel_local_y[k].append(car.to_local(wheel.global_position).y)
+			if wheel.is_in_contact():
+				wheel_ground_y[k].append(wheel.get_contact_point().y)
+				var body := wheel.get_contact_body()
+				var path := str(body.get_path()) if body else ""
+				wheel_surface[k].append(SURFACE_ROAD if "/Roads" in path else (SURFACE_TERRAIN if "/Terrain" in path else SURFACE_OTHER))
+			else:
+				wheel_ground_y[k].append(NAN)
+				wheel_surface[k].append(SURFACE_AIR)
 		var speed := car.linear_velocity.length()
 		if float(state["throttle"]) > 0.0 and speed < STOP_SPEED_MS:
 			stuck_ticks += 1
@@ -156,6 +186,7 @@ func run() -> void:
 		resid_var += (ys[i] - avg) * (ys[i] - avg)
 	print("drive bot: chassis y bounce stdev %.4f m (residual of a 1 s moving mean)" % sqrt(resid_var / maxf(ys.size(), 1)))
 	print("drive bot: stops %d (speed < %.1f m/s with throttle for > %.1f s)" % [stops, STOP_SPEED_MS, STOP_HOLD_S])
+	_report_bounce_origin(wheels, ys, wheel_local_y, wheel_ground_y, wheel_surface)
 	await _finish(main, 0)
 
 
@@ -209,6 +240,57 @@ func _report_stop(car: VehicleBody3D, state: Dictionary, number: int, t_s: float
 	print("drive bot: STOP %d at t=%.2f s, x=%.2f y=%.2f z=%.2f, speed %.2f m/s, route point %d of %d" % [number, t_s, pos.x, -pos.z, pos.y, car.linear_velocity.length(), index, route.size() - 1])
 	print("drive bot:   wheels: %s" % ", ".join(wheels))
 	print("drive bot:   bodies: %s" % (", ".join(bodies) if not bodies.is_empty() else "none"))
+
+
+## Bounce of a series: stdev of its residual from a centered moving mean of `half` ticks on each side.
+## NAN samples (wheel in the air) are skipped. With `mask` set, only the samples whose mask equals `want` count.
+func _bounce_stdev(series: PackedFloat64Array, half: int, mask := PackedByteArray(), want := 0) -> float:
+	var resid_var := 0.0
+	var n := 0
+	for i in series.size():
+		if is_nan(series[i]) or (not mask.is_empty() and mask[i] != want):
+			continue
+		var avg := 0.0
+		var m := 0
+		for j in range(maxi(0, i - half), mini(series.size(), i + half + 1)):
+			if not is_nan(series[j]):
+				avg += series[j]
+				m += 1
+		avg /= float(m)
+		resid_var += (series[i] - avg) * (series[i] - avg)
+		n += 1
+	return sqrt(resid_var / maxf(n, 1))
+
+
+## Probe for the bounce origin: the chassis, the ground under the wheels (mean of the contact heights)
+## and, per wheel, its suspension height and its contact heights split by what it touches.
+func _report_bounce_origin(wheels: Array[VehicleWheel3D], ys: PackedFloat64Array, wheel_local_y: Array[PackedFloat64Array], wheel_ground_y: Array[PackedFloat64Array], wheel_surface: Array[PackedByteArray]) -> void:
+	var tps := float(Engine.physics_ticks_per_second)
+	var half := int(round(tps / 2.0))
+	var ground := PackedFloat64Array()
+	for i in ys.size():
+		var sum := 0.0
+		var m := 0
+		for k in wheels.size():
+			var g: float = wheel_ground_y[k][i]
+			if not is_nan(g):
+				sum += g
+				m += 1
+		ground.append(sum / float(m) if m > 0 else NAN)
+	print("drive bot: bounce origin (1 s residual stdev): chassis %.4f m, ground under wheels %.4f m" % [_bounce_stdev(ys, half), _bounce_stdev(ground, half)])
+	for k in wheels.size():
+		var touch := [0, 0, 0, 0]
+		for code in wheel_surface[k]:
+			touch[code] += 1
+		var n := maxf(ys.size(), 1)
+		print("drive bot:   %s: air %.1f %%, terrain %.1f %%, road %.1f %%, other %.1f %%; suspension %.4f m; contact y %.4f m (on terrain %.4f m, on road %.4f m)" % [
+			wheels[k].name,
+			100.0 * touch[SURFACE_AIR] / n, 100.0 * touch[SURFACE_TERRAIN] / n, 100.0 * touch[SURFACE_ROAD] / n, 100.0 * touch[SURFACE_OTHER] / n,
+			_bounce_stdev(wheel_local_y[k], half),
+			_bounce_stdev(wheel_ground_y[k], half),
+			_bounce_stdev(wheel_ground_y[k], half, wheel_surface[k], SURFACE_TERRAIN),
+			_bounce_stdev(wheel_ground_y[k], half, wheel_surface[k], SURFACE_ROAD),
+		])
 
 
 ## One control step: picks the route point ahead, steers toward it and sets the throttle.
