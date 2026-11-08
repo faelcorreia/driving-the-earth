@@ -88,7 +88,7 @@ pub fn tile_geometry_with(
     terrain.colors = terrain_colors(tile, n, cell);
 
     let mut roads = MeshData::default();
-    let ends = extend_junction_ends(&tile.roads, tile_m);
+    let ends = extend_junction_ends(&tile.roads, around, tile_m);
     for (idx, (road, pts)) in tile.roads.iter().zip(&ends).enumerate() {
         let half = road_width_m(&road.highway) / 2.0;
         let lift = ROAD_LIFT_M + (idx % 8) as f32 * ROAD_ORDER_LIFT_M;

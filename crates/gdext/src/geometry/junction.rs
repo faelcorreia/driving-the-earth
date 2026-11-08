@@ -1,6 +1,6 @@
 //! Junction geometry: extends road ends so ribbons meet at crossings and overlap across tile
 //! borders. Pure Rust (no Godot types). Imports `geometry::vec2` and `tileformat`/`tilebake` data.
-use tileformat::{road_width_m, Polyline};
+use tileformat::{road_width_m, Polyline, Tile};
 
 use super::vec2::{dist, dist_to_segment, unit, unit_normal};
 
@@ -9,13 +9,20 @@ const JUNCTION_TOL_M: f64 = 1.0;
 /// How far a road end on a tile border runs past it, in meters, so the ribbons of the two
 /// tiles overlap and no hairline of terrain shows through the seam.
 pub(super) const BORDER_OVERLAP_M: f64 = 0.25;
+/// A neighbor road leaving a seam node at an angle of at least about one degree to the
+/// road ending there is a corner: the ends must then overlap by a full road half width.
+const SEAM_STRAIGHT_COS: f64 = 0.999_85;
 
 /// Points of every road of a tile, with each end that meets another road extended so that
 /// its cut lies past the near edge of the crossed road. Ends on a tile border run a
 /// little past it (overlap with the next tile); ends with no other road close by
 /// (cul-de-sacs) are kept as they are.
 /// Points of each road (extended ends included). Heights come from the terrain field, not here.
-pub(super) fn extend_junction_ends(roads: &[Polyline], tile_m: f64) -> Vec<Vec<[f64; 2]>> {
+pub(super) fn extend_junction_ends(
+    roads: &[Polyline],
+    around: &[&Tile],
+    tile_m: f64,
+) -> Vec<Vec<[f64; 2]>> {
     roads
         .iter()
         .enumerate()
@@ -25,10 +32,10 @@ pub(super) fn extend_junction_ends(roads: &[Polyline], tile_m: f64) -> Vec<Vec<[
             if pts.len() < 2 {
                 return pts;
             }
-            let head = extend_end(&pts, half, roads, i, tile_m);
+            let head = extend_end(&pts, half, roads, around, i, tile_m);
             extend_tail(&mut pts, head);
             pts.reverse();
-            let tail = extend_end(&pts, half, roads, i, tile_m);
+            let tail = extend_end(&pts, half, roads, around, i, tile_m);
             extend_tail(&mut pts, tail);
             pts.reverse();
             pts
@@ -57,14 +64,27 @@ fn on_tile_border(p: [f64; 2], tile_m: f64) -> bool {
 
 /// Distance the last point of `pts` must move along its direction for the corners of its
 /// band to clear the near edge of every other road it meets. Zero when it meets none.
-fn extend_end(pts: &[[f64; 2]], half: f64, roads: &[Polyline], own: usize, tile_m: f64) -> f64 {
+fn extend_end(
+    pts: &[[f64; 2]],
+    half: f64,
+    roads: &[Polyline],
+    around: &[&Tile],
+    own: usize,
+    tile_m: f64,
+) -> f64 {
     let end = pts[pts.len() - 1];
     let prev = last_distinct(pts, end);
     if dist(prev, end) <= 1e-9 {
         return 0.0;
     }
     if on_tile_border(end, tile_m) {
-        return BORDER_OVERLAP_M;
+        // A corner exactly on the seam: the neighbor's piece turns there, and a flat cut
+        // would leave the outer corner of the bend uncovered by either tile.
+        let d_border = unit(prev, end);
+        return match seam_corner_half(end, d_border, around) {
+            Some(half_other) => half.max(half_other),
+            None => BORDER_OVERLAP_M,
+        };
     }
     let d = unit(prev, end);
     let nrm = [-d[1], d[0]];
@@ -104,6 +124,37 @@ fn extend_end(pts: &[[f64; 2]], half: f64, roads: &[Polyline], own: usize, tile_
         ext = ext.max((need + 0.3).min(cap));
     }
     ext
+}
+
+/// Half width of a neighbor-tile road that bends at `end` (a node on the seam, reached along
+/// `d`), `None` when no neighbor road leaves `end` along a different direction.
+fn seam_corner_half(end: [f64; 2], d: [f64; 2], around: &[&Tile]) -> Option<f64> {
+    let mut best: Option<f64> = None;
+    for tile in around {
+        for road in &tile.roads {
+            for (k, &p) in road.points.iter().enumerate() {
+                if dist(p, end) > 1e-6 {
+                    continue;
+                }
+                let adjacent = [k.checked_sub(1), k.checked_add(1)];
+                for q in adjacent
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|j| road.points.get(j))
+                {
+                    if dist(*q, end) <= 1e-9 {
+                        continue;
+                    }
+                    let g = unit(end, *q);
+                    if (g[0] * d[0] + g[1] * d[1]).abs() < SEAM_STRAIGHT_COS {
+                        let h = road_width_m(&road.highway) / 2.0;
+                        best = Some(best.map_or(h, |b| b.max(h)));
+                    }
+                }
+            }
+        }
+    }
+    best
 }
 
 /// The last point before `end` in `pts` that differs from it (or `end` if none).
