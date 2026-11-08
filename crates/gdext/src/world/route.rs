@@ -11,6 +11,7 @@ use godot::prelude::*;
 use tileformat::roads::read_roads_file;
 
 use super::map::open_map;
+use super::pathfind::{CarGraph, CarRoute};
 
 /// Points within this distance, in meters, are the same graph node.
 const NODE_GRID_M: f64 = 0.01;
@@ -46,6 +47,9 @@ pub(super) const SNAP_SPEED_MPS: f64 = 30.0 / 3.6;
 /// less costs nothing; above it the penalty grows linearly up to this value.
 const BEND_PENALTY_S: f64 = 4.0;
 const BEND_MIN_DEG: f64 = 30.0;
+/// Origins drawn for a random route (item 92) before giving up, and destinations tried per origin.
+const RANDOM_ORIGIN_TRIES: usize = 200;
+const RANDOM_DEST_TRIES: usize = 300;
 
 /// Walks the road graph from `start` along `heading` (unit vector) for `length_m` meters and
 /// returns the points of the route, the first one being `start` projected on the first road
@@ -94,6 +98,62 @@ pub fn fixed_route(
         cur = n;
     }
     route
+}
+
+/// Random car route of `min_m`..`max_m` meters (item 92), by the car graph of item 91: an origin node
+/// and a destination node drawn from `seed`. The length is the one of the shortest car route (its
+/// `length_m`), not the straight line. The same seed on the same graph gives the same route.
+pub(super) fn random_car_route(
+    graph: &CarGraph,
+    seed: u64,
+    min_m: f64,
+    max_m: f64,
+) -> Option<CarRoute> {
+    let n = graph.node_count();
+    if n < 2 {
+        return None;
+    }
+    let mut rng = SplitMix(seed);
+    for _ in 0..RANDOM_ORIGIN_TRIES {
+        let from = rng.below(n);
+        let a = graph.position(from);
+        // A car route is never shorter than the straight line: nodes farther than max_m cannot end it.
+        let mut near: Vec<usize> = (0..n)
+            .filter(|&v| {
+                let d = dist(a, graph.position(v));
+                d > 0.0 && d <= max_m && d >= min_m * 0.5
+            })
+            .collect();
+        for i in (1..near.len()).rev() {
+            near.swap(i, rng.below(i + 1));
+        }
+        for &to in near.iter().take(RANDOM_DEST_TRIES) {
+            if let Some(route) = graph.shortest_path(from, to) {
+                if route.length_m >= min_m && route.length_m <= max_m {
+                    return Some(route);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// SplitMix64: a small generator for the random route, the same on every platform.
+struct SplitMix(u64);
+
+impl SplitMix {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform in `0..n` (n > 0). The modulo bias is negligible for the node counts here.
+    fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
 }
 
 /// One road piece as the graph reads it: its points in driving order, whether it is one-way
@@ -356,6 +416,51 @@ impl DriveRoute {
             .map(|p| Vector2::new(p[0] as f32, p[1] as f32))
             .collect()
     }
+
+    /// Random route for the drive bot (item 92): origin and destination on the car roads of the baked
+    /// map `map_id`, whose shortest car route is `min_m`..`max_m` long, drawn from `seed`. Returns
+    /// `origin`, `destination` (Vector2, local meters), `length_m` (float) and `waypoints`
+    /// (PackedVector2Array, from the origin). Empty when the map cannot be read or no route is found.
+    #[func]
+    fn random_route(
+        &self,
+        cache_root: GString,
+        map_id: GString,
+        seed: i64,
+        min_m: f64,
+        max_m: f64,
+    ) -> VarDictionary {
+        let mut out = VarDictionary::new();
+        let root = PathBuf::from(cache_root.to_string());
+        let id = map_id.to_string();
+        let index = match open_map(&root, &id) {
+            Ok(index) => index,
+            Err(e) => {
+                godot_error!("drive route: cannot open map '{id}': {e}");
+                return out;
+            }
+        };
+        let graph = match CarGraph::load(&index) {
+            Ok(graph) => graph,
+            Err(e) => {
+                godot_error!("drive route: cannot load the car graph of '{id}': {e}");
+                return out;
+            }
+        };
+        let Some(route) = random_car_route(&graph, seed as u64, min_m, max_m) else {
+            godot_error!("drive route: no {min_m}-{max_m} m route on '{id}' for seed {seed}");
+            return out;
+        };
+        let point = |p: [f64; 2]| Vector2::new(p[0] as f32, p[1] as f32);
+        let origin = point(route.points[0]);
+        let destination = point(*route.points.last().unwrap());
+        out.set("origin", origin);
+        out.set("destination", destination);
+        out.set("length_m", route.length_m);
+        let waypoints: PackedVector2Array = route.points.iter().map(|&p| point(p)).collect();
+        out.set("waypoints", &waypoints);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +483,47 @@ mod tests {
     }
 
     /// Dead end: the route stops there instead of inventing a way on.
+    /// Random route (item 92) on a 3 km grid of residential roads, 100 m apart: the route is in range,
+    /// the same seed gives the same route and other seeds give other ones.
+    #[test]
+    fn random_route_is_in_range_and_repeats_for_a_seed() {
+        use tileformat::Polyline;
+        let line = |points: Vec<[f64; 2]>| Polyline {
+            highway: "residential".into(),
+            name: String::new(),
+            points,
+            z: vec![],
+            zl: vec![],
+            zr: vec![],
+            lit: None,
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
+        };
+        let steps: Vec<f64> = (0..=30).map(|i| i as f64 * 100.0).collect();
+        let mut lines = Vec::new();
+        for &y in &steps {
+            lines.push(line(steps.iter().map(|&x| [x, y]).collect()));
+            lines.push(line(steps.iter().map(|&x| [y, x]).collect()));
+        }
+        let graph = CarGraph::from_polylines(lines);
+        let a = random_car_route(&graph, 7, 950.0, 1050.0).expect("a route");
+        assert!(
+            (950.0..=1050.0).contains(&a.length_m),
+            "length {}",
+            a.length_m
+        );
+        assert_eq!(a, random_car_route(&graph, 7, 950.0, 1050.0).unwrap());
+        let others: Vec<_> = (1..=5)
+            .map(|s| random_car_route(&graph, s, 950.0, 1050.0).unwrap().points)
+            .collect();
+        assert!(
+            others.iter().any(|p| *p != a.points),
+            "all seeds gave one route"
+        );
+    }
+
     #[test]
     fn stops_at_a_dead_end() {
         let road: Vec<[f64; 2]> = (0..=50).map(|i| [i as f64, 0.0]).collect();
