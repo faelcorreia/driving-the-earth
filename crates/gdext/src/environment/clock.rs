@@ -10,12 +10,13 @@ use godot::classes::light_3d::Param;
 use godot::classes::rendering_server::GlobalShaderParameterType;
 use godot::classes::RenderingServer;
 use godot::classes::{
-    Camera3D, DirectionalLight3D, Environment, INode, Input, InputEvent, Node, Shader,
+    Camera3D, DirectionalLight3D, Environment, INode, Input, InputEvent, Node, Os, Shader,
     ShaderMaterial, Sky, WorldEnvironment,
 };
 use godot::prelude::*;
 
 use super::sky::{self, Crossing, LightThreshold, ThresholdBank};
+use crate::ui_text;
 use super::time_panel::TimePanel;
 use super::time_ui::{self, Shortcut, Speed, FAST_SPEED};
 
@@ -132,6 +133,14 @@ impl EnvironmentClock {
     #[func]
     fn lamps_on(&self) -> bool {
         self.lamp_on_since.is_some()
+    }
+
+    /// Text of a UI key (see `ui_text.rs`) in the game's locale, for the HUD scripts. An unknown key
+    /// comes back as itself.
+    #[func]
+    fn hud_text(&self, key: GString) -> GString {
+        let lang = ui_text::language(&Os::singleton().get_locale().to_string());
+        GString::from(ui_text::text(&key.to_string(), lang))
     }
 
     /// Botão "Aplicar" do painel de hora: lê data e hora dos campos.

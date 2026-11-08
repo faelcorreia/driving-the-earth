@@ -142,6 +142,7 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Streets and neighborhoods need the internet. Showing cities only.",
         "Ruas e bairros precisam de internet. Mostrando só as cidades.",
     ),
+    ("hud.speed_unit", "km/h", "km/h"),
 ];
 
 #[cfg(test)]
@@ -152,8 +153,8 @@ mod tests {
     fn every_key_has_both_languages() {
         for (key, en, pt) in TABLE {
             assert!(!en.is_empty() && !pt.is_empty(), "{key}");
-            // Formats such as HH:MM are the same in both languages.
-            if !key.ends_with("_example") {
+            // Formats such as HH:MM and units such as km/h are the same in both languages.
+            if !key.ends_with("_example") && !key.ends_with("_unit") {
                 assert_ne!(en, pt, "{key} is not translated");
             }
             assert_eq!(text(key, Lang::En), *en);
