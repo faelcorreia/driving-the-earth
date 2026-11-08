@@ -42,8 +42,6 @@ const LAMP_OFF_ABOVE: f64 = 0.50;
 /// Globais de shader dos postes: instante do acendimento (s de jogo desde o início, -1 apagado),
 /// estado (1 aceso, 0 apagado) e o instante de jogo atual (s desde o início).
 const LAMP_GLOBALS: [&str; 3] = ["lamp_on_time", "lamp_state", "lamp_now"];
-/// Cobertura de nuvens do céu (ponto de extensão; sem nuvens por enquanto).
-const CLOUD_COVER: f32 = 0.0;
 /// Global de shader com a cor da neblina na direção do olhar (lida por far_lights.gdshader).
 const HAZE_GLOBAL: &str = "haze_color";
 /// Curva da neblina de profundidade: fração^2, então perto de 6 km quase não há véu e a 10 km
@@ -98,11 +96,18 @@ pub struct EnvironmentClock {
     #[init(val = true)]
     #[export]
     shadows_enabled: bool,
+    /// Cloud cover of the sky, 0 (clear) to 1 (overcast). Drives the sky's gray veil and dims the
+    /// sun and the sky light (see `sky::cloud_light_factor`). No weather UI yet.
+    #[init(val = 0.0)]
+    #[export]
+    cloud_cover: f64,
 
     /// Instante do mundo, segundos Unix (UTC).
     sim_unix: f64,
-    /// Luz global 0..1 do último quadro.
+    /// Luz global 0..1 do último quadro, já com a cobertura de nuvens.
     light: f64,
+    /// Luz do céu sem nuvens, 0..1 do último quadro (base do piso de luz noturna).
+    clear_light: f64,
     sun_alt_deg: f64,
     world_env: Option<Gd<WorldEnvironment>>,
     /// Sol antigo da cena, liberado ao criar o novo.
@@ -385,7 +390,8 @@ impl EnvironmentClock {
             Self::orient(light, sun_dir);
             let tint = sky::sun_tint(alt);
             light.set_color(Color::from_rgb(tint[0], tint[1], tint[2]));
-            light.set_param(Param::ENERGY, sky::sun_energy(alt, SUN_MAX_ENERGY) as f32);
+            let sun_energy = sky::sun_energy(alt, SUN_MAX_ENERGY) * sky::cloud_light_factor(self.cloud_cover);
+            light.set_param(Param::ENERGY, sun_energy as f32);
         }
         if let Some(light) = self.moon.as_mut() {
             Self::orient(light, moon_dir);
@@ -411,7 +417,7 @@ impl EnvironmentClock {
             mat.set_shader_parameter("moon_dir", &rgb_variant(vec_arr(moon_dir)));
             mat.set_shader_parameter("moon_phase", &look.moon_phase.to_variant());
             mat.set_shader_parameter("moon_visibility", &look.moon_visibility.to_variant());
-            mat.set_shader_parameter("cloud_cover", &CLOUD_COVER.to_variant());
+            mat.set_shader_parameter("cloud_cover", &(self.cloud_cover.clamp(0.0, 1.0) as f32).to_variant());
             // A neblina de profundidade (lod.rs) segue o céu na direção do olhar da câmera.
             let fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
             env.set_fog_light_color(Color::from_rgb(fog[0], fog[1], fog[2]));
@@ -419,7 +425,8 @@ impl EnvironmentClock {
                 .global_shader_parameter_set(HAZE_GLOBAL, &rgb_variant(fog));
             let gray = (look.mid[0] + look.mid[1] + look.mid[2]) / 3.0;
             let amb = look.mid.map(|c| gray + (c - gray) * AMBIENT_SAT);
-            let night = (1.0 - self.light) as f32;
+            // The night floor follows the clear sky, so an overcast day does not turn bluish.
+            let night = (1.0 - self.clear_light) as f32;
             let amb = [
                 amb[0] + NIGHT_AMBIENT_RGB.0 * night,
                 amb[1] + NIGHT_AMBIENT_RGB.1 * night,
@@ -560,7 +567,12 @@ impl INode for EnvironmentClock {
         let sun = sky::sun(self.sim_unix);
         let moon = sky::moon(self.sim_unix);
         self.sun_alt_deg = sun.altitude_deg;
-        self.light = sky::light_level(sun.altitude_deg, &moon, WEATHER_FACTOR);
+        self.clear_light = sky::light_level(sun.altitude_deg, &moon, WEATHER_FACTOR);
+        self.light = sky::light_level(
+            sun.altitude_deg,
+            &moon,
+            WEATHER_FACTOR * sky::cloud_light_factor(self.cloud_cover),
+        );
         let eye = self.camera_forward();
         self.apply_visuals(sun, moon, eye);
         let (sim, speed) = (self.sim_unix, self.speed);
@@ -576,13 +588,14 @@ impl INode for EnvironmentClock {
         // turns the lamps on right away.
         if !self.lamps_primed {
             self.lamps_primed = true;
-            if self.light < LAMP_ON_BELOW {
+            if self.clear_light < LAMP_ON_BELOW {
                 self.lamp_on_since = Some(now);
             }
             self.push_lamp_state();
         }
 
-        for crossing in self.bank.update(self.light) {
+        // Lamps follow the clear-sky light: a cloudy noon must not switch them on.
+        for crossing in self.bank.update(self.clear_light) {
             if crossing.name == "street_lamps" {
                 self.lamp_on_since = crossing.descending.then_some(now);
                 self.push_lamp_state();

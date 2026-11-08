@@ -22,7 +22,8 @@ uniform vec3 moon_dir = vec3(0.0, -1.0, 0.0);
 uniform float moon_phase = 0.0;
 uniform float moon_visibility = 0.0;
 
-// Ponto de extensão para nuvens: 0 = céu limpo; 1 aplica um véu cinza (ainda sem nuvens).
+// Cobertura de nuvens (0 a 1, de `EnvironmentClock.cloud_cover`): véu cinza sobre o céu. Sem formas
+// de nuvem ainda; a luz do sol e a ambiente são reduzidas em `clock.rs`.
 uniform float cloud_cover = 0.0;
 
 // Raio angular do disco do sol e da lua (~0,27 grau, 0,0047 rad) em 1 - cos(θ), ~θ²/2.

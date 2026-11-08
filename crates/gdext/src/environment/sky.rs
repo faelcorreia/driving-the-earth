@@ -230,6 +230,15 @@ pub fn light_level(sun_alt_deg: f64, moon: &MoonState, weather: f64) -> f64 {
     ((sun_term + moon_term) * weather).clamp(0.0, 1.0)
 }
 
+/// Share of the sun and sky light lost under full cloud cover (0 clear, 1 overcast).
+pub const CLOUD_LIGHT_LOSS: f64 = 0.75;
+
+/// Light multiplier of the cloud cover: 1 with a clear sky, `1 - CLOUD_LIGHT_LOSS` under full cover.
+/// `cover` is clamped to 0..1.
+pub fn cloud_light_factor(cover: f64) -> f64 {
+    1.0 - CLOUD_LIGHT_LOSS * cover.clamp(0.0, 1.0)
+}
+
 /// Interpolação linear de uma cor sobre paradas `(x, cor)` em ordem crescente de `x`.
 /// Fora das paradas, devolve a cor da parada mais próxima.
 pub fn gradient(stops: &[(f64, Rgb)], x: f64) -> Rgb {
@@ -610,6 +619,27 @@ mod tests {
         };
         assert_eq!(light_level(-30.0, &no_moon, 1.0), 0.0);
         assert_eq!(light_level(60.0, &no_moon, 0.5), 0.5);
+    }
+
+    #[test]
+    fn cloud_cover_dims_light_monotonically() {
+        assert_eq!(cloud_light_factor(0.0), 1.0);
+        assert!((cloud_light_factor(1.0) - (1.0 - CLOUD_LIGHT_LOSS)).abs() < 1e-12);
+        // Out-of-range covers are clamped, not extrapolated.
+        assert_eq!(cloud_light_factor(-0.5), 1.0);
+        assert_eq!(cloud_light_factor(2.0), cloud_light_factor(1.0));
+        let no_moon = MoonState {
+            position: Horizontal {
+                azimuth_deg: 0.0,
+                altitude_deg: 0.0,
+            },
+            illumination: 0.0,
+            waxing: false,
+        };
+        let clear = light_level(60.0, &no_moon, cloud_light_factor(0.0));
+        let half = light_level(60.0, &no_moon, cloud_light_factor(0.5));
+        let full = light_level(60.0, &no_moon, cloud_light_factor(1.0));
+        assert!(clear > half && half > full && full > 0.0);
     }
 
     #[test]
