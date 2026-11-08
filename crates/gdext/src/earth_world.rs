@@ -25,7 +25,9 @@ use crate::home_store;
 use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::world_map::WorldMapView;
-use crate::render::{building_material, material, solid_body, spawn_car, terrain_body};
+use crate::render::{
+    building_body, building_material, material, solid_body, spawn_car, terrain_body,
+};
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::{find_spawn, find_spawn_near, inside_loaded_map};
@@ -575,10 +577,12 @@ impl EarthWorld {
             node.add_child(&road_body);
         }
         if !geometry.buildings.is_empty() {
-            // One mesh and one collision body per tile, for the buildings of that tile.
+            // One mesh and one collision body per tile, for the buildings of that tile. The
+            // collision is each building's convex prism, not a trimesh of its walls.
+            let prisms = || geometry.building_prisms.iter().map(|p| p.points.as_slice());
             let mut body = match &self.building_mat {
-                Some(mat) => solid_body(&geometry.buildings, mat),
-                None => solid_body(&geometry.buildings, &vertex_mat),
+                Some(mat) => building_body(&geometry.buildings, mat, prisms()),
+                None => building_body(&geometry.buildings, &vertex_mat, prisms()),
             };
             body.set_name("Buildings");
             node.add_child(&body);
