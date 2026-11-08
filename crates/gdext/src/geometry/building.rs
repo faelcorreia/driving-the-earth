@@ -6,7 +6,8 @@
 //! vertices, so on a slope the walls are a skirt: no gap is left on the low side, and the
 //! walls never go under the terrain. The height is `levels x FLOOR_HEIGHT_M`, measured from the flat base.
 //! For the window shader, a wall's UV is (perimeter in m, height above the base in m), continuous
-//! around the ring; a roof has `ROOF_UV`; UV2 x is the building seed (see `seed_of`).
+//! around the ring; a roof has `ROOF_UV`; UV2 x is the building seed (see `seed_of`) and UV2 y the
+//! height of the vertex above the terrain under it (a wall part under 1 m of ground gets no window).
 use tileformat::units::FLOOR_HEIGHT_M;
 use tileformat::{Polygon, Tile};
 
@@ -114,12 +115,13 @@ fn add_building(
         let first = mesh.vertices.len() as u32;
         let (u0, u1) = (along[i], along[i + 1]);
         // Top p, top q, bottom q, bottom p (bottom on the terrain under each vertex). UV: x is the
-        // perimeter in meters, y the height above the flat base in meters.
-        for (pt, h, u, color) in [
-            (p, top_y, u0, wall),
-            (q, top_y, u1, wall),
-            (q, gq, u1, base),
-            (p, gp, u0, base),
+        // perimeter in meters, y the height above the flat base in meters. UV2.y is the height of
+        // the vertex above the terrain under it (the window mask only applies above 1 m).
+        for (pt, h, g, u, color) in [
+            (p, top_y, gp, u0, wall),
+            (q, top_y, gq, u1, wall),
+            (q, gq, gq, u1, base),
+            (p, gp, gp, u0, base),
         ] {
             push_vertex(
                 mesh,
@@ -127,7 +129,7 @@ fn add_building(
                 normal,
                 color,
                 [u, h - base_y],
-                seed,
+                [seed, (h - g).max(0.0)],
             );
         }
         push_facing(mesh, first, first + 1, first + 2, normal);
@@ -137,7 +139,14 @@ fn add_building(
     let up = [0.0, 1.0, 0.0];
     let first = mesh.vertices.len() as u32;
     for pt in &ring {
-        push_vertex(mesh, world(pt[0], pt[1], top_y), up, roof, ROOF_UV, seed);
+        push_vertex(
+            mesh,
+            world(pt[0], pt[1], top_y),
+            up,
+            roof,
+            ROOF_UV,
+            [seed, 0.0],
+        );
     }
     let ccw: Vec<[f64; 2]> = if sign > 0.0 {
         ring.clone()
@@ -223,20 +232,21 @@ fn edge_len(p: [f64; 2], q: [f64; 2]) -> f64 {
     ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt()
 }
 
-/// One wall or roof vertex: position, normal, color, UV (see `add_building`) and the building seed.
+/// One wall or roof vertex: position, normal, color, UV (see `add_building`) and UV2 (the building
+/// seed in x, the height above the terrain in y).
 fn push_vertex(
     mesh: &mut MeshData,
     pos: [f32; 3],
     normal: [f32; 3],
     color: [f32; 3],
     uv: [f32; 2],
-    seed: f32,
+    uv2: [f32; 2],
 ) {
     mesh.vertices.push(pos);
     mesh.normals.push(normal);
     mesh.colors.push([color[0], color[1], color[2], 1.0]);
     mesh.uvs.push(uv);
-    mesh.uv2.push([seed, 0.0]);
+    mesh.uv2.push(uv2);
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -643,5 +653,44 @@ mod tests {
         let seed = m.uv2[0][0];
         assert!((0.0..=1.0).contains(&seed));
         assert!(m.uv2.iter().all(|c| c[0] == seed));
+    }
+
+    #[test]
+    fn a_building_on_a_slope_is_at_least_one_floor_above_its_lowest_ground() {
+        // Lowest ground under the footprint is x = 10 (2 m); the flat base sits there, so the
+        // building is at least one floor (FLOOR_HEIGHT_M, 3 m) above it, even with one level.
+        let lowest = slope(10.0, 0.0);
+        for levels in [0u8, 1, 2] {
+            let m = one(building(rect(10.0, 10.0, 20.0, 20.0), levels, 0, 0));
+            let top = top_y_of(&m);
+            assert!(
+                top - lowest >= FLOOR_HEIGHT_M as f32 - 1e-4,
+                "levels {levels}: {} m above the lowest ground",
+                top - lowest
+            );
+        }
+    }
+
+    #[test]
+    fn wall_clearance_is_the_height_above_the_terrain_under_each_vertex() {
+        let m = one(building(rect(10.0, 10.0, 20.0, 20.0), 2, 0, 0));
+        let mut below_one_m = 0;
+        for ((v, uv2), n) in m.vertices.iter().zip(&m.uv2).zip(&m.normals) {
+            if n[1] != 0.0 {
+                continue; // roof
+            }
+            let ground = slope(v[0] as f64, 0.0);
+            let clearance = uv2[1];
+            assert!(clearance >= 0.0, "wall vertex under the terrain: {v:?}");
+            assert!(
+                (clearance - (v[1] - ground)).abs() < 1e-4,
+                "clearance {clearance} at {v:?}, terrain {ground}"
+            );
+            if clearance < 1.0 {
+                below_one_m += 1;
+            }
+        }
+        // The bottom row (on the terrain) and the high side's first meter get no window.
+        assert!(below_one_m >= 4, "no wall vertex under 1 m of ground");
     }
 }
