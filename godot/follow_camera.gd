@@ -8,6 +8,7 @@ extends Camera3D
 @export var mouse_sensitivity := 0.003  ## rad por pixel de mouse
 @export var distance := 6.0  ## m entre o ponto de mira e a câmera
 @export var height := 2.0  ## m acima da origem do carro (ponto de mira)
+@export var camera_height_m := 2.0  ## m acima do chão sob o carro (posição da câmera)
 @export var min_pitch_deg := -80.0  ## negativo = olhando para baixo
 @export var max_pitch_deg := 20.0  ## positivo = olhando para cima
 @export var initial_pitch_deg := -10.0
@@ -66,15 +67,25 @@ func _physics_process(delta: float) -> void:
 	if _idle >= recenter_delay:
 		_yaw = lerp_angle(_yaw, car_yaw, 1.0 - exp(-recenter_speed * delta))
 
-	# Direção de olhar da câmera; a posição fica do lado oposto, a `distance` do ponto de mira.
-	var forward := Vector3(
-		-sin(_yaw) * cos(_pitch),
-		sin(_pitch),
-		-cos(_yaw) * cos(_pitch)
-	)
-	var desired := _pivot - forward * distance
+	# Órbita horizontal em torno do ponto de mira; a posição da câmera fica a `camera_height_m` do chão.
+	var forward := Vector3(-sin(_yaw), 0.0, -cos(_yaw))
+	var orbit := _pivot - forward * distance * cos(_pitch)
+	var desired := Vector3(orbit.x, _ground_y() + camera_height_m, orbit.z)
 	global_position = _clip_to_terrain(_pivot, desired)
-	look_at(_pivot, Vector3.UP)
+	# Ponto de mira: o carro fica enquadrado; o pitch do mouse inclina a mira a partir da posição.
+	var aim := _pivot + Vector3.UP * distance * tan(_pitch)
+	look_at(aim, Vector3.UP)
+
+
+## Altura do chão sob o carro (m), por raio para baixo a partir do carro. Sem chão, usa a origem menos 0,5 m.
+func _ground_y() -> float:
+	var origin := _car.global_position
+	var query := PhysicsRayQueryParameters3D.create(origin + Vector3.UP * 50.0, origin + Vector3.DOWN * 200.0)
+	query.exclude = [_car.get_rid()]
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return origin.y - 0.5
+	return hit.position.y
 
 
 ## Recua a câmera até o primeiro obstáculo entre o ponto de mira e a posição desejada.
