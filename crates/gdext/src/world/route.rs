@@ -4,7 +4,7 @@
 //!
 //! The graph is built from the road pieces of `roads.bin`: each consecutive pair of points is an
 //! edge, both ways, and points closer than `NODE_GRID_M` are the same node.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use godot::prelude::*;
@@ -16,7 +16,7 @@ use super::map::open_map;
 const NODE_GRID_M: f64 = 0.01;
 /// OSM `highway` values a car can drive on. Footways and paths are left out: a footway piece can
 /// end where the road beside it goes on, and the route would stop there.
-const DRIVABLE_HIGHWAYS: &[&str] = &[
+pub(super) const DRIVABLE_HIGHWAYS: &[&str] = &[
     "motorway",
     "motorway_link",
     "trunk",
@@ -40,12 +40,31 @@ const SNAP_M: f64 = 2.0;
 const READ_MARGIN_M: f64 = 100.0;
 /// A junction turn sharper than this, in degrees, ends the route (the road turns back on itself).
 const MAX_TURN_DEG: f64 = 135.0;
+/// Speed used on the snap joins between road ends, in m/s (30 km/h).
+pub(super) const SNAP_SPEED_MPS: f64 = 30.0 / 3.6;
+/// Bend penalty of a turn of 180 degrees inside one way, in seconds. A turn of `BEND_MIN_DEG` or
+/// less costs nothing; above it the penalty grows linearly up to this value.
+const BEND_PENALTY_S: f64 = 4.0;
+const BEND_MIN_DEG: f64 = 30.0;
 
 /// Walks the road graph from `start` along `heading` (unit vector) for `length_m` meters and
 /// returns the points of the route, the first one being `start` projected on the first road
 /// segment. Ends early at a dead end.
-pub fn fixed_route(roads: &[Vec<[f64; 2]>], start: [f64; 2], heading: [f64; 2], length_m: f64) -> Vec<[f64; 2]> {
-    let graph = RoadGraph::build(roads);
+pub fn fixed_route(
+    roads: &[Vec<[f64; 2]>],
+    start: [f64; 2],
+    heading: [f64; 2],
+    length_m: f64,
+) -> Vec<[f64; 2]> {
+    let pieces: Vec<Piece> = roads
+        .iter()
+        .map(|r| Piece {
+            points: r,
+            oneway: false,
+            speed_mps: 1.0,
+        })
+        .collect();
+    let graph = RoadGraph::build(&pieces);
     let Some((first_from, first_to, projected)) = graph.nearest_ahead(start, heading) else {
         return Vec::new();
     };
@@ -77,55 +96,116 @@ pub fn fixed_route(roads: &[Vec<[f64; 2]>], start: [f64; 2], heading: [f64; 2], 
     route
 }
 
-/// Road graph: nodes are the quantized points, edges go both ways between consecutive points.
-struct RoadGraph {
-    pos: Vec<[f64; 2]>,
-    adj: Vec<Vec<usize>>,
+/// One road piece as the graph reads it: its points in driving order, whether it is one-way
+/// (traffic only from `points[0]` to the last point) and the speed on it, in m/s.
+pub(super) struct Piece<'a> {
+    pub points: &'a [[f64; 2]],
+    pub oneway: bool,
+    pub speed_mps: f64,
+}
+
+/// Road graph: nodes are the quantized points. `adj[u][i]` is the node reached from `u` by one edge,
+/// with its length in meters (`len[u][i]`) and its travel time in seconds (`cost[u][i]`). Edges that
+/// the pieces give twice keep the lower cost.
+pub(super) struct RoadGraph {
+    pub(super) pos: Vec<[f64; 2]>,
+    pub(super) adj: Vec<Vec<usize>>,
+    pub(super) len: Vec<Vec<f64>>,
+    pub(super) cost: Vec<Vec<f64>>,
+}
+
+/// Growing graph plus the index of each directed edge `(a, b)` in `adj[a]`.
+struct Builder {
+    ids: HashMap<(i64, i64), usize>,
+    graph: RoadGraph,
+    slot: HashMap<(usize, usize), usize>,
+}
+
+impl Builder {
+    fn node(&mut self, p: [f64; 2]) -> usize {
+        let key = (
+            (p[0] / NODE_GRID_M).round() as i64,
+            (p[1] / NODE_GRID_M).round() as i64,
+        );
+        let g = &mut self.graph;
+        *self.ids.entry(key).or_insert_with(|| {
+            g.pos.push(p);
+            g.adj.push(Vec::new());
+            g.len.push(Vec::new());
+            g.cost.push(Vec::new());
+            g.pos.len() - 1
+        })
+    }
+
+    /// Adds the directed edge `a -> b`, or lowers the cost of the one already there.
+    fn edge(&mut self, a: usize, b: usize, len: f64, cost: f64) {
+        match self.slot.get(&(a, b)) {
+            Some(&i) => {
+                if cost < self.graph.cost[a][i] {
+                    self.graph.cost[a][i] = cost;
+                    self.graph.len[a][i] = len;
+                }
+            }
+            None => {
+                self.slot.insert((a, b), self.graph.adj[a].len());
+                self.graph.adj[a].push(b);
+                self.graph.len[a].push(len);
+                self.graph.cost[a].push(cost);
+            }
+        }
+    }
 }
 
 impl RoadGraph {
-    fn build(roads: &[Vec<[f64; 2]>]) -> Self {
-        let mut ids: HashMap<(i64, i64), usize> = HashMap::new();
-        let mut pos: Vec<[f64; 2]> = Vec::new();
-        let mut adj: Vec<Vec<usize>> = Vec::new();
-        let mut edges: HashSet<(usize, usize)> = HashSet::new();
-        let mut node = |p: [f64; 2], pos: &mut Vec<[f64; 2]>, adj: &mut Vec<Vec<usize>>| -> usize {
-            let key = (
-                (p[0] / NODE_GRID_M).round() as i64,
-                (p[1] / NODE_GRID_M).round() as i64,
-            );
-            *ids.entry(key).or_insert_with(|| {
-                pos.push(p);
-                adj.push(Vec::new());
-                pos.len() - 1
-            })
+    /// Graph of the pieces. `fixed_route` passes every piece as two-way.
+    pub(super) fn build(pieces: &[Piece]) -> Self {
+        let mut b = Builder {
+            ids: HashMap::new(),
+            graph: RoadGraph {
+                pos: Vec::new(),
+                adj: Vec::new(),
+                len: Vec::new(),
+                cost: Vec::new(),
+            },
+            slot: HashMap::new(),
         };
         let mut ends: Vec<usize> = Vec::new();
-        for road in roads {
-            if road.len() < 2 {
+        for piece in pieces {
+            let pts = piece.points;
+            if pts.len() < 2 {
                 continue;
             }
-            ends.push(node(road[0], &mut pos, &mut adj));
-            ends.push(node(road[road.len() - 1], &mut pos, &mut adj));
-            for seg in road.windows(2) {
-                let a = node(seg[0], &mut pos, &mut adj);
-                let b = node(seg[1], &mut pos, &mut adj);
-                if a == b {
-                    continue;
+            ends.push(b.node(pts[0]));
+            ends.push(b.node(pts[pts.len() - 1]));
+            let mut prev = b.node(pts[0]);
+            for k in 1..pts.len() {
+                let cur = b.node(pts[k]);
+                if prev != cur {
+                    let len = dist(pts[k - 1], pts[k]);
+                    let base = len / piece.speed_mps;
+                    // The bend apex is the start of the edge leaving it, in each direction.
+                    let forward = base + bend_penalty_s(pts, k - 1);
+                    let back = base + bend_penalty_s(pts, k);
+                    b.edge(prev, cur, len, forward);
+                    if !piece.oneway {
+                        b.edge(cur, prev, len, back);
+                    }
                 }
-                if edges.insert((a, b)) {
-                    adj[a].push(b);
-                }
-                if edges.insert((b, a)) {
-                    adj[b].push(a);
-                }
+                prev = cur;
             }
         }
         // Road pieces are cut at tile edges and rounded apart, so a piece can stop a little short
-        // of the next one. Endpoints within `SNAP_M` of each other are joined both ways.
+        // of the next one. Endpoints within `SNAP_M` of each other are joined both ways, whatever
+        // the one-way flags say: a join, not a road.
         ends.sort_unstable();
         ends.dedup();
-        let cell = |p: [f64; 2]| ((p[0] / SNAP_M).floor() as i64, (p[1] / SNAP_M).floor() as i64);
+        let pos = b.graph.pos.clone();
+        let cell = |p: [f64; 2]| {
+            (
+                (p[0] / SNAP_M).floor() as i64,
+                (p[1] / SNAP_M).floor() as i64,
+            )
+        };
         let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
         for &e in &ends {
             buckets.entry(cell(pos[e])).or_default().push(e);
@@ -141,22 +221,24 @@ impl RoadGraph {
                         if f <= e || dist(pos[e], pos[f]) > SNAP_M {
                             continue;
                         }
-                        if edges.insert((e, f)) {
-                            adj[e].push(f);
-                        }
-                        if edges.insert((f, e)) {
-                            adj[f].push(e);
-                        }
+                        let len = dist(pos[e], pos[f]);
+                        let cost = len / SNAP_SPEED_MPS;
+                        b.edge(e, f, len, cost);
+                        b.edge(f, e, len, cost);
                     }
                 }
             }
         }
-        RoadGraph { pos, adj }
+        b.graph
     }
 
     /// The directed edge `(from, to)` nearest to `start` whose direction agrees with `heading`
     /// (dot > 0), and `start` projected on it.
-    fn nearest_ahead(&self, start: [f64; 2], heading: [f64; 2]) -> Option<(usize, usize, [f64; 2])> {
+    fn nearest_ahead(
+        &self,
+        start: [f64; 2],
+        heading: [f64; 2],
+    ) -> Option<(usize, usize, [f64; 2])> {
         let mut best: Option<(f64, usize, usize, [f64; 2])> = None;
         for from in 0..self.pos.len() {
             for &to in &self.adj[from] {
@@ -197,6 +279,23 @@ fn unit(v: [f64; 2]) -> [f64; 2] {
     } else {
         [v[0] / len, v[1] / len]
     }
+}
+
+/// Time penalty, in seconds, of the bend at `pts[i]` inside one way: nothing for a straight way or
+/// a gentle turn, up to `BEND_PENALTY_S` for a turn back on itself. Zero at the ends of the way.
+pub(super) fn bend_penalty_s(pts: &[[f64; 2]], i: usize) -> f64 {
+    if i == 0 || i + 1 >= pts.len() {
+        return 0.0;
+    }
+    let (a, b) = (sub(pts[i], pts[i - 1]), sub(pts[i + 1], pts[i]));
+    if dot(a, a) == 0.0 || dot(b, b) == 0.0 {
+        return 0.0;
+    }
+    let turn = turn_deg(unit(a), b);
+    if turn <= BEND_MIN_DEG {
+        return 0.0;
+    }
+    BEND_PENALTY_S * (turn - BEND_MIN_DEG) / (180.0 - BEND_MIN_DEG)
 }
 
 /// Absolute angle, in degrees, between a unit direction and a vector.
@@ -270,7 +369,10 @@ mod tests {
         let north: Vec<[f64; 2]> = (0..=100).map(|i| [100.0, i as f64]).collect();
         let route = fixed_route(&[east, north], [0.0, 0.0], [1.0, 0.0], 250.0);
         assert!(route.len() > 2);
-        assert!(route.iter().all(|p| p[1].abs() < 1e-9), "left the straight road: {route:?}");
+        assert!(
+            route.iter().all(|p| p[1].abs() < 1e-9),
+            "left the straight road: {route:?}"
+        );
         let end = route.last().unwrap();
         assert!(end[0] >= 250.0 - 1e-6, "too short: {end:?}");
     }

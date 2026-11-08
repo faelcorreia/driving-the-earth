@@ -6,6 +6,7 @@ pub mod far_lights;
 pub mod lod;
 pub mod map;
 pub mod map2d;
+pub mod pathfind;
 pub mod route;
 pub mod spawn;
 pub mod streaming;
