@@ -11,6 +11,12 @@ extends SceneTree
 ## Route: DriveRoute (crates/gdext/src/world/route.rs), from the car's position and heading at spawn.
 ## Control: pure pursuit on the route, through the drive_* input actions, as a player would.
 ## Time is counted in physics ticks, so the span does not depend on the frame rate.
+##
+## Ram mode (item 89): `--ram` (a flag, no value) aims at the nearest building ahead, drives into it,
+## reverses after the stop and prints the outcome: "through" (the car went into the building), "stuck"
+## (it stayed on the building after reversing for RAM_REVERSE_MAX_S) or "clear" (it backed off
+## RAM_CLEAR_M m from the impact within that time). Other options: --cruise, --settle.
+## Example: godot --headless --path godot -s tools/drive_bot.gd -- --map casa-10km --ram
 
 const LOOKAHEAD_MIN_M := 6.0
 const LOOKAHEAD_MAX_M := 25.0
@@ -27,6 +33,16 @@ const SURFACE_AIR := 0
 const SURFACE_TERRAIN := 1
 const SURFACE_ROAD := 2
 const SURFACE_OTHER := 3
+## Ram mode: the ray that finds the building ahead (from RAM_RAY_HEIGHT_M above the car's origin),
+## how many hits on other bodies it skips, how long it waits for a building to load, the time limit of
+## the approach and of the reverse (simulated s), and the distance from the impact that counts as clear.
+const RAM_RAY_M := 200.0
+const RAM_RAY_HEIGHT_M := 0.5
+const RAM_RAY_SKIPS := 8
+const RAM_BUILDING_WAIT_S := 10.0
+const RAM_APPROACH_MAX_S := 30.0
+const RAM_REVERSE_MAX_S := 5.0
+const RAM_CLEAR_M := 3.0
 
 
 func _initialize() -> void:
@@ -77,6 +93,11 @@ func run() -> void:
 	if car == null:
 		push_error("drive bot: the camera is not under the car")
 		await _finish(main, 1)
+		return
+
+	if _has_flag("ram"):
+		var code := await _run_ram(car, opts)
+		await _finish(main, code)
 		return
 
 	var cache_root := ProjectSettings.globalize_path(str(world.get("cache_root")))
@@ -188,6 +209,151 @@ func run() -> void:
 	print("drive bot: stops %d (speed < %.1f m/s with throttle for > %.1f s)" % [stops, STOP_SPEED_MS, STOP_HOLD_S])
 	_report_bounce_origin(wheels, ys, wheel_local_y, wheel_ground_y, wheel_surface)
 	await _finish(main, 0)
+
+
+func _has_flag(name: String) -> bool:
+	return ("--" + name) in OS.get_cmdline_user_args()
+
+
+## Ram mode (item 89): settles, aims at the nearest building ahead, rams it at full throttle, reverses
+## after the stop and prints the outcome. Returns the exit code: 0 when an outcome was reported, 1 when
+## there was no building ahead.
+func _run_ram(car: VehicleBody3D, opts: Dictionary) -> int:
+	var tps := float(Engine.physics_ticks_per_second)
+	for i in int(round(float(opts["settle"]) * tps)):
+		await physics_frame
+	var hit := {}
+	for i in int(round(RAM_BUILDING_WAIT_S * tps)):
+		hit = _building_ahead(car)
+		if not hit.is_empty():
+			break
+		await physics_frame
+	if hit.is_empty():
+		push_error("drive bot: no building within %.0f m ahead of the car" % RAM_RAY_M)
+		return 1
+	var aim: Vector3 = hit["position"]
+	var start := car.global_position
+	print("drive bot: ram target %s at %.1f m ahead, aim x=%.2f y=%.2f z=%.2f" % [hit["collider"].get_path(), start.distance_to(aim), aim.x, aim.y, aim.z])
+
+	# Contacts of the body are reported only for the bot, so the report can name what the car hit.
+	car.contact_monitor = true
+	car.max_contacts_reported = 16
+	var cruise := float(opts["cruise"])
+	var stop_ticks := int(round(STOP_HOLD_S * tps))
+	var stuck_ticks := 0
+	var through := false
+	var impact := false
+	var impact_t := 0.0
+	var impact_pos := start
+	var throttle := 0.0
+	for i in int(round(RAM_APPROACH_MAX_S * tps)):
+		throttle = 1.0 if car.linear_velocity.length() < cruise else 0.0
+		_ram_steer(car, Vector2(aim.x, -aim.z), throttle)
+		await physics_frame
+		if _inside_building(car):
+			through = true
+			break
+		if throttle > 0.0 and car.linear_velocity.length() < STOP_SPEED_MS:
+			stuck_ticks += 1
+			if stuck_ticks == stop_ticks:
+				impact = true
+				impact_t = float(i + 1) / tps
+				impact_pos = car.global_position
+				break
+		else:
+			stuck_ticks = 0
+	if through or not impact:
+		_release_all()
+		if through:
+			print("drive bot: ram outcome: through (the car went into the building, no stop)")
+		else:
+			print("drive bot: ram outcome: no impact within %.0f s" % RAM_APPROACH_MAX_S)
+		return 0
+	print("drive bot: impact at t=%.2f s, speed %.2f m/s, %.2f m from the car's start" % [impact_t, car.linear_velocity.length(), impact_pos.distance_to(start)])
+	var bodies: PackedStringArray = []
+	for body in car.get_colliding_bodies():
+		bodies.append("%s (%s)" % [body.get_path(), body.get_class()])
+	print("drive bot:   bodies: %s" % (", ".join(bodies) if not bodies.is_empty() else "none"))
+
+	var clear := false
+	var reverse_ticks := 0
+	for i in int(round(RAM_REVERSE_MAX_S * tps)):
+		_set_action("drive_forward", 0.0)
+		_set_action("drive_back", 1.0)
+		_set_action("drive_left", 0.0)
+		_set_action("drive_right", 0.0)
+		await physics_frame
+		reverse_ticks = i + 1
+		if _inside_building(car):
+			through = true
+			break
+		if car.global_position.distance_to(impact_pos) >= RAM_CLEAR_M:
+			clear = true
+			break
+	_release_all()
+	var reverse_s := float(reverse_ticks) / tps
+	var outcome := "through" if through else ("clear" if clear else "stuck")
+	print("drive bot: reverse %.2f s, moved %.2f m from the impact" % [reverse_s, car.global_position.distance_to(impact_pos)])
+	print("drive bot: ram outcome: %s" % outcome)
+	return 0
+
+
+## The nearest building hit by a ray from the car's front along its heading (empty when none within
+## RAM_RAY_M). Hits on other bodies are skipped: the ray keeps going past them, up to RAM_RAY_SKIPS.
+func _building_ahead(car: VehicleBody3D) -> Dictionary:
+	var space := car.get_world_3d().direct_space_state
+	var forward := -car.global_transform.basis.z
+	var from := car.global_position + Vector3.UP * RAM_RAY_HEIGHT_M
+	var exclude: Array[RID] = [car.get_rid()]
+	for i in RAM_RAY_SKIPS:
+		var query := PhysicsRayQueryParameters3D.create(from, from + forward * RAM_RAY_M, 0xFFFFFFFF, exclude)
+		var hit := space.intersect_ray(query)
+		if hit.is_empty():
+			return {}
+		if "/Buildings" in str((hit["collider"] as Node).get_path()):
+			return hit
+		exclude.append(hit["rid"])
+	return {}
+
+
+## True when the car's origin or one of its wheel centers is inside a building's collision shape.
+func _inside_building(car: VehicleBody3D) -> bool:
+	var space := car.get_world_3d().direct_space_state
+	var points: Array[Vector3] = [car.global_position]
+	for child in car.get_children():
+		var wheel := child as VehicleWheel3D
+		if wheel != null:
+			points.append(wheel.global_position)
+	for point in points:
+		var query := PhysicsPointQueryParameters3D.new()
+		query.position = point
+		query.exclude = [car.get_rid()]
+		for hit in space.intersect_point(query, 32):
+			if "/Buildings" in str((hit["collider"] as Node).get_path()):
+				return true
+	return false
+
+
+## Ram steering: pure pursuit toward a point (x, y in the route's 2D frame), throttle as given.
+func _ram_steer(car: VehicleBody3D, aim: Vector2, throttle: float) -> void:
+	var pos := car.global_position
+	var p := Vector2(pos.x, -pos.z)
+	var f := -car.global_transform.basis.z
+	var fwd := Vector2(f.x, -f.z).normalized()
+	var left := Vector2(-fwd.y, fwd.x)
+	var d := aim - p
+	var kappa := 2.0 * d.dot(left) / maxf(d.length_squared(), 1e-6)
+	var speed := car.linear_velocity.length()
+	var wheel_angle := atan(absf(car.get_node("FrontLeft").position.z - car.get_node("RearLeft").position.z) * kappa)
+	var max_steer := float(car.get("max_steer"))
+	var min_factor := float(car.get("min_steer_factor"))
+	var full_speed := float(car.get("full_steer_speed"))
+	var factor := lerpf(1.0, min_factor, clampf(speed / full_speed, 0.0, 1.0))
+	var steer := clampf(wheel_angle / (max_steer * factor), -1.0, 1.0)
+	_set_action("drive_forward", throttle)
+	_set_action("drive_back", 0.0)
+	_set_action("drive_left", maxf(steer, 0.0))
+	_set_action("drive_right", maxf(-steer, 0.0))
 
 
 ## Frees the scene and quits on the next frame. Quitting with the world still alive let its background
