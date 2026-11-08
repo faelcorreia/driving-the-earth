@@ -11,9 +11,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+use godot::classes::file_access::ModeFlags;
 use godot::classes::{
-    CanvasLayer, INode3D, MeshInstance3D, Node3D, ProjectSettings, RigidBody3D, ShaderMaterial,
-    StandardMaterial3D,
+    CanvasLayer, FileAccess, INode3D, MeshInstance3D, Node3D, ProjectSettings, RigidBody3D,
+    ShaderMaterial, StandardMaterial3D,
 };
 use godot::prelude::*;
 
@@ -52,18 +53,29 @@ const STATS_PERIOD_S: f64 = 5.0;
 const MAP_CANVAS_LAYER: i32 = 10;
 /// Period of the real lights update (which lit lamps they stand on), in seconds.
 const LAMP_UPDATE_S: f64 = 0.25;
+/// Default cache root: the user's data folder, in every build.
+const DEFAULT_CACHE_ROOT: &str = "user://cache";
+/// Repo cache, used in development when the default cache root is kept and this folder exists.
+const DEV_CACHE_ROOT: &str = "res://../cache";
+/// Map opened in development when there is no `map_id` and no last map yet.
+const DEV_DEFAULT_MAP: &str = "casa-10km";
+/// The last map opened, as its id in a text file.
+const LAST_MAP_PATH: &str = "user://last_map.txt";
 
-/// Streams `<cache_root>/<map_id>` around the car.
+/// Streams `<cache_root>/<map_id>` around the car. With no map (no `map_id`, no last map, folder
+/// missing) it emits `no_map` and opens the world map with its message; no error is logged.
 #[derive(GodotClass)]
 #[class(base = Node3D, init)]
 pub struct EarthWorld {
     base: Base<Node3D>,
-    /// Folder name of the map under the cache root (the id given to tilebake).
-    #[init(val = GString::from("casa"))]
+    /// Folder name of the map under the cache root (the id given to tilebake). Empty: the last
+    /// map opened, or in development the repo's default map.
+    #[init(val = GString::new())]
     #[export]
     map_id: GString,
-    /// Cache root. `res://` paths are resolved to the file system.
-    #[init(val = GString::from("res://../cache"))]
+    /// Cache root. `user://cache` by default; in development `res://../cache` is used instead
+    /// when it exists. `res://` paths are resolved to the file system.
+    #[init(val = GString::from(DEFAULT_CACHE_ROOT))]
     #[export]
     cache_root: GString,
     /// Tiles within this distance of the car are loaded, in meters.
@@ -136,6 +148,10 @@ pub struct EarthWorld {
 
 #[godot_api]
 impl EarthWorld {
+    /// Emitted when no map can be opened: no map requested, or its folder is missing.
+    #[signal]
+    fn no_map();
+
     /// Puts the car on the road nearest to (`lat`, `lon`) when that point is inside the loaded
     /// map (F17c). The car is stopped and its tiles are built before it arrives; the streaming
     /// then follows it. Returns false when the point is outside the map or has no road, and
@@ -199,6 +215,25 @@ impl EarthWorld {
     }
 }
 
+/// The id of the last map opened, from `LAST_MAP_PATH`. None when there is no file yet.
+fn read_last_map() -> Option<String> {
+    let file = FileAccess::open(LAST_MAP_PATH, ModeFlags::READ)?;
+    let id = file.get_as_text().to_string();
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// Saves `id` as the last map opened. A failure is a warning: the game still runs.
+fn write_last_map(id: &str) {
+    let Some(mut file) = FileAccess::open(LAST_MAP_PATH, ModeFlags::WRITE) else {
+        godot_warn!("cannot save the last map to {LAST_MAP_PATH}");
+        return;
+    };
+    if !file.store_string(id) {
+        godot_warn!("cannot save the last map to {LAST_MAP_PATH}");
+    }
+}
+
 #[godot_api]
 impl INode3D for EarthWorld {
     fn ready(&mut self) {
@@ -207,20 +242,37 @@ impl INode3D for EarthWorld {
         if let Some(h) = home {
             crate::environment::sky::set_home(h.lat, h.lon);
         }
-        let id = self.map_id.to_string();
+        let (cache_root_res, dev_cache) = self.resolved_cache_root();
+        // The property shows the root in use, so the bot and the capture read the same cache.
+        self.cache_root = cache_root_res.clone();
         let cache_root = PathBuf::from(
             ProjectSettings::singleton()
-                .globalize_path(&self.cache_root)
+                .globalize_path(&cache_root_res)
                 .to_string(),
         );
-        let index = match open_map(&cache_root, &id) {
-            Ok(index) => index,
-            Err(e) => {
-                godot_error!("cannot open map '{id}' from {}: {e}", cache_root.display());
-                self.add_map_view(Some("home.no_map"));
-                return;
+        let id = self.resolved_map_id(dev_cache);
+        let opened = if id.is_empty() {
+            godot_print!("no map: no map_id, no last map and no development cache");
+            None
+        } else {
+            match open_map(&cache_root, &id) {
+                Ok(index) => Some(index),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    godot_print!("no map: '{id}' not found in {}", cache_root.display());
+                    None
+                }
+                Err(e) => {
+                    godot_error!("cannot open map '{id}' from {}: {e}", cache_root.display());
+                    None
+                }
             }
         };
+        let Some(index) = opened else {
+            self.signals().no_map().emit();
+            self.add_map_view(Some("home.no_map"));
+            return;
+        };
+        write_last_map(&id);
         let tile_m = index.meta.tile_size_m;
         godot_print!(
             "map '{id}' opened: {} tiles, streamed within {} m",
@@ -452,6 +504,40 @@ impl INode3D for EarthWorld {
 }
 
 impl EarthWorld {
+    /// The cache root to open, and whether it is the repo cache of development. The repo cache
+    /// replaces the default root only when the default is kept and the folder exists.
+    fn resolved_cache_root(&self) -> (GString, bool) {
+        let dev = GString::from(DEV_CACHE_ROOT);
+        let dev_exists = PathBuf::from(
+            ProjectSettings::singleton()
+                .globalize_path(&dev)
+                .to_string(),
+        )
+        .is_dir();
+        if dev_exists && self.cache_root.to_string() == DEFAULT_CACHE_ROOT {
+            (dev, true)
+        } else {
+            (self.cache_root.clone(), false)
+        }
+    }
+
+    /// The map to open: the `map_id` given, else the last map opened, else the development map
+    /// (only with the repo cache). Empty when there is none.
+    fn resolved_map_id(&self, dev_cache: bool) -> String {
+        let given = self.map_id.to_string();
+        if !given.is_empty() {
+            return given;
+        }
+        if let Some(last) = read_last_map() {
+            return last;
+        }
+        if dev_cache {
+            DEV_DEFAULT_MAP.into()
+        } else {
+            String::new()
+        }
+    }
+
     /// Starts the loader thread. It builds tile geometry for each request, in order, and
     /// stops when this node (and with it the request sender) is freed.
     fn start_loader(&mut self, index: Arc<MapIndex>) {

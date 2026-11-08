@@ -30,9 +30,11 @@ Releases are built by `.github/workflows/build.yml` for Linux (x86_64), Windows 
 - A release package is only the executable plus the GDExtension library. **No baked data is included**:
   the map tiles stay local in `cache/`, produced by `tilebake` on your machine. Nothing in `cache/` or
   `*.local.json` is exported.
-- The cache path is still `res://../cache` (`EarthWorld.cache_root`). In an exported build it resolves
-  relative to the directory the game is launched from, not to the executable: from `dist/linux` the
-  game looks for `dist/cache`. Where the release should look for `cache/` is an open decision.
+- The cache is `user://cache` (`EarthWorld.cache_root`), the user's data folder, in every build. In
+  development, `res://../cache` (the repo's `cache/`) is used instead when it exists.
+- The map opened is `EarthWorld.map_id` when set (the bot and the capture set it), else the last map
+  opened (`user://last_map.txt`), else `casa-10km` in development only. With no map, the game emits
+  `no_map`, shows the world map with a message and does not fail.
 - Push a tag `vX.Y.Z` that matches `[workspace.package] version` in `Cargo.toml`. The workflow fails on
   a mismatch and then publishes a GitHub Release with the three zips
   (`driving-the-earth-<version>-<os>.zip`). A manual run (`workflow_dispatch`) builds the zips as
