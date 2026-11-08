@@ -67,6 +67,7 @@ pub(super) fn flat_zone_m(half: f64) -> f64 {
 }
 
 /// One segment of a road with a profile, with the profile at its two ends.
+#[derive(Clone)]
 struct Seg {
     a: [f64; 2],
     dir: [f64; 2],
@@ -268,6 +269,7 @@ fn reconcile_nodes(profiles: &mut [Profile]) {
 }
 
 /// Segments of the roads with a profile, indexed in buckets over the tile and its neighbors.
+#[derive(Clone)]
 pub(super) struct Field {
     segs: Vec<Seg>,
     origin: [f64; 2],
@@ -279,6 +281,11 @@ pub(super) struct Field {
 }
 
 impl Field {
+    /// True when no road of the tile and its neighbors has a profile: the field changes no height.
+    pub(super) fn is_empty(&self) -> bool {
+        self.segs.is_empty()
+    }
+
     /// Index of the roads of a 3 x 3 block of tiles whose corner is `origin` (map meters).
     pub(super) fn new<'a>(roads: impl Iterator<Item = &'a Polyline>, origin: [f64; 2]) -> Field {
         let span = 3.0 * TILE_M;
@@ -498,6 +505,28 @@ impl Surface {
             cell,
             field,
         }
+    }
+
+    /// The surface on the collision grid: `n` vertices per side over `cell` meters, from the tile corner
+    /// `origin`. The interior vertices are the drawn grid: their grid height is the recorded one, so
+    /// the candidates they took are the ones the collision needs. The last row and column have the
+    /// ground of the mesh (`Surface::new`), not the recorded one, so they take the field with the
+    /// recorded ground instead, which is what a candidate there would have used.
+    pub(super) fn collision_grid(&self, recorded: &dyn Fn(f64, f64) -> f32) -> Vec<f32> {
+        let n = self.n;
+        let mut out = self.heights.clone();
+        for i in 0..n {
+            for j in 0..n {
+                if i + 1 == n || j + 1 == n {
+                    let (x, y) = (
+                        self.origin[0] + j as f64 * self.cell,
+                        self.origin[1] + i as f64 * self.cell,
+                    );
+                    out[i * n + j] = self.field.height(recorded, x, y);
+                }
+            }
+        }
+        out
     }
 
     /// Height at `(x, y)`: the triangle sample of the grid inside the grid (the same triangles the

@@ -1105,3 +1105,98 @@ fn ribbon_metrics() {
         );
     }
 }
+
+#[test]
+fn collision_under_a_profiled_road_follows_the_profile() {
+    // Flat ground at 50 m, a road with a flat profile at 60 m: its ribbon sits at 60 m, so the
+    // collision heightfield must too, on the axis. Far off the road it keeps the recorded 50 m.
+    let road = Polyline {
+        oneway: None,
+        lanes: None,
+        maxspeed: None,
+        roundabout: false,
+        name: String::new(),
+        highway: "residential".into(),
+        points: vec![[50.0, 125.0], [200.0, 125.0]],
+        z: vec![60.0, 60.0],
+        zl: Vec::new(),
+        zr: Vec::new(),
+        lit: None,
+    };
+    let t = tile(0, 0, grid(26, |_, _| 50.0), vec![road]);
+    let g = tile_geometry(&t, 250.0);
+    let n = TERRAIN_FINE_N;
+    let at =
+        |x: f64, y: f64| g.collision[(y / 2.5).round() as usize * n + (x / 2.5).round() as usize];
+    for x in [60.0, 100.0, 150.0, 190.0] {
+        let h = at(x, 125.0) as f64;
+        let ribbon = ribbon_height(&g.roads, x, 125.0).expect("road covers the axis");
+        assert!(
+            (h - 60.0).abs() < 0.05,
+            "collision {h} at x={x}, profile 60"
+        );
+        assert!(
+            (h - (ribbon - 0.1)).abs() < 0.05,
+            "collision {h} vs ribbon {ribbon} at x={x}"
+        );
+    }
+    let off = at(100.0, 240.0) as f64;
+    assert!(
+        (off - 50.0).abs() < 0.05,
+        "off the road the recorded ground stays: {off}"
+    );
+}
+
+#[test]
+fn collision_grid_matches_a_surface_on_the_recorded_ground() {
+    // The fine mesh's collision (its interior plus the edge fallback) must equal the surface built on
+    // the fine grid with the recorded ground: the same heights at every point of the collision grid.
+    let profiled = |points: Vec<[f64; 2]>, z: Vec<f32>| Polyline {
+        oneway: None,
+        lanes: None,
+        maxspeed: None,
+        roundabout: false,
+        name: String::new(),
+        highway: "residential".into(),
+        points,
+        z,
+        zl: Vec::new(),
+        zr: Vec::new(),
+        lit: None,
+    };
+    let t0 = tile(
+        0,
+        0,
+        grid(26, |u, v| hill(u * 250.0, v * 250.0)),
+        vec![
+            profiled(vec![[30.0, 60.0], [240.0, 150.0]], vec![55.0, 62.0]),
+            profiled(vec![[120.0, 0.0], [120.0, 250.0]], vec![48.0, 52.0]),
+        ],
+    );
+    let t1 = tile(
+        1,
+        0,
+        grid(26, |u, v| hill(250.0 + u * 250.0, v * 250.0)),
+        vec![profiled(
+            vec![[260.0, 170.0], [400.0, 120.0]],
+            vec![60.0, 58.0],
+        )],
+    );
+    let g = tile_geometry_with(&t0, 250.0, &|x, y| sample_height(&t0, 250.0, x, y), &[&t1]);
+    let field = Field::new(
+        [&t0, &t1].into_iter().flat_map(|t| t.roads.iter()),
+        [-250.0, -250.0],
+    );
+    let reference = collision_heights(&t0, 250.0, Some(field));
+    assert_eq!(g.collision.len(), reference.len());
+    let worst = g
+        .collision
+        .iter()
+        .zip(&reference)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 1e-3,
+        "collision differs from the reference by {worst} m"
+    );
+}
