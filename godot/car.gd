@@ -4,13 +4,13 @@ extends VehicleBody3D
 ## Frente do carro é -Z; rodas dianteiras esterçam, traseiras tracionam.
 ## Com engine_force positivo o VehicleBody3D anda para +Z, então o sinal é invertido.
 ##
-## Performance target: light 1.0 L hatchback, 0-100 km/h in ~14.5 s, top speed ~120 km/h, on flat ground.
+## Performance target: light 1.0 L hatchback, 0-100 km/h in ~14.5 s, top speed ~100 km/h, on flat ground.
 ## Traction falls linearly from `max_traction_force_n` (standstill) to zero at `top_speed_kmh * 1.1`;
 ## aero drag and rolling resistance hold the final speed near `top_speed_kmh`.
 ## VehicleBody3D also resists speed linearly (~`wheel_damping_n_per_ms`, measured), so the engine
 ## compensates for it: the curve above is what the car actually does.
 
-@export var top_speed_kmh := 120.0  ## target final speed on flat ground, km/h
+@export var top_speed_kmh := 100.0  ## target final speed on flat ground, km/h (~28.7 m/s measured)
 @export var max_traction_force_n := 3400.0  ## traction at standstill, N (total across traction wheels)
 @export var reverse_force_factor := 0.5  ## reverse uses this fraction of the traction force
 @export var aero_drag_k := 0.15  ## aerodynamic drag, N per (m/s)^2
