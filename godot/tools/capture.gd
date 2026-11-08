@@ -3,7 +3,7 @@ extends SceneTree
 ## Captura visual da cena M1 (V1). Uso:
 ##   godot --path godot -s tools/capture.gd -- --map casa-10km --times 17:45,18:10 --out <dir>
 ## Opcionais: --start 17:42 (hora local em que o relógio começa), --date 2026-11-24 (dia civil BRT
-## em que começa; com --start põe o relógio nessa data e hora), --settle 30 (s reais de espera
+## em que começa; sem ele, o dia de hoje em BRT; o relógio sempre começa em --start), --settle 30 (s reais de espera
 ## com o mundo parado, antes do primeiro horário), --az 160 (ou lista 160,250: uma foto da
 ## câmera por azimute), --fast 60 (velocidade do avanço do relógio), --moon 1 (foto apontada
 ## para o disco da lua). Horário anterior ao --start é lido como do dia seguinte (ex.: 04:30).
@@ -122,6 +122,12 @@ func _min_to_hm(minutes: float) -> String:
 	return "%02d:%02d" % [t / 60, t % 60]
 
 
+## Dia civil de hoje em Brasília (UTC-3, sem horário de verão desde 2019), YYYY-MM-DD.
+func _today_brt() -> String:
+	var d := Time.get_datetime_dict_from_unix_time(int(Time.get_unix_time_from_system()) - 3 * 3600)
+	return "%04d-%02d-%02d" % [d["year"], d["month"], d["day"]]
+
+
 func _snap(path: String) -> void:
 	await RenderingServer.frame_post_draw
 	var err := root.get_texture().get_image().save_png(path)
@@ -163,14 +169,16 @@ func run() -> void:
 		return
 	# Relógio parado até o primeiro horário; o mundo carrega em tempo real.
 	clock.set("speed", 0.0)
-	# --date põe o relógio no dia pedido, às --start horas (senão, começa na hora real do sistema).
-	if opts["date"] != "":
-		var ymd: PackedStringArray = opts["date"].split("-")
-		if ymd.size() != 3:
-			push_error("capture: --date must be YYYY-MM-DD, got %s" % opts["date"])
-			quit(2)
-			return
-		clock.call("set_local_time", ymd[0].to_int(), ymd[1].to_int(), ymd[2].to_int(), _hm_to_min(opts["start"]) / 60.0)
+	# O relógio começa às --start horas do dia pedido (--date) ou do dia de hoje (BRT). Sem isso,
+	# o relógio ficaria na hora real do sistema e os horários do log não bateriam com o ambiente.
+	var date: String = opts["date"] if opts["date"] != "" else _today_brt()
+	var ymd: PackedStringArray = date.split("-")
+	if ymd.size() != 3:
+		push_error("capture: --date must be YYYY-MM-DD, got %s" % date)
+		quit(2)
+		return
+	clock.call("set_local_time", ymd[0].to_int(), ymd[1].to_int(), ymd[2].to_int(), _hm_to_min(opts["start"]) / 60.0)
+	print("capture: clock set to %s %s (BRT)" % [date, opts["start"]])
 
 	var waited := 0.0
 	var settle := float(opts["settle"])
@@ -195,24 +203,26 @@ func run() -> void:
 	var fast := float(opts["fast"])
 	var azimuths: Array = opts["az"].split(",", false)
 	var moon_light := clock.find_child("Moon", false, false) as Node3D
-	var game_s := 0.0
+	# O relógio do jogo (clock.rs) é a referência: a espera compara o instante dele com o alvo,
+	# e o log lê a hora e a elevação do sol dele. Não há soma de deltas aqui.
+	var start_unix: float = clock.call("game_unix")
 	for hm: String in opts["times"].split(",", false):
 		var target_min := _hm_to_min(hm)
 		if target_min < start_min:
 			target_min += 1440.0
-		var target_s := (target_min - start_min) * 60.0
-		if target_s < game_s:
+		var target_unix := start_unix + (target_min - start_min) * 60.0
+		if target_unix < float(clock.call("game_unix")):
 			push_warning("capture: %s is behind the clock, skipped" % hm)
 			continue
 		clock.set("speed", fast)
-		while game_s < target_s:
+		while float(clock.call("game_unix")) < target_unix:
 			await process_frame
-			game_s += root.get_process_delta_time() * fast
 		clock.set("speed", 0.0)
-		var actual := _min_to_hm(start_min + game_s / 60.0)
+		var actual: String = clock.call("local_time_text")
+		var sun_alt: float = clock.call("sun_altitude_deg")
 		# Direção da lua: o nó Moon aponta do observador para a lua (basis.z, ver clock.rs orient).
 		var moon_dir := moon_light.global_transform.basis.z if moon_light != null else Vector3.FORWARD
-		print("capture: target %s, clock at %s, moon alt %.1f deg" % [hm, actual, rad_to_deg(asin(moon_dir.y))])
+		print("capture: target %s, clock at %s, sun alt %.2f deg, moon alt %.1f deg" % [hm, actual, sun_alt, rad_to_deg(asin(moon_dir.y))])
 
 		var tag := hm.replace(":", "")
 

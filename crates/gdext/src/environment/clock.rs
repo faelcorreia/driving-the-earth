@@ -139,6 +139,24 @@ impl EnvironmentClock {
         self.lamp_on_since.is_some()
     }
 
+    /// Hora local do relógio do jogo, "HH:MM" (BRT): a captura registra a hora real do quadro.
+    #[func]
+    fn local_time_text(&self) -> GString {
+        GString::from(&self.local_clock())
+    }
+
+    /// Instante do relógio do jogo, segundos Unix: a captura espera até um horário exato.
+    #[func]
+    fn game_unix(&self) -> f64 {
+        self.sim_unix
+    }
+
+    /// Altitude do sol em graus, no último quadro (para a captura registrar a elevação).
+    #[func]
+    fn sun_altitude_deg(&self) -> f64 {
+        self.sun_alt_deg
+    }
+
     /// Text of a UI key (see `ui_text.rs`) in the game's locale, for the HUD scripts. An unknown key
     /// comes back as itself.
     #[func]
