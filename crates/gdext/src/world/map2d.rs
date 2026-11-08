@@ -510,6 +510,7 @@ mod tests {
             z: vec![],
             zl: vec![],
             zr: vec![],
+            lit: None,
         }
     }
 

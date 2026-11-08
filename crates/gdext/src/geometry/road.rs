@@ -156,6 +156,7 @@ mod tests {
             zr: Vec::new(),
             highway: "residential".into(),
             points,
+            lit: None,
         }
     }
 

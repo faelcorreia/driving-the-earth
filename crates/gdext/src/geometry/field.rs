@@ -536,6 +536,7 @@ mod tests {
             z: vec![z; n],
             zl: vec![z; n],
             zr: vec![z; n],
+            lit: None,
         }
     }
 
@@ -562,6 +563,7 @@ mod tests {
             z: vec![4.0, 6.0, 9.0],
             zl: Vec::new(),
             zr: Vec::new(),
+            lit: None,
         };
         let stem = Polyline {
             highway: "residential".into(),
@@ -570,6 +572,7 @@ mod tests {
             z: vec![1.0, 2.0, 3.0],
             zl: Vec::new(),
             zr: Vec::new(),
+            lit: None,
         };
         let roads = [main, stem];
         let mut profiles: Vec<Profile> = roads
