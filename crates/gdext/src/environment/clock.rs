@@ -34,6 +34,9 @@ const MOON_COLOR: (f32, f32, f32) = (0.6, 0.7, 1.0);
 const SHADOW_MAX_DISTANCE_M: f32 = 300.0;
 /// Ambiente mínimo com o sol embaixo do horizonte, fração da energia ambiente.
 const AMBIENT_MIN: f64 = 0.3;
+/// Exposição do tonemapper (ACES) com o céu limpo de dia: abaixo de 1 o meio-dia deixa de estourar.
+/// A noite fica em 1 (`apply_visuals` mistura pela luz do céu sem nuvens), para não escurecer.
+const DAY_TONEMAP_EXPOSURE: f32 = 0.5;
 /// Multiplicador do clima (futuro); 1 = céu limpo.
 const WEATHER_FACTOR: f64 = 1.0;
 /// Limiar de luz dos postes: acendem ao cair abaixo de `LAMP_ON_BELOW`, apagam acima de `LAMP_OFF_ABOVE`.
@@ -97,8 +100,9 @@ pub struct EnvironmentClock {
     #[export]
     shadows_enabled: bool,
     /// Cloud cover of the sky, 0 (clear) to 1 (overcast). Drives the sky's gray veil and dims the
-    /// sun and the sky light (see `sky::cloud_light_factor`). No weather UI yet.
-    #[init(val = 0.0)]
+    /// sun and the sky light (see `sky::cloud_light_factor`). No weather UI yet. The default 0.7 is
+    /// a cloudy day until there is real weather; set 0 for a clear sky.
+    #[init(val = 0.7)]
     #[export]
     cloud_cover: f64,
 
@@ -434,6 +438,8 @@ impl EnvironmentClock {
             ];
             env.set_ambient_light_color(Color::from_rgb(amb[0], amb[1], amb[2]));
             env.set_ambient_light_energy((AMBIENT_MIN + (1.0 - AMBIENT_MIN) * self.light) as f32);
+            let day = self.clear_light.clamp(0.0, 1.0) as f32;
+            env.set_tonemap_exposure(1.0 + (DAY_TONEMAP_EXPOSURE - 1.0) * day);
         }
     }
 
