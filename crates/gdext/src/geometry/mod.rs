@@ -95,12 +95,13 @@ pub fn tile_geometry_with(
         push_road(&mut roads, &surface, ground, pts, half, lift);
     }
 
-    let buildings = building_mesh(tile, ground);
+    let (buildings, building_prisms) = building_mesh(tile, ground);
     let lamps = lamps::lamp_posts(tile, ground);
     TileGeometry {
         terrain,
         roads,
         buildings,
+        building_prisms,
         lamps,
     }
 }

@@ -32,16 +32,34 @@ const TINT_MAX: f32 = 0.06;
 /// Floors of a building with no known count: 1 or 2, from a hash of its position.
 const ESTIMATED_LEVELS_SPAN: u64 = 2;
 
-/// Builds the boxes of all `tile.buildings` into one mesh (one draw call per tile).
-pub fn building_mesh(tile: &Tile, ground: &dyn Fn(f64, f64) -> f32) -> MeshData {
-    let mut mesh = MeshData::default();
-    for b in &tile.buildings {
-        add_building(&mut mesh, b, ground);
-    }
-    mesh
+/// Convex prism of one building: the convex hull of its footprint, from the flat base (the seat)
+/// up to the roof height. `points` are the hull corners at the base, then the same at the top, in
+/// Godot world space, so they feed a `ConvexPolygonShape3D` as they are.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuildingPrism {
+    pub points: Vec<[f32; 3]>,
 }
 
-fn add_building(mesh: &mut MeshData, b: &Polygon, ground: &dyn Fn(f64, f64) -> f32) {
+/// Builds the boxes of all `tile.buildings` into one mesh (one draw call per tile), and the convex
+/// prism of each building whose footprint has area (see `BuildingPrism`).
+pub fn building_mesh(
+    tile: &Tile,
+    ground: &dyn Fn(f64, f64) -> f32,
+) -> (MeshData, Vec<BuildingPrism>) {
+    let mut mesh = MeshData::default();
+    let mut prisms = Vec::new();
+    for b in &tile.buildings {
+        add_building(&mut mesh, &mut prisms, b, ground);
+    }
+    (mesh, prisms)
+}
+
+fn add_building(
+    mesh: &mut MeshData,
+    prisms: &mut Vec<BuildingPrism>,
+    b: &Polygon,
+    ground: &dyn Fn(f64, f64) -> f32,
+) {
     let mut ring = b.points.clone();
     if ring.len() > 1 && ring.first() == ring.last() {
         ring.pop();
@@ -66,6 +84,9 @@ fn add_building(mesh: &mut MeshData, b: &Polygon, ground: &dyn Fn(f64, f64) -> f
         estimated_levels(centroid) as f32
     };
     let top_y = base_y + levels * FLOOR_HEIGHT_M as f32;
+    if let Some(prism) = prism_of(&ring, base_y, top_y) {
+        prisms.push(prism);
+    }
 
     let wall = palette_color(b.color_idx, b.tint);
     let roof = scale(wall, ROOF_SHADE);
@@ -157,6 +178,45 @@ fn seed_of(centroid: [f64; 2]) -> f32 {
     bytes.extend(qy.to_le_bytes());
     bytes.extend(b"seed");
     (fnv1a(&bytes) % 256) as f32 / 255.0
+}
+
+/// Convex prism of a footprint ring at heights `base_y` and `top_y`; `None` when its hull has
+/// fewer than three corners (no area: no prism, the wall mesh alone stays).
+fn prism_of(ring: &[[f64; 2]], base_y: f32, top_y: f32) -> Option<BuildingPrism> {
+    let hull = convex_hull(ring);
+    if hull.len() < 3 {
+        return None;
+    }
+    let bottom = hull.iter().map(|p| world(p[0], p[1], base_y));
+    let top = hull.iter().map(|p| world(p[0], p[1], top_y));
+    Some(BuildingPrism {
+        points: bottom.chain(top).collect(),
+    })
+}
+
+/// Convex hull of points (Andrew's monotone chain), counter-clockwise, without collinear corners.
+fn convex_hull(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut pts = points.to_vec();
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+    let mut hull: Vec<[f64; 2]> = Vec::with_capacity(2 * pts.len());
+    for pass in [pts.iter().collect::<Vec<_>>(), pts.iter().rev().collect()] {
+        let start = hull.len();
+        for &p in pass {
+            while hull.len() >= start + 2
+                && cross2(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        // The last point of each pass is the first point of the next one.
+        hull.pop();
+    }
+    hull
 }
 
 fn edge_len(p: [f64; 2], q: [f64; 2]) -> f64 {
@@ -281,6 +341,10 @@ mod tests {
     }
 
     fn one(b: Polygon) -> MeshData {
+        one_with_prisms(b).0
+    }
+
+    fn one_with_prisms(b: Polygon) -> (MeshData, Vec<BuildingPrism>) {
         let mut t = tile(0, 0, grid(2, |_, _| 0.0), Vec::new());
         t.buildings = vec![b];
         building_mesh(&t, &slope)
@@ -288,6 +352,106 @@ mod tests {
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<[f64; 2]> {
         vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    }
+
+    /// Footprint with a notch: not convex, so its prism must be the hull, not the footprint.
+    fn l_shape() -> Vec<[f64; 2]> {
+        vec![
+            [10.0, 10.0],
+            [20.0, 10.0],
+            [20.0, 13.0],
+            [13.0, 13.0],
+            [13.0, 20.0],
+            [10.0, 20.0],
+        ]
+    }
+
+    /// 2D corners of a prism (its base row), in the order of `convex_hull`.
+    fn base_corners(p: &BuildingPrism, base: f32) -> Vec<[f64; 2]> {
+        p.points
+            .iter()
+            .filter(|v| (v[1] - base).abs() < 1e-4)
+            .map(|v| [v[0] as f64, -(v[2] as f64)])
+            .collect()
+    }
+
+    #[test]
+    fn prism_contains_the_footprint_and_is_convex() {
+        for pts in [rect(10.0, 10.0, 20.0, 20.0), l_shape()] {
+            let (_, prisms) = one_with_prisms(building(pts.clone(), 2, 0, 0));
+            assert_eq!(prisms.len(), 1);
+            let hull = base_corners(&prisms[0], slope(10.0, 0.0));
+            // Convex: every corner turns left (counter-clockwise, no collinear corner).
+            for i in 0..hull.len() {
+                let (a, b, c) = (
+                    hull[i],
+                    hull[(i + 1) % hull.len()],
+                    hull[(i + 2) % hull.len()],
+                );
+                assert!(
+                    cross2(a, b, c) > 0.0,
+                    "hull corner {i} not convex: {hull:?}"
+                );
+            }
+            // Contains: every footprint vertex lies inside or on the hull.
+            for p in &pts {
+                for i in 0..hull.len() {
+                    let (a, b) = (hull[i], hull[(i + 1) % hull.len()]);
+                    assert!(
+                        cross2(a, b, *p) >= -1e-9,
+                        "footprint point {p:?} outside hull"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prism_spans_from_the_seat_to_the_roof() {
+        let base = slope(10.0, 0.0);
+        let levels = 3u8;
+        let (_, prisms) = one_with_prisms(building(l_shape(), levels, 0, 0));
+        let p = &prisms[0];
+        let lowest = p.points.iter().map(|v| v[1]).fold(f32::INFINITY, f32::min);
+        let highest = p
+            .points
+            .iter()
+            .map(|v| v[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (lowest - base).abs() < 1e-4,
+            "seat {lowest}, expected {base}"
+        );
+        let expected_top = base + levels as f32 * FLOOR_HEIGHT_M as f32;
+        assert!(
+            (highest - expected_top).abs() < 1e-4,
+            "roof {highest}, expected {expected_top}"
+        );
+        // Same corners at the seat and at the roof: 2 x hull corners.
+        assert_eq!(p.points.len() % 2, 0);
+        assert_eq!(base_corners(p, base).len(), p.points.len() / 2);
+    }
+
+    #[test]
+    fn a_building_without_area_has_no_prism() {
+        let line = vec![[10.0, 10.0], [15.0, 10.0], [20.0, 10.0]];
+        // The visible walls are unchanged by the prism (they are drawn as before); only no prism.
+        let (_, prisms) = one_with_prisms(building(line, 1, 0, 0));
+        assert!(prisms.is_empty());
+    }
+
+    #[test]
+    fn convex_hull_drops_collinear_and_duplicate_corners() {
+        let ring = vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 2.0],
+            [0.0, 2.0],
+            [1.0, 2.0],
+            [0.0, 0.0],
+        ];
+        assert_eq!(convex_hull(&ring).len(), 4);
     }
 
     #[test]

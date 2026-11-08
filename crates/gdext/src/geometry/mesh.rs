@@ -39,6 +39,9 @@ pub struct TileGeometry {
     pub roads: MeshData,
     /// All buildings of the tile, one mesh (solid, with per-vertex colors).
     pub buildings: MeshData,
+    /// Convex prism of each building of the tile (footprint hull, base at the seat, top at the roof).
+    /// Only the collision of the buildings may use them; the visible mesh is `buildings`.
+    pub building_prisms: Vec<super::building::BuildingPrism>,
     /// Street lamps of the tile (poles, heads and light pools are drawn from these), in order.
     pub lamps: Vec<super::lamps::LampPost>,
 }
