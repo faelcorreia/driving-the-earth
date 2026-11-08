@@ -14,6 +14,7 @@ extends SceneTree
 ## --top 1 (fotos de cima a TOP_HEIGHT_M: <HHMM>_top_car.png, _top_pole.png, _top_between.png;
 ## pole = luz acesa mais próxima do carro, near = 6 m à frente dela, between = 17,5 m à frente
 ## dela, na direção do carro). --car-under-pole 1 põe o carro sob essa luz antes das fotos de cima.
+## --cloud-cover 0.5 (0 a 1, ausente = o padrão do Environment): sets the clock's cloud_cover.
 ##
 ## Para cada horário: o relógio anda em tempo acelerado até o horário e para (speed 0). Então
 ## salva PNGs:
@@ -53,6 +54,7 @@ func _parse_args() -> Dictionary:
 		"top": "0",
 		"car_under_pole": "0",
 		"point": "spawn",
+		"cloud_cover": "",
 	}
 	var args := OS.get_cmdline_user_args()
 	var i := 0
@@ -169,6 +171,8 @@ func run() -> void:
 		return
 	# Relógio parado até o primeiro horário; o mundo carrega em tempo real.
 	clock.set("speed", 0.0)
+	if opts["cloud_cover"] != "":
+		clock.set("cloud_cover", float(opts["cloud_cover"]))
 	# O relógio começa às --start horas do dia pedido (--date) ou do dia de hoje (BRT). Sem isso,
 	# o relógio ficaria na hora real do sistema e os horários do log não bateriam com o ambiente.
 	var date: String = opts["date"] if opts["date"] != "" else _today_brt()
