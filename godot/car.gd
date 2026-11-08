@@ -54,6 +54,8 @@ const BRAKE_MIN_SPEED := 0.5
 var _tail_mats: Array[StandardMaterial3D] = []
 var _braking := false
 var _clock: Node = null
+## The world's Gps node (main.tscn), null when the car has none.
+var _gps: Object = null
 ## m/s to km/h.
 const KMH_PER_MS := 3.6
 var _hud_value: Label = null
@@ -62,6 +64,7 @@ var _shown_kmh := -1
 
 
 func _ready() -> void:
+	_gps = get_parent().find_child("Gps", false, false)
 	for tail in _tails:
 		var mat := StandardMaterial3D.new()
 		mat.albedo_color = Color(0.35, 0.02, 0.02)
@@ -206,6 +209,11 @@ func _physics_process(_delta: float) -> void:
 	var speed_ratio := clampf(linear_velocity.length() / full_steer_speed, 0.0, 1.0)
 	steering = steer_input * max_steer * lerpf(1.0, min_steer_factor, speed_ratio)
 	_braking = (throttle < 0.0 and forward_speed > BRAKE_MIN_SPEED) or (throttle > 0.0 and forward_speed < -BRAKE_MIN_SPEED)
+
+	# GPS (item 112): the car's position in the map's local meters (x east, y north = -z), once per tick.
+	if _gps != null:
+		var pos := global_transform.origin
+		_gps.call("update", pos.x, -pos.z)
 
 
 ## The environment clock, found by name among the world's children once it exists (null before).

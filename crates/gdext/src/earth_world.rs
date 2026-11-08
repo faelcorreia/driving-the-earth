@@ -273,6 +273,7 @@ impl INode3D for EarthWorld {
             return;
         };
         write_last_map(&id);
+        self.start_gps(&cache_root.display().to_string(), &id);
         let tile_m = index.meta.tile_size_m;
         godot_print!(
             "map '{id}' opened: {} tiles, streamed within {} m",
@@ -519,6 +520,22 @@ impl EarthWorld {
         } else {
             (self.cache_root.clone(), false)
         }
+    }
+
+    /// Loads the map in use into the world's `Gps` node (item 112). The node reads the map in a
+    /// thread of its own, so the frame does not wait for it. Without the node there is no guide.
+    fn start_gps(&self, cache_root: &str, id: &str) {
+        let Some(mut gps) = self.base().get_node_or_null("Gps") else {
+            godot_warn!("no Gps node under the world: no route guide");
+            return;
+        };
+        gps.call(
+            "load_map",
+            &[
+                GString::from(cache_root).to_variant(),
+                GString::from(id).to_variant(),
+            ],
+        );
     }
 
     /// The map to open: the `map_id` given, else the last map opened, else the development map
