@@ -140,3 +140,79 @@ fn smooth_extra(raw: &[f32]) -> Vec<f32> {
     }
     env
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{grid, ribbon_height, tile};
+    use super::super::tile_geometry_with;
+    use std::f64::consts::FRAC_1_SQRT_2;
+    use tileformat::Polyline;
+
+    fn road(points: Vec<[f64; 2]>) -> Polyline {
+        Polyline {
+            name: String::new(),
+            z: Vec::new(),
+            zl: Vec::new(),
+            zr: Vec::new(),
+            highway: "residential".into(),
+            points,
+        }
+    }
+
+    /// Distance from `p` to the polyline `pts`.
+    fn dist_to_polyline(p: [f64; 2], pts: &[[f64; 2]]) -> f64 {
+        pts.windows(2)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy))
+                    .clamp(0.0, 1.0);
+                let (cx, cy) = (a[0] + t * dx - p[0], a[1] + t * dy - p[1]);
+                (cx * cx + cy * cy).sqrt()
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// A 90 degree corner exactly on the seam x = 250 m: one leg in each tile, each tile holds
+    /// its own piece of the road. The outer side of the corner must not be left uncovered
+    /// by either tile's ribbon.
+    #[test]
+    fn right_angle_corner_on_tile_seam_leaves_no_notch() {
+        let s = FRAC_1_SQRT_2;
+        let corner = [250.0, 125.0];
+        let a = [corner[0] - 80.0 * s, corner[1] + 80.0 * s];
+        let b = [corner[0] + 80.0 * s, corner[1] + 80.0 * s];
+        let left = tile(0, 0, grid(26, |_, _| 50.0), vec![road(vec![a, corner])]);
+        let right = tile(1, 0, grid(26, |_, _| 50.0), vec![road(vec![corner, b])]);
+        let g_left = tile_geometry_with(&left, 250.0, &|_, _| 50.0, &[&right]);
+        let g_right = tile_geometry_with(&right, 250.0, &|_, _| 50.0, &[&left]);
+
+        let half = 3.0;
+        let centerline = [a, corner, b];
+        let mut missing = Vec::new();
+        let mut checked = 0;
+        // Every point within the ribbon (clear of its edge) near the corner, on either tile's mesh.
+        for i in -60..=60 {
+            for j in -60..=60 {
+                let x = corner[0] + i as f64 * 0.1;
+                let y = corner[1] + j as f64 * 0.1;
+                if dist_to_polyline([x, y], &centerline) > half - 0.2 {
+                    continue;
+                }
+                checked += 1;
+                let covered = ribbon_height(&g_left.roads, x, y).is_some()
+                    || ribbon_height(&g_right.roads, x, y).is_some();
+                if !covered {
+                    missing.push((x, y));
+                }
+            }
+        }
+        assert!(checked > 500, "only {checked} points checked");
+        assert!(
+            missing.is_empty(),
+            "{} uncovered points at the seam corner, e.g. {:?}",
+            missing.len(),
+            missing.first()
+        );
+    }
+}
