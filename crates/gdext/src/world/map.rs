@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use tileformat::{read_tile, MapMeta, Polyline, Tile};
 
-use crate::geometry::{sample_height, tile_geometry_with, TileGeometry};
+use crate::geometry::{sample_height, tile_geometry_at, TileGeometry};
 
 /// A baked map: its metadata and every tile found in `cache/<id>/tiles/`.
 pub struct Map {
@@ -37,8 +37,14 @@ impl Map {
     }
 
     /// Geometry of `tile` with its neighbors' roads and grid: the surface is the same one the
-    /// neighbor's tile sees at a shared border.
+    /// neighbor's tile sees at a shared border. The drawn terrain at the fine 2,5 m grid.
+    #[cfg(test)]
     pub fn tile_geometry(&self, tile: &Tile) -> TileGeometry {
+        self.tile_geometry_at(tile, tileformat::units::TERRAIN_FINE_CELL_M)
+    }
+
+    /// `tile_geometry` with the drawn terrain at `mesh_cell_m` (see `geometry::mesh_cell_for`).
+    pub fn tile_geometry_at(&self, tile: &Tile, mesh_cell_m: f64) -> TileGeometry {
         let size = self.meta.tile_size_m;
         let around: Vec<&Tile> = self
             .tiles
@@ -49,7 +55,7 @@ impl Map {
                     && (t.x, t.y) != (tile.x, tile.y)
             })
             .collect();
-        tile_geometry_with(
+        tile_geometry_at(
             tile,
             size,
             &|x, y| {
@@ -57,6 +63,7 @@ impl Map {
                     .unwrap_or_else(|| sample_height(tile, size, x, y))
             },
             &around,
+            mesh_cell_m,
         )
     }
 }
@@ -163,13 +170,19 @@ impl MapIndex {
     }
 
     /// Geometry of tile `(x, y)` as the whole map would give it, reading only its neighborhood.
+    #[cfg(test)]
     pub fn tile_geometry(&self, x: i32, y: i32) -> io::Result<TileGeometry> {
+        self.tile_geometry_at(x, y, tileformat::units::TERRAIN_FINE_CELL_M)
+    }
+
+    /// `tile_geometry` with the drawn terrain at `mesh_cell_m`.
+    pub fn tile_geometry_at(&self, x: i32, y: i32, mesh_cell_m: f64) -> io::Result<TileGeometry> {
         let map = self.neighborhood(x, y)?;
         let center = map
             .tiles
             .iter()
             .find(|t| (t.x, t.y) == (x, y))
             .ok_or_else(|| invalid_data(format!("no tile {x} {y} in map '{}'", self.meta.id)))?;
-        Ok(map.tile_geometry(center))
+        Ok(map.tile_geometry_at(center, mesh_cell_m))
     }
 }

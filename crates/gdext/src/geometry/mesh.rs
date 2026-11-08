@@ -41,6 +41,11 @@ pub struct TileGeometry {
     pub buildings: MeshData,
     /// Street lamps of the tile (poles, heads and light pools are drawn from these), in order.
     pub lamps: Vec<super::lamps::LampPost>,
+    /// Terrain collision: the recorded 2,5 m heightfield, `TERRAIN_FINE_N` squared heights in
+    /// meters, row-major (`i` is y, `j` is x). Not drawn; the terrain body's `HeightMapShape3D`.
+    pub collision: Vec<f32>,
+    /// Side of the drawn terrain grid, in meters (2,5, 5 or 10). `terrain` has one vertex per cell.
+    pub mesh_cell_m: f64,
 }
 
 /// Local `(x, y)` plus height to Godot world space.

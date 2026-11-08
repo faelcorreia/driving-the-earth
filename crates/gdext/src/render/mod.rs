@@ -4,8 +4,8 @@
 
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{
-    ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, Material, MeshInstance3D, Node3D,
-    PackedScene, Shader, ShaderMaterial, StandardMaterial3D, StaticBody3D,
+    ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, HeightMapShape3D, Material, MeshInstance3D,
+    Node3D, PackedScene, Shader, ShaderMaterial, StandardMaterial3D, StaticBody3D,
 };
 use godot::obj::Inherits;
 use godot::prelude::*;
@@ -16,6 +16,7 @@ pub(crate) mod world_map;
 pub(crate) mod world_map_detail;
 
 use crate::geometry::MeshData;
+use tileformat::units::{TERRAIN_FINE_CELL_M, TERRAIN_FINE_N};
 
 pub(crate) fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
     let mut mat = StandardMaterial3D::new_gd();
@@ -68,6 +69,45 @@ pub(crate) fn solid_body<M: Inherits<Material>>(data: &MeshData, mat: &Gd<M>) ->
     faces.set_faces(&points);
     let mut collider = CollisionShape3D::new_alloc();
     collider.set_shape(&faces);
+    body.add_child(&collider);
+    body
+}
+
+/// Static body of a tile's terrain: the drawn mesh, and a `HeightMapShape3D` built from the
+/// recorded 2,5 m heightfield `collision` (`TERRAIN_FINE_N` squared, row-major, `i` is y). The
+/// shape is centered on the tile (`origin` is its map corner, `tile_m` its side) and scaled to
+/// the 2,5 m grid. Map `y` runs along -z in Godot, so the rows are written from the last to the first.
+pub(crate) fn terrain_body<M: Inherits<Material>>(
+    data: &MeshData,
+    mat: &Gd<M>,
+    collision: &[f32],
+    origin: [f64; 2],
+    tile_m: f64,
+) -> Gd<StaticBody3D> {
+    let mut body = StaticBody3D::new_alloc();
+    body.add_child(&mesh_instance(data, mat));
+
+    let n = TERRAIN_FINE_N;
+    let mut map = PackedFloat32Array::new();
+    for k in 0..n {
+        for j in 0..n {
+            map.push(collision[(n - 1 - k) * n + j]);
+        }
+    }
+    let mut shape = HeightMapShape3D::new_gd();
+    shape.set_map_width(n as i32);
+    shape.set_map_depth(n as i32);
+    shape.set_map_data(&map);
+    let mut collider = CollisionShape3D::new_alloc();
+    collider.set_shape(&shape);
+    let cell = TERRAIN_FINE_CELL_M as f32;
+    collider.set_scale(Vector3::new(cell, 1.0, cell));
+    collider.set_position(Vector3::new(
+        (origin[0] + tile_m / 2.0) as f32,
+        0.0,
+        -((origin[1] + tile_m / 2.0) as f32),
+    ));
+    collider.set_name("TerrainShape");
     body.add_child(&collider);
     body
 }

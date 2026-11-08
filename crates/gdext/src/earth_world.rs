@@ -20,16 +20,16 @@ use godot::prelude::*;
 use crate::environment::lamps::{delay_s, is_lit};
 use crate::environment::EnvironmentClock;
 use crate::geometry::lamps::LampPost;
-use crate::geometry::{TileGeometry, GRASS_RGB};
+use crate::geometry::{mesh_cell_for, TileGeometry, GRASS_RGB};
 use crate::home_store;
 use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::world_map::WorldMapView;
-use crate::render::{building_material, material, solid_body, spawn_car};
+use crate::render::{building_material, material, solid_body, spawn_car, terrain_body};
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::{find_spawn, find_spawn_near, inside_loaded_map};
-use crate::world::streaming::{is_stale, tiles_in_range};
+use crate::world::streaming::{distance_to_tile, is_stale, tiles_in_range};
 use crate::world::{open_map, MapIndex};
 use tilebake::dem::MapGrid;
 use tileformat::units::lamps::LAMP_REAL_REACH_M;
@@ -97,13 +97,16 @@ pub struct EarthWorld {
     building_mat: Option<Gd<ShaderMaterial>>,
     /// Loaded tiles, each one a container node with the terrain and road bodies.
     loaded: HashMap<(i32, i32), Gd<Node3D>>,
+    /// Side of the drawn terrain grid each loaded tile was built with (see `mesh_cell_for`).
+    built_cell: HashMap<(i32, i32), f64>,
     /// Geometry requested from the loader and not back yet.
     requested: HashSet<(i32, i32)>,
     /// Tiles whose geometry failed to load; not retried.
     failed: HashSet<(i32, i32)>,
     /// Geometry back from the loader, waiting for its turn to be instantiated.
     done: VecDeque<((i32, i32), TileGeometry)>,
-    requests: Option<Sender<(i32, i32)>>,
+    /// Tile and the side of its drawn terrain grid to build.
+    requests: Option<Sender<((i32, i32), f64)>>,
     results: Option<Receiver<((i32, i32), io::Result<TileGeometry>)>>,
     /// Distant terrain rings, and the node of the last build.
     lod: Option<TerrainLod>,
@@ -341,6 +344,7 @@ impl INode3D for EarthWorld {
             .collect();
         for t in stale {
             self.lamp_posts.remove(&t);
+            self.built_cell.remove(&t);
             if let Some(mut node) = self.loaded.remove(&t) {
                 node.queue_free();
             }
@@ -366,10 +370,16 @@ impl INode3D for EarthWorld {
             let Some((t, geometry)) = self.done.pop_front() else {
                 break;
             };
-            if self.loaded.contains_key(&t) || is_stale(t, tile_m, p, radius, HYSTERESIS_M) {
+            if self.built_cell.get(&t) == Some(&geometry.mesh_cell_m)
+                || is_stale(t, tile_m, p, radius, HYSTERESIS_M)
+            {
                 continue;
             }
-            self.add_tile(t, &geometry);
+            // A tile rebuilt at another side replaces its old node only now, so it never has a gap.
+            if let Some(mut old) = self.loaded.remove(&t) {
+                old.queue_free();
+            }
+            self.add_tile(t, &geometry, tile_m);
             built += 1;
         }
         if built > 0 {
@@ -381,17 +391,24 @@ impl INode3D for EarthWorld {
             if self.requested.len() >= MAX_IN_FLIGHT {
                 break;
             }
-            if self.loaded.contains_key(&t)
+            let cell = mesh_cell_for(
+                distance_to_tile(t, tile_m, p),
+                self.built_cell.get(&t).copied(),
+            );
+            if self.built_cell.get(&t) == Some(&cell)
                 || self.requested.contains(&t)
                 || self.failed.contains(&t)
-                || self.done.iter().any(|(d, _)| *d == t)
+                || self
+                    .done
+                    .iter()
+                    .any(|(d, g)| *d == t && g.mesh_cell_m == cell)
             {
                 continue;
             }
             let Some(tx) = &self.requests else {
                 break;
             };
-            if tx.send(t).is_ok() {
+            if tx.send((t, cell)).is_ok() {
                 self.requested.insert(t);
             }
         }
@@ -436,12 +453,12 @@ impl EarthWorld {
     /// Starts the loader thread. It builds tile geometry for each request, in order, and
     /// stops when this node (and with it the request sender) is freed.
     fn start_loader(&mut self, index: Arc<MapIndex>) {
-        let (req_tx, req_rx) = mpsc::channel::<(i32, i32)>();
+        let (req_tx, req_rx) = mpsc::channel::<((i32, i32), f64)>();
         let (res_tx, res_rx) = mpsc::channel();
         let worker_index = index.clone();
         thread::spawn(move || {
-            for (x, y) in req_rx {
-                let result = worker_index.tile_geometry(x, y);
+            for ((x, y), cell) in req_rx {
+                let result = worker_index.tile_geometry_at(x, y, cell);
                 if res_tx.send(((x, y), result)).is_err() {
                     break;
                 }
@@ -477,8 +494,11 @@ impl EarthWorld {
         if !index.has_tile(t.0, t.1) || self.loaded.contains_key(&t) {
             return;
         }
-        match index.tile_geometry(t.0, t.1) {
-            Ok(geometry) => self.add_tile(t, &geometry),
+        let tile_m = index.meta.tile_size_m;
+        let p = self.car_position().unwrap_or([0.0, 0.0]);
+        let cell = mesh_cell_for(distance_to_tile(t, tile_m, p), None);
+        match index.tile_geometry_at(t.0, t.1, cell) {
+            Ok(geometry) => self.add_tile(t, &geometry, tile_m),
             Err(e) => {
                 godot_error!("cannot load tile {} {}: {e}", t.0, t.1);
             }
@@ -521,7 +541,7 @@ impl EarthWorld {
     }
 
     /// Creates the nodes of one tile: terrain body, and road and building bodies when there are some.
-    fn add_tile(&mut self, t: (i32, i32), geometry: &TileGeometry) {
+    fn add_tile(&mut self, t: (i32, i32), geometry: &TileGeometry, tile_m: f64) {
         let (Some(terrain_mat), Some(road_mat), Some(vertex_mat)) = (
             self.terrain_mat.clone(),
             self.road_mat.clone(),
@@ -538,7 +558,14 @@ impl EarthWorld {
         } else {
             &vertex_mat
         };
-        let mut terrain_body = solid_body(&geometry.terrain, terrain);
+        let origin = [t.0 as f64 * tile_m, t.1 as f64 * tile_m];
+        let mut terrain_body = terrain_body(
+            &geometry.terrain,
+            terrain,
+            &geometry.collision,
+            origin,
+            tile_m,
+        );
         terrain_body.set_name("Terrain");
         node.add_child(&terrain_body);
         if !geometry.roads.is_empty() {
@@ -564,6 +591,7 @@ impl EarthWorld {
         self.lamp_posts.insert(t, geometry.lamps.clone());
         self.base_mut().add_child(&node);
         self.loaded.insert(t, node);
+        self.built_cell.insert(t, geometry.mesh_cell_m);
     }
 
     /// Adds the world map (M) on its own canvas layer. It starts hidden; the car and the map's
