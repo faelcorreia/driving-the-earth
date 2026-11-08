@@ -239,3 +239,74 @@ fn tile_perf_real() {
         );
     }
 }
+
+/// Drawn terrain at each side of the LOD bands (item 54): triangles per tile and per 1 km² (16
+/// tiles), `tile_geometry` time, and the step of the recorded collision heightfield across the
+/// shared edge of neighboring tiles. Run: `cargo test --release -p driving_the_earth_ext lod_cells -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn lod_cells_casa() {
+    use tileformat::units::{GROUND_CELL_M, TERRAIN_CELL_M, TERRAIN_FINE_CELL_M, TERRAIN_FINE_N};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let id = std::env::var("MEASURE_MAP").unwrap_or_else(|_| "casa".into());
+    let index = open_map(&root, &id).expect("open map");
+    let tile_m = index.meta.tile_size_m;
+    let coords = index.coords().to_vec();
+    let n = TERRAIN_FINE_N;
+
+    // Collision step across tile edges, from the recorded heightfield (independent of the cell).
+    let mut collision: HashMap<(i32, i32), Vec<f32>> = HashMap::new();
+    for &(x, y) in &coords {
+        let g = index
+            .tile_geometry_at(x, y, TERRAIN_FINE_CELL_M)
+            .expect("tile_geometry");
+        collision.insert((x, y), g.collision);
+    }
+    let mut step = 0.0f64;
+    for &(x, y) in &coords {
+        let a = &collision[&(x, y)];
+        if let Some(b) = collision.get(&(x + 1, y)) {
+            for i in 0..n {
+                step = step.max((a[i * n + n - 1] - b[i * n]).abs() as f64);
+            }
+        }
+        if let Some(b) = collision.get(&(x, y + 1)) {
+            for j in 0..n {
+                step = step.max((a[(n - 1) * n + j] - b[j]).abs() as f64);
+            }
+        }
+    }
+    println!(
+        "map {id}: {} tiles, tile {tile_m} m, collision edge step max {step:.4} m",
+        coords.len()
+    );
+
+    // Geometry time only: the neighborhood is read outside the timed call, as in `tile_perf_real`.
+    let cells = [TERRAIN_FINE_CELL_M, GROUND_CELL_M, TERRAIN_CELL_M];
+    let mut per_cell: Vec<(Vec<f64>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); cells.len()];
+    for &(x, y) in &coords {
+        let map = index.neighborhood(x, y).expect("neighborhood");
+        let center = map
+            .tiles
+            .iter()
+            .find(|t| (t.x, t.y) == (x, y))
+            .expect("center");
+        for (k, &cell) in cells.iter().enumerate() {
+            let t0 = Instant::now();
+            let g = map.tile_geometry_at(center, cell);
+            per_cell[k].1.push(t0.elapsed().as_secs_f64() * 1e3);
+            per_cell[k].0.push((g.terrain.indices.len() / 3) as f64);
+        }
+    }
+    for (cell, (tris, mut ms)) in cells.into_iter().zip(per_cell) {
+        let mean = tris.iter().sum::<f64>() / tris.len() as f64;
+        println!(
+            "cell {cell:>4} m: terrain tri per tile p50 {:.0} p90 {:.0} | per 1 km² {:.0} | tile_geometry ms p50 {:.2} p90 {:.2}",
+            pct(&mut tris.clone(), 0.5),
+            pct(&mut tris.clone(), 0.9),
+            mean * 16.0,
+            pct(&mut ms.clone(), 0.5),
+            pct(&mut ms, 0.9),
+        );
+    }
+}
