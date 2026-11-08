@@ -3,6 +3,7 @@
 //! `environment` and `tileformat`/`tilebake`; `lod` also uses Godot types.
 //! `render` and `earth_world` build nodes from it; `geometry` never imports from here.
 pub mod far_lights;
+pub mod gps;
 pub mod lod;
 pub mod map;
 pub mod map2d;
