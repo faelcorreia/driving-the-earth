@@ -1,5 +1,6 @@
 use godot::prelude::*;
 
+mod bake_job;
 mod earth_world;
 mod environment;
 mod geometry;
