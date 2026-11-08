@@ -8,7 +8,11 @@ extends SceneTree
 ## the span, so the car settles on its suspension), --length 900 (route length, m), --cruise 33.3
 ## (top speed the bot asks for, m/s; the route's curves cap it further).
 ##
-## Route: DriveRoute (crates/gdext/src/world/route.rs), from the car's position and heading at spawn.
+## Route (item 92): by default a random route of 950-1050 m on the car roads (the shortest car route,
+## item 91): origin and destination are drawn from a seed, the car is put at the origin facing the route
+## and drives it. The seed is drawn on each run and printed; `--seed N` repeats the same route.
+## `--route fixed` keeps the old route: from the car's position and heading at spawn, `--length` long.
+## Route source: DriveRoute (crates/gdext/src/world/route.rs).
 ## Control: pure pursuit on the route, through the drive_* input actions, as a player would.
 ## Time is counted in physics ticks, so the span does not depend on the frame rate.
 ##
@@ -57,6 +61,18 @@ const DECEL_DROP_MS := 0.2
 const DECEL_MIN_TICKS := 1
 ## Tile size in local meters (tileformat::units::TILE_M), to name the tile of an event.
 const TILE_M := 250.0
+## Random route (item 92): its length range, m; the height the car is first put at over the origin, m
+## (the world streams tiles around the car, so the car is frozen up there until the ground loads); the
+## wall-clock time the ground may take to load, ms; and the lift over the ground when the car is dropped.
+const ROUTE_MIN_M := 950.0
+const ROUTE_MAX_M := 1050.0
+const PLACE_HEIGHT_M := 500.0
+const PLACE_WAIT_MS := 60000
+const DROP_LIFT_M := 1.0
+## The ground under the origin is looked for with a ray from GROUND_RAY_M above and below the origin;
+## up to GROUND_SKIPS other hits (buildings, the car) are passed through.
+const GROUND_RAY_M := 10000.0
+const GROUND_SKIPS := 8
 
 
 func _initialize() -> void:
@@ -72,6 +88,8 @@ func _parse_args() -> Dictionary:
 		"cruise": "33.3",
 		"offset": "0",
 		"sweep": "0",
+		"route": "random",
+		"seed": "",
 	}
 	var args := OS.get_cmdline_user_args()
 	var i := 0
@@ -115,20 +133,38 @@ func run() -> void:
 		return
 
 	var cache_root := ProjectSettings.globalize_path(str(world.get("cache_root")))
-	var forward := -car.global_transform.basis.z
-	var start := Vector2(car.global_position.x, -car.global_position.z)
-	var heading := Vector2(forward.x, -forward.z).normalized()
-	var length_m := float(opts["length"])
 	var route_tool: Object = ClassDB.instantiate(&"DriveRoute")
 	if route_tool == null:
 		push_error("drive bot: class DriveRoute is not registered (extension not loaded?)")
 		await _finish(main, 1)
 		return
-	var waypoints: PackedVector2Array = route_tool.call("waypoints", cache_root, opts["map"], start, heading, length_m)
-	if waypoints.size() < 2:
-		push_error("drive bot: no route from the start point on map '%s'" % opts["map"])
-		await _finish(main, 1)
-		return
+	var use_random: bool = opts["route"] != "fixed"
+	var route_seed := 0
+	var waypoints: PackedVector2Array
+	var start := Vector2(car.global_position.x, -car.global_position.z)
+	if use_random:
+		route_seed = _route_seed(opts)
+		print("drive bot: seed %d (random route of %.0f-%.0f m; --seed %d repeats it)" % [route_seed, ROUTE_MIN_M, ROUTE_MAX_M, route_seed])
+		var info: Dictionary = route_tool.call("random_route", cache_root, opts["map"], route_seed, ROUTE_MIN_M, ROUTE_MAX_M)
+		if info.is_empty():
+			push_error("drive bot: no random route on map '%s' for seed %d" % [opts["map"], route_seed])
+			await _finish(main, 1)
+			return
+		waypoints = info["waypoints"]
+		start = info["origin"]
+		if not await _place_car(car, start, waypoints[1] - start):
+			push_error("drive bot: the ground at the origin did not load within %d ms" % PLACE_WAIT_MS)
+			await _finish(main, 1)
+			return
+	else:
+		var forward := -car.global_transform.basis.z
+		var heading := Vector2(forward.x, -forward.z).normalized()
+		var length_m := float(opts["length"])
+		waypoints = route_tool.call("waypoints", cache_root, opts["map"], start, heading, length_m)
+		if waypoints.size() < 2:
+			push_error("drive bot: no route from the start point on map '%s'" % opts["map"])
+			await _finish(main, 1)
+			return
 	waypoints = _offset_route(waypoints, float(opts["offset"]), float(opts["sweep"]) > 0.0)
 	var route_m := 0.0
 	var cum := PackedFloat32Array([0.0])
@@ -209,6 +245,9 @@ func run() -> void:
 	var stdev_y := sqrt(var_y / maxf(ys.size(), 1))
 	var reached := int(state["index"]) >= waypoints.size() - 1
 	print("drive bot: distance %.1f m in %.1f s (route %.1f m, end reached %s)" % [distance_m, seconds, route_m, str(reached)])
+	if use_random:
+		var dest: Vector2 = waypoints[waypoints.size() - 1]
+		print("drive bot: seed %d, origin x=%.2f y=%.2f, destination x=%.2f y=%.2f, route length %.1f m" % [route_seed, start.x, start.y, dest.x, dest.y, route_m])
 	print("drive bot: chassis y stdev %.4f m over %d ticks, end pos x=%.2f y=%.2f" % [stdev_y, ys.size(), car.global_position.x, -car.global_position.z])
 	# Bounce only: residual of y from its centered 1 s moving mean, so the climb of the route does not count.
 	var half := int(round(tps / 2.0))
@@ -383,6 +422,55 @@ func _finish(main: Node, code: int) -> void:
 	main.queue_free()
 	await process_frame
 	quit(code)
+
+
+## The seed of this run: `--seed N` when given, else drawn from the clock (printed by the caller).
+func _route_seed(opts: Dictionary) -> int:
+	if str(opts["seed"]) != "":
+		return int(opts["seed"])
+	randomize()
+	return randi()
+
+
+## Puts the car at `origin` (local meters, x east, y north) on the ground, facing `dir`. The car is frozen
+## up over the origin until the terrain under it loads, since the world streams tiles around the car.
+## Returns false when no ground shows up within PLACE_WAIT_MS.
+func _place_car(car: VehicleBody3D, origin: Vector2, dir: Vector2) -> bool:
+	var space := car.get_world_3d().direct_space_state
+	var facing := Basis.looking_at(Vector3(dir.x, 0.0, -dir.y).normalized(), Vector3.UP)
+	var deadline := Time.get_ticks_msec() + PLACE_WAIT_MS
+	car.freeze = true
+	var ground := NAN
+	while is_nan(ground):
+		car.global_transform = Transform3D(facing, Vector3(origin.x, PLACE_HEIGHT_M, -origin.y))
+		car.linear_velocity = Vector3.ZERO
+		car.angular_velocity = Vector3.ZERO
+		await physics_frame
+		ground = _ground_y(car, space, origin)
+		if is_nan(ground) and Time.get_ticks_msec() > deadline:
+			car.freeze = false
+			return false
+	car.global_transform = Transform3D(facing, Vector3(origin.x, ground + DROP_LIFT_M, -origin.y))
+	car.linear_velocity = Vector3.ZERO
+	car.angular_velocity = Vector3.ZERO
+	car.freeze = false
+	return true
+
+
+## Height of the terrain or the road under `origin`, NAN when none is loaded there.
+func _ground_y(car: VehicleBody3D, space: PhysicsDirectSpaceState3D, origin: Vector2) -> float:
+	var from := Vector3(origin.x, GROUND_RAY_M, -origin.y)
+	var exclude: Array[RID] = [car.get_rid()]
+	for i in GROUND_SKIPS:
+		var query := PhysicsRayQueryParameters3D.create(from, from + Vector3.DOWN * 2.0 * GROUND_RAY_M, 0xFFFFFFFF, exclude)
+		var hit := space.intersect_ray(query)
+		if hit.is_empty():
+			return NAN
+		var path := str((hit["collider"] as Node).get_path())
+		if "/Terrain" in path or "/Roads" in path:
+			return float(hit["position"].y)
+		exclude.append(hit["rid"])
+	return NAN
 
 
 ## Probe only: shifts the route sideways by `offset` m (positive = left), easing in and out over
