@@ -17,6 +17,11 @@ extends SceneTree
 ## (it stayed on the building after reversing for RAM_REVERSE_MAX_S) or "clear" (it backed off
 ## RAM_CLEAR_M m from the impact within that time). Other options: --cruise, --settle.
 ## Example: godot --headless --path godot -s tools/drive_bot.gd -- --map casa-10km --ram
+##
+## Sudden deceleration (item 101): the report lists the events where the speed drops sharply while the
+## throttle is pressed (a terrain fault slows the car): time, position, tile, speed before and after, and
+## what each wheel and the body touch; then the biggest drop per tick. Both the default route and --ram
+## report them. The steering and the throttle do not change.
 
 const LOOKAHEAD_MIN_M := 6.0
 const LOOKAHEAD_MAX_M := 25.0
@@ -43,6 +48,15 @@ const RAM_BUILDING_WAIT_S := 10.0
 const RAM_APPROACH_MAX_S := 30.0
 const RAM_REVERSE_MAX_S := 5.0
 const RAM_CLEAR_M := 3.0
+## Sudden deceleration (item 101): a run of at least DECEL_MIN_TICKS ticks in a row, each one dropping the
+## speed by more than DECEL_DROP_MS (m/s per tick), with the throttle pressed and before a stop, is an event.
+## Baseline (item 101, BACKLOG.md): default route of casa-10km, 3 rounds, 0 events, biggest drop per tick
+## 0.168 m/s (about 10 m/s² at 60 Hz). DECEL_DROP_MS = 0.2 is about 20% above that ceiling. Provisional:
+## new routes (item 92, `--route fixed`) may need a new value.
+const DECEL_DROP_MS := 0.2
+const DECEL_MIN_TICKS := 1
+## Tile size in local meters (tileformat::units::TILE_M), to name the tile of an event.
+const TILE_M := 250.0
 
 
 func _initialize() -> void:
@@ -155,6 +169,7 @@ func run() -> void:
 	var stop_ticks := int(round(STOP_HOLD_S * tps))
 	var stuck_ticks := 0
 	var stops := 0
+	var decel := _new_decel_watch()
 	for i in span_ticks:
 		_steer_and_throttle(car, state)
 		await physics_frame
@@ -181,6 +196,7 @@ func run() -> void:
 				_report_stop(car, state, stops, float(i + 1) / tps)
 		else:
 			stuck_ticks = 0
+		_decel_step(car, decel, float(i + 1) / tps, float(state["throttle"]) > 0.0 and stuck_ticks < stop_ticks)
 	_release_all()
 	var seconds := float(span_ticks) / tps
 	var mean_y := 0.0
@@ -207,6 +223,7 @@ func run() -> void:
 		resid_var += (ys[i] - avg) * (ys[i] - avg)
 	print("drive bot: chassis y bounce stdev %.4f m (residual of a 1 s moving mean)" % sqrt(resid_var / maxf(ys.size(), 1)))
 	print("drive bot: stops %d (speed < %.1f m/s with throttle for > %.1f s)" % [stops, STOP_SPEED_MS, STOP_HOLD_S])
+	_print_decel(decel)
 	_report_bounce_origin(wheels, ys, wheel_local_y, wheel_ground_y, wheel_surface)
 	await _finish(main, 0)
 
@@ -246,6 +263,7 @@ func _run_ram(car: VehicleBody3D, opts: Dictionary) -> int:
 	var impact_t := 0.0
 	var impact_pos := start
 	var throttle := 0.0
+	var decel := _new_decel_watch()
 	for i in int(round(RAM_APPROACH_MAX_S * tps)):
 		throttle = 1.0 if car.linear_velocity.length() < cruise else 0.0
 		_ram_steer(car, Vector2(aim.x, -aim.z), throttle)
@@ -262,6 +280,8 @@ func _run_ram(car: VehicleBody3D, opts: Dictionary) -> int:
 				break
 		else:
 			stuck_ticks = 0
+		_decel_step(car, decel, float(i + 1) / tps, throttle > 0.0 and stuck_ticks < stop_ticks)
+	_print_decel(decel)
 	if through or not impact:
 		_release_all()
 		if through:
@@ -457,6 +477,89 @@ func _report_bounce_origin(wheels: Array[VehicleWheel3D], ys: PackedFloat64Array
 			_bounce_stdev(wheel_ground_y[k], half, wheel_surface[k], SURFACE_TERRAIN),
 			_bounce_stdev(wheel_ground_y[k], half, wheel_surface[k], SURFACE_ROAD),
 		])
+
+
+## Sudden deceleration watch (item 101). `valid` is false when the throttle is not pressed or the car has
+## stopped: such a tick ends the run in progress.
+func _new_decel_watch() -> Dictionary:
+	return {"prev": -1.0, "run": 0, "run_v0": 0.0, "run_v1": 0.0, "run_peak": {}, "events": [], "max_drop": 0.0, "max_at": {}}
+
+
+## One tick of the watch: the drop from the previous tick, the run of drops above DECEL_DROP_MS, its steepest tick.
+func _decel_step(car: VehicleBody3D, watch: Dictionary, t_s: float, valid: bool) -> void:
+	var speed := car.linear_velocity.length()
+	var prev := float(watch["prev"])
+	watch["prev"] = speed
+	if prev < 0.0 or not valid:
+		_decel_end_run(watch)
+		return
+	var drop := prev - speed
+	if drop > float(watch["max_drop"]):
+		watch["max_drop"] = drop
+		watch["max_at"] = _decel_snapshot(car, t_s, prev, speed, drop)
+	if drop <= DECEL_DROP_MS:
+		_decel_end_run(watch)
+		return
+	if int(watch["run"]) == 0:
+		watch["run_v0"] = prev
+		watch["run_peak"] = {"drop": -1.0}
+	watch["run"] = int(watch["run"]) + 1
+	watch["run_v1"] = speed
+	var peak: Dictionary = watch["run_peak"]
+	if drop > float(peak["drop"]):
+		watch["run_peak"] = _decel_snapshot(car, t_s, prev, speed, drop)
+
+
+## Closes the run in progress: it is an event when it has more than DECEL_MIN_TICKS ticks.
+func _decel_end_run(watch: Dictionary) -> void:
+	var run := int(watch["run"])
+	if run >= DECEL_MIN_TICKS:
+		var event: Dictionary = watch["run_peak"]
+		event["v_before"] = float(watch["run_v0"])
+		event["v_after"] = float(watch["run_v1"])
+		event["ticks"] = run
+		(watch["events"] as Array).append(event)
+	watch["run"] = 0
+
+
+func _decel_snapshot(car: VehicleBody3D, t_s: float, before: float, after: float, drop: float) -> Dictionary:
+	var pos := car.global_position
+	var tile := Vector2i(floori(pos.x / TILE_M), floori(-pos.z / TILE_M))
+	return {"t": t_s, "pos": pos, "tile": tile, "v_before": before, "v_after": after, "drop": drop, "touch": _touch_text(car)}
+
+
+## Logs the decel events of a run and the biggest drop per tick.
+func _print_decel(watch: Dictionary) -> void:
+	_decel_end_run(watch)
+	var events: Array = watch["events"]
+	print("drive bot: decel events %d (drop > %.3f m/s per tick with throttle, at least %d tick(s) in a row, before a stop)" % [events.size(), DECEL_DROP_MS, DECEL_MIN_TICKS])
+	for e in events:
+		print("drive bot:   decel t=%.2f s, x=%.2f y=%.2f z=%.2f, tile %d,%d, speed %.2f -> %.2f m/s over %d ticks, steepest drop %.3f m/s per tick" % [e["t"], e["pos"].x, e["pos"].y, e["pos"].z, e["tile"].x, e["tile"].y, e["v_before"], e["v_after"], e["ticks"], e["drop"]])
+		print("drive bot:     touch: %s" % e["touch"])
+	var m: Dictionary = watch["max_at"]
+	if m.is_empty():
+		print("drive bot: biggest drop per tick: none (no speed drop with the throttle pressed)")
+	else:
+		print("drive bot: biggest drop per tick %.3f m/s at t=%.2f s, x=%.2f y=%.2f z=%.2f, tile %d,%d, speed %.2f -> %.2f m/s" % [m["drop"], m["t"], m["pos"].x, m["pos"].y, m["pos"].z, m["tile"].x, m["tile"].y, m["v_before"], m["v_after"]])
+
+
+## What each wheel and the body touch right now (for the decel events).
+func _touch_text(car: VehicleBody3D) -> String:
+	var parts: PackedStringArray = []
+	for child in car.get_children():
+		var wheel := child as VehicleWheel3D
+		if wheel == null:
+			continue
+		var what := "air"
+		if wheel.is_in_contact():
+			var body := wheel.get_contact_body()
+			what = "%s (%s) at y=%.2f" % [body.get_path() if body else "?", body.get_class() if body else "?", wheel.get_contact_point().y]
+		parts.append("%s %s" % [wheel.name, what])
+	var bodies: PackedStringArray = []
+	for body in car.get_colliding_bodies():
+		bodies.append("%s (%s)" % [body.get_path(), body.get_class()])
+	parts.append("body %s" % (", ".join(bodies) if not bodies.is_empty() else "none"))
+	return "; ".join(parts)
 
 
 ## One control step: picks the route point ahead, steers toward it and sets the throttle.
