@@ -4,6 +4,7 @@ mod earth_world;
 mod environment;
 mod geometry;
 mod home_store;
+mod intro;
 #[cfg(test)]
 mod measure;
 mod render;
