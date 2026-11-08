@@ -4,8 +4,9 @@
 
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{
-    ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, HeightMapShape3D, Material, MeshInstance3D,
-    Node3D, PackedScene, Shader, ShaderMaterial, StandardMaterial3D, StaticBody3D,
+    ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, ConvexPolygonShape3D, HeightMapShape3D,
+    Material, MeshInstance3D, Node3D, PackedScene, Shader, ShaderMaterial, StandardMaterial3D,
+    StaticBody3D,
 };
 use godot::obj::Inherits;
 use godot::prelude::*;
@@ -70,6 +71,26 @@ pub(crate) fn solid_body<M: Inherits<Material>>(data: &MeshData, mat: &Gd<M>) ->
     let mut collider = CollisionShape3D::new_alloc();
     collider.set_shape(&faces);
     body.add_child(&collider);
+    body
+}
+
+/// Static body of a tile's buildings: the drawn mesh, and one `ConvexPolygonShape3D` per building
+/// (its prism: footprint hull from the seat to the roof) in place of a trimesh of the walls.
+pub(crate) fn building_body<'a, M: Inherits<Material>>(
+    data: &MeshData,
+    mat: &Gd<M>,
+    prisms: impl Iterator<Item = &'a [[f32; 3]]>,
+) -> Gd<StaticBody3D> {
+    let mut body = StaticBody3D::new_alloc();
+    body.add_child(&mesh_instance(data, mat));
+    for points in prisms {
+        let points: PackedVector3Array = points.iter().map(|&p| vec3(p)).collect();
+        let mut shape = ConvexPolygonShape3D::new_gd();
+        shape.set_points(&points);
+        let mut collider = CollisionShape3D::new_alloc();
+        collider.set_shape(&shape);
+        body.add_child(&collider);
+    }
     body
 }
 
