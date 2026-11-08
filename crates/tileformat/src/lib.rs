@@ -49,6 +49,9 @@ pub struct Tile {
     /// blob (see `encode_fine`). `None` in tiles baked before it existed: readers then use `height`.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "fine_codec")]
     pub fine_height: Option<Heightfield>,
+    /// Signs and traffic-calming nodes inside the tile. Empty in tiles baked before they existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signs: Vec<SignNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,8 +166,7 @@ pub fn decode_fine(bytes: &[u8]) -> Result<Heightfield, String> {
 
 /// Standard base64 (RFC 4648, padded), so the binary heightfield can sit in the JSON tile.
 mod base64 {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn encode(bytes: &[u8]) -> String {
         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -259,6 +261,30 @@ pub struct Polyline {
     /// `lit` tag or another value, and in tiles baked before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lit: Option<bool>,
+    /// OSM `oneway` tag: `Some(true)` for "yes", `Some(false)` for "no"; `None` when the way has no
+    /// `oneway` tag or another value (such as "-1"), and in tiles baked before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oneway: Option<bool>,
+    /// OSM `lanes` tag when it is a whole number; `None` otherwise and in older tiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<u8>,
+    /// OSM `maxspeed` tag as written (e.g. "50", "30 mph"); `None` when the way has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maxspeed: Option<String>,
+    /// `junction=roundabout`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub roundabout: bool,
+}
+
+/// A sign or traffic-calming node of the OSM, in the local plane of the bake: an OSM node with
+/// `highway=stop|traffic_signals|give_way|crossing`, or with `traffic_calming` (then `kind` is
+/// "traffic_calming" unless the node also has one of the highway values, which wins).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignNode {
+    /// The `highway` value, or "traffic_calming".
+    pub kind: String,
+    /// Point `[x, y]` in the system defined by the bake.
+    pub point: [f64; 2],
 }
 
 /// Road width in meters by OSM `highway` class.
@@ -388,6 +414,7 @@ mod tests {
 
     fn sample_tile() -> Tile {
         Tile {
+            signs: Vec::new(),
             x: -3,
             y: 7,
             height: HeightGrid {
@@ -396,6 +423,10 @@ mod tests {
                 values: vec![812.5, 813.25, 0.1, 799.999_9, -1.0, 800.0],
             },
             roads: vec![Polyline {
+                oneway: None,
+                lanes: None,
+                maxspeed: None,
+                roundabout: false,
                 highway: "residential".into(),
                 name: "Rua Exemplo".into(),
                 points: vec![[-43.9123456789, -19.9234567891], [-43.9, -19.92]],
@@ -519,6 +550,7 @@ mod ground_rle_tests {
         ground[8] = GROUND_CONCRETE;
         ground[2499] = GROUND_WATER;
         let tile = Tile {
+            signs: Vec::new(),
             x: 1,
             y: -2,
             height: HeightGrid {
@@ -545,6 +577,7 @@ mod fine_height_tests {
 
     fn tile_with(fine: Option<Heightfield>) -> Tile {
         Tile {
+            signs: Vec::new(),
             x: 0,
             y: 0,
             height: HeightGrid {
@@ -642,7 +675,11 @@ mod fine_height_tests {
         let values = [900.004f32, 900.006, 912.5, 927.0];
         let f = Heightfield::from_meters(2, 2, &values).unwrap();
         for (k, &v) in values.iter().enumerate() {
-            assert!((f.meters(k) - v).abs() <= 0.005 + 1e-4, "sample {k}: {}", f.meters(k));
+            assert!(
+                (f.meters(k) - v).abs() <= 0.005 + 1e-4,
+                "sample {k}: {}",
+                f.meters(k)
+            );
         }
         assert_eq!(f.base_cm, 91_350);
     }
@@ -652,5 +689,85 @@ mod fine_height_tests {
         assert!(Heightfield::from_meters(2, 1, &[0.0, 700.0]).is_err());
         assert!(Heightfield::from_meters(2, 1, &[0.0, f32::NAN]).is_err());
         assert!(Heightfield::from_meters(2, 2, &[0.0, 1.0, 2.0]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod signage_read_tests {
+    use super::*;
+
+    fn temp_tile(tag: &str, json: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tileformat-signage-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("0_0.json");
+        fs::write(&path, json).unwrap();
+        path
+    }
+
+    /// A tile baked before the signage fields: no `oneway`, `lanes`, `maxspeed`, `roundabout`,
+    /// and no `signs` key. It must read with empty signage, so the map does not change.
+    #[test]
+    fn old_tile_without_signage_reads_with_defaults() {
+        let json = r#"{"x":0,"y":0,
+            "height":{"cols":2,"rows":2,"values":[1.0,2.0,3.0,4.0]},
+            "roads":[{"highway":"residential","points":[[0.0,0.0],[10.0,0.0]],"lit":true}],
+            "buildings":[]}"#;
+        let path = temp_tile("old", json);
+        let tile = read_tile(&path).unwrap();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        assert!(tile.signs.is_empty());
+        let road = &tile.roads[0];
+        assert_eq!(
+            (
+                road.oneway,
+                road.lanes,
+                road.maxspeed.as_deref(),
+                road.roundabout
+            ),
+            (None, None, None, false)
+        );
+        assert_eq!(road.lit, Some(true));
+    }
+
+    /// Signage written by the new bake reads back as it was.
+    #[test]
+    fn signage_round_trips_through_the_tile_file() {
+        let mut tile = Tile {
+            x: 1,
+            y: -1,
+            height: HeightGrid {
+                cols: 2,
+                rows: 2,
+                values: vec![1.0, 2.0, 3.0, 4.0],
+            },
+            roads: vec![Polyline {
+                highway: "primary".into(),
+                name: String::new(),
+                points: vec![[0.0, 0.0], [5.0, 0.0]],
+                z: vec![],
+                zl: vec![],
+                zr: vec![],
+                lit: None,
+                oneway: Some(true),
+                lanes: Some(2),
+                maxspeed: Some("30 mph".into()),
+                roundabout: true,
+            }],
+            buildings: vec![],
+            ground: vec![],
+            fine_height: None,
+            signs: vec![SignNode {
+                kind: "traffic_calming".into(),
+                point: [2.5, 1.0],
+            }],
+        };
+        let dir =
+            std::env::temp_dir().join(format!("tileformat-signage-rt-{}", std::process::id()));
+        let path = write_tile(&dir, "casa", &tile).unwrap();
+        let back = read_tile(&path).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        tile.fine_height = back.fine_height.clone();
+        assert_eq!(back, tile);
     }
 }

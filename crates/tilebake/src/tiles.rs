@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tileformat::{HeightGrid, MapMeta, Polygon, Polyline, Tile};
+use tileformat::{HeightGrid, MapMeta, Polygon, Polyline, SignNode, Tile};
 
 use crate::clip::{clip_polygon, clip_polyline, Rect};
 use crate::dem::{download_dem, read_smoothed_dem, tile_heights_any, MapGrid, Raster};
@@ -156,6 +156,16 @@ pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: 
                     Some("no") => Some(false),
                     _ => None,
                 },
+                oneway: match e["tags"]["oneway"].as_str() {
+                    Some("yes") => Some(true),
+                    Some("no") => Some(false),
+                    _ => None,
+                },
+                lanes: e["tags"]["lanes"]
+                    .as_str()
+                    .and_then(|v| v.parse::<u8>().ok()),
+                maxspeed: e["tags"]["maxspeed"].as_str().map(str::to_string),
+                roundabout: e["tags"]["junction"].as_str() == Some("roundabout"),
             });
         }
     }
@@ -168,6 +178,39 @@ pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: 
             buildings.push(real_building(e, ring));
         }
     }
+}
+
+/// Adds one sign node (Overpass element with `out body`) to `signs`, in the local plane. Only the
+/// nodes with `highway` stop, traffic_signals, give_way or crossing, or with `traffic_calming`.
+pub fn add_sign(e: &Value, grid: &MapGrid, signs: &mut Vec<SignNode>) {
+    let (Some(lat), Some(lon)) = (e["lat"].as_f64(), e["lon"].as_f64()) else {
+        return;
+    };
+    let kind = match e["tags"]["highway"].as_str() {
+        Some(h @ ("stop" | "traffic_signals" | "give_way" | "crossing")) => h,
+        _ if e["tags"]["traffic_calming"].is_string() => "traffic_calming",
+        _ => return,
+    };
+    let (x, y) = grid.local(lat, lon);
+    signs.push(SignNode {
+        kind: kind.to_string(),
+        point: [x, y],
+    });
+}
+
+/// Reads the sign-node layer `dir` (`raw/osm-nodes/<bx>_<by>.json`) over the blocks of `meta`.
+/// Tolerant like `read_areas`: a missing or partial layer gives no signs, so old caches bake as before.
+pub fn read_signs(dir: &Path, meta: &MapMeta, grid: &MapGrid) -> io::Result<Vec<SignNode>> {
+    let mut out = Vec::new();
+    let complete = dir.is_dir()
+        && osm::blocks_for(meta)
+            .iter()
+            .all(|&(bx, by)| dir.join(osm::block_file_name(bx, by)).is_file());
+    if !complete {
+        return Ok(out);
+    }
+    osm::visit_ways(dir, meta, |e| add_sign(e, grid, &mut out))?;
+    Ok(out)
 }
 
 /// Roads and buildings from a raw Overpass response (`out body geom`), in the local plane.
@@ -214,8 +257,8 @@ pub fn build_tile_from(
     x: i32,
     y: i32,
 ) -> io::Result<(Tile, usize, usize)> {
-    let fine_height = tileformat::terrain::fine_heightfield(&height, grid.tile_m)
-        .map_err(invalid_data)?;
+    let fine_height =
+        tileformat::terrain::fine_heightfield(&height, grid.tile_m).map_err(invalid_data)?;
     let rect = tile_rect(x, y, grid.tile_m);
     let mut tile_roads = Vec::new();
     for road in roads {
@@ -243,6 +286,10 @@ pub fn build_tile_from(
                 zl,
                 zr,
                 lit: road.lit,
+                oneway: road.oneway,
+                lanes: road.lanes,
+                maxspeed: road.maxspeed.clone(),
+                roundabout: road.roundabout,
             });
         }
     }
@@ -261,6 +308,7 @@ pub fn build_tile_from(
     }
     let counts = (tile_roads.len(), tile_buildings.len());
     let tile = Tile {
+        signs: Vec::new(),
         x,
         y,
         height,
@@ -595,6 +643,15 @@ pub fn bake_tiles_with(cache_root: &Path, id: &str, hooks: &mut Hooks) -> io::Re
     }
     let regions = load_regions(cache_root)?;
     let areas = read_areas(&dir.join("raw").join("osm_areas"), &meta, &grid)?;
+    let signs = read_signs(&dir.join("raw").join(osm::NODES_DIR), &meta, &grid)?;
+    let mut sign_index: HashMap<(i32, i32), Vec<SignNode>> = HashMap::new();
+    for sign in signs {
+        let key = (
+            (sign.point[0] / grid.tile_m).floor() as i32,
+            (sign.point[1] / grid.tile_m).floor() as i32,
+        );
+        sign_index.entry(key).or_default().push(sign);
+    }
     eprintln!(
         "{id}: waterways open {} (water), ignored {} (tunnel/culvert/covered/layer<0/pipeline)",
         areas.waterways_open, areas.waterways_ignored
@@ -665,6 +722,7 @@ pub fn bake_tiles_with(cache_root: &Path, id: &str, hooks: &mut Hooks) -> io::Re
             .ok_or_else(|| invalid_data("tile without terrain"))?;
         let (mut tile, r, b) =
             build_tile_from(final_heights, &grid, &tile_roads, &tile_buildings, x, y)?;
+        tile.signs = sign_index.remove(&(x, y)).unwrap_or_default();
         // Lots and ground from the 3 x 3 window around the tile: a lot is the same whichever tile sees it.
         let win_roads: Vec<(usize, &Polyline)> = window_ids(&road_index, x, y)
             .into_iter()
@@ -749,6 +807,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tilebake-roads-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let tile = |x: i32, y: i32, name: &str| Tile {
+            signs: Vec::new(),
             x,
             y,
             height: HeightGrid {
@@ -757,6 +816,10 @@ mod tests {
                 values: vec![0.0],
             },
             roads: vec![Polyline {
+                oneway: None,
+                lanes: None,
+                maxspeed: None,
+                roundabout: false,
                 highway: "primary".into(),
                 name: name.into(),
                 points: vec![[0.0, 0.0], [1.0, 1.0]],
@@ -1022,6 +1085,42 @@ mod tests {
         assert_eq!(buildings.len(), 1);
         // Closing point removed: 4 corners.
         assert_eq!(buildings[0].points.len(), 4);
+    }
+
+    #[test]
+    fn signage_tags_of_ways_and_sign_nodes_are_read() {
+        let grid = MapGrid {
+            lat0: -19.9,
+            lon0: -43.9,
+            tile_m: 250.0,
+            cell_m: CELL_M,
+        };
+        let json = r#"{"elements":[{"type":"way","id":7,
+            "tags":{"highway":"primary","oneway":"yes","lanes":"3","maxspeed":"30 mph","junction":"roundabout"},
+            "geometry":[{"lat":-19.9,"lon":-43.9},{"lat":-19.9,"lon":-43.89}]},
+            {"type":"way","id":8,"tags":{"highway":"service","oneway":"-1","lanes":"2;3"},
+            "geometry":[{"lat":-19.9,"lon":-43.9},{"lat":-19.9,"lon":-43.89}]}]}"#;
+        let (roads, _) = parse_ways(json, &grid).unwrap();
+        let a = &roads[0];
+        assert_eq!((a.oneway, a.lanes), (Some(true), Some(3)));
+        assert_eq!(a.maxspeed.as_deref(), Some("30 mph"));
+        assert!(a.roundabout);
+        let b = &roads[1];
+        assert_eq!((b.oneway, b.lanes, b.maxspeed.clone()), (None, None, None));
+        assert!(!b.roundabout);
+
+        let nodes = r#"{"elements":[
+            {"type":"node","id":1,"lat":-19.9,"lon":-43.9,"tags":{"highway":"stop"}},
+            {"type":"node","id":2,"lat":-19.9,"lon":-43.9,"tags":{"traffic_calming":"hump","highway":"crossing"}},
+            {"type":"node","id":3,"lat":-19.9,"lon":-43.9,"tags":{"traffic_calming":"bump"}},
+            {"type":"node","id":4,"lat":-19.9,"lon":-43.9,"tags":{"amenity":"bench"}}]}"#;
+        let v: Value = serde_json::from_str(nodes).unwrap();
+        let mut signs = Vec::new();
+        for e in v["elements"].as_array().unwrap() {
+            add_sign(e, &grid, &mut signs);
+        }
+        let kinds: Vec<&str> = signs.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["stop", "crossing", "traffic_calming"]);
     }
 
     #[test]

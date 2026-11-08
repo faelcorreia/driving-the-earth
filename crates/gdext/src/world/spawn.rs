@@ -128,6 +128,7 @@ mod tests {
 
     fn tile_with_roads(roads: Vec<Vec<[f64; 2]>>) -> Tile {
         Tile {
+            signs: Vec::new(),
             x: 0,
             y: 0,
             height: HeightGrid {
@@ -138,6 +139,10 @@ mod tests {
             roads: roads
                 .into_iter()
                 .map(|points| Polyline {
+                    oneway: None,
+                    lanes: None,
+                    maxspeed: None,
+                    roundabout: false,
                     name: String::new(),
                     z: Vec::new(),
                     zl: Vec::new(),
@@ -206,6 +211,7 @@ mod point_tests {
 
     fn road(points: Vec<[f64; 2]>) -> Tile {
         Tile {
+            signs: Vec::new(),
             x: 0,
             y: 0,
             height: tileformat::HeightGrid {
@@ -214,6 +220,10 @@ mod point_tests {
                 values: vec![0.0; 4],
             },
             roads: vec![Polyline {
+                oneway: None,
+                lanes: None,
+                maxspeed: None,
+                roundabout: false,
                 name: String::new(),
                 z: Vec::new(),
                 zl: Vec::new(),

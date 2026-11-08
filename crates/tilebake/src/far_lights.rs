@@ -130,6 +130,7 @@ mod tests {
 
     fn flat_tile(x: i32, y: i32, h: f32) -> Tile {
         Tile {
+            signs: Vec::new(),
             x,
             y,
             height: HeightGrid {

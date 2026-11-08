@@ -74,6 +74,19 @@ pub fn overpass_query(bbox: (f64, f64, f64, f64)) -> String {
     )
 }
 
+/// Folder of the sign-node layer, inside `cache/<id>/raw/`: one file per block, like `raw/osm/`.
+pub const NODES_DIR: &str = "osm-nodes";
+
+/// Overpass query for the sign nodes inside the box `(south, west, north, east)`: the nodes with
+/// `highway` stop, traffic_signals, give_way or crossing, and the nodes with `traffic_calming`.
+/// Tags and coordinates only (`out body`).
+pub fn overpass_nodes_query(bbox: (f64, f64, f64, f64)) -> String {
+    let (s, w, n, e) = bbox;
+    format!(
+        "[out:json][timeout:90];(node[\"highway\"~\"^(stop|traffic_signals|give_way|crossing)$\"]({s},{w},{n},{e});node[\"traffic_calming\"]({s},{w},{n},{e}););out body;"
+    )
+}
+
 /// Geographic box `(south, west, north, east)` of block `(bx, by)`.
 pub fn block_bbox(grid: &MapGrid, bx: i32, by: i32) -> (f64, f64, f64, f64) {
     let (x0, y0) = (bx as f64 * BLOCK_M, by as f64 * BLOCK_M);
@@ -182,6 +195,27 @@ pub fn download_missing_blocks_with(
         dl,
         "osm",
         &overpass_query,
+        &check_elements,
+        hooks,
+        STAGE_OSM,
+    )?;
+    Ok((s.blocks, s.downloaded))
+}
+
+/// Like `download_missing_blocks_with`, for the sign-node layer `dir` (`raw/osm-nodes/`).
+/// Returns `(blocks, downloaded)`.
+pub fn download_missing_node_blocks_with(
+    dir: &Path,
+    meta: &MapMeta,
+    dl: &Downloader,
+    hooks: &mut Hooks,
+) -> io::Result<(usize, usize)> {
+    let s = download_blocks(
+        dir,
+        meta,
+        dl,
+        "osm-nodes",
+        &overpass_nodes_query,
         &check_elements,
         hooks,
         STAGE_OSM,
@@ -433,6 +467,32 @@ mod tests {
         visit_ways(&dir, &m, |e| ids.push(e["id"].as_u64().unwrap())).unwrap();
         ids.sort();
         assert_eq!(ids, vec![1, 2, 3, 7]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nodes_query_asks_for_signs_and_calming_only() {
+        let q = overpass_nodes_query((1.0, 2.0, 3.0, 4.0));
+        assert!(q.contains("node[\"traffic_calming\"](1,2,3,4)"), "{q}");
+        assert!(q.contains("stop|traffic_signals|give_way|crossing"), "{q}");
+        assert!(q.ends_with("out body;"), "{q}");
+        assert!(!q.contains("way["), "{q}");
+    }
+
+    #[test]
+    fn node_layer_downloads_to_its_own_folder() {
+        let dir = temp_dir("nodes");
+        let m = meta(1000.0);
+        let node = r#"{"elements":[{"type":"node","id":9,"lat":-19.9,"lon":-43.9,"tags":{"highway":"stop"}}]}"#;
+        let client = FakeClient::new((0..4).map(|_| Ok(node.to_string())).collect());
+        let sleep = |_: Duration| {};
+        let (blocks, downloaded) = crate::run_quiet(|h| {
+            download_missing_node_blocks_with(&dir, &m, &downloader(&client, &sleep), h)
+        })
+        .unwrap();
+        assert_eq!((blocks, downloaded), (4, 4));
+        assert!(client.queries.borrow()[0].contains("traffic_calming"));
+        assert!(dir.join(block_file_name(0, 0)).is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 

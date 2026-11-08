@@ -139,6 +139,7 @@ mod tests {
     fn sample_height_is_unchanged_by_the_local_refactor() {
         let grid = tile_grid(3, 4, 250.0);
         let tile = Tile {
+            signs: Vec::new(),
             x: 3,
             y: 4,
             height: grid.clone(),
