@@ -150,6 +150,10 @@ mod tests {
 
     fn road(points: Vec<[f64; 2]>) -> Polyline {
         Polyline {
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
             name: String::new(),
             z: Vec::new(),
             zl: Vec::new(),

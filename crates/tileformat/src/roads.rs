@@ -123,6 +123,10 @@ pub fn read_roads_file(path: &Path) -> io::Result<Vec<(i32, i32, Vec<Polyline>)>
                 points.push([r.f64()?, r.f64()?]);
             }
             roads.push(Polyline {
+                oneway: None,
+                lanes: None,
+                maxspeed: None,
+                roundabout: false,
                 highway,
                 name,
                 points,
@@ -146,6 +150,10 @@ mod tests {
 
     fn road(highway: &str, name: &str, points: &[[f64; 2]]) -> Polyline {
         Polyline {
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
             highway: highway.into(),
             name: name.into(),
             points: points.to_vec(),

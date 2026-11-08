@@ -357,6 +357,12 @@ fn osm_stage(
     let osm_dir = dir.join("raw").join("osm");
     let (blocks, blocks_downloaded) =
         osm::download_missing_blocks_with(&osm_dir, &meta, dl, hooks)?;
+    osm::download_missing_node_blocks_with(
+        &dir.join("raw").join(osm::NODES_DIR),
+        &meta,
+        dl,
+        hooks,
+    )?;
     let (mut roads, mut buildings) = (0, 0);
     osm::visit_ways(&osm_dir, &meta, |e| {
         if e["tags"]["highway"].is_string() {

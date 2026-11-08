@@ -504,6 +504,10 @@ mod tests {
 
     fn road(highway: &str, name: &str, pts: &[[f64; 2]]) -> Polyline {
         Polyline {
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
             highway: highway.into(),
             name: name.into(),
             points: pts.to_vec(),

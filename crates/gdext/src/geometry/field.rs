@@ -530,6 +530,10 @@ mod tests {
     fn road(highway: &str, points: Vec<[f64; 2]>, z: f32) -> Polyline {
         let n = points.len();
         Polyline {
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
             highway: highway.into(),
             name: String::new(),
             points,
@@ -557,6 +561,10 @@ mod tests {
     #[test]
     fn t_junction_node_has_one_height() {
         let main = Polyline {
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
             highway: "residential".into(),
             name: String::new(),
             points: vec![[-50.0, 0.0], [0.0, 0.0], [50.0, 0.0]],
@@ -566,6 +574,10 @@ mod tests {
             lit: None,
         };
         let stem = Polyline {
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
             highway: "residential".into(),
             name: String::new(),
             points: vec![[0.0, 0.0], [0.0, 20.0], [0.0, 40.0]],

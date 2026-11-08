@@ -63,6 +63,7 @@ mod tests {
         let fine = fine_heightfield(&t.height, tile_m).expect("fine heightfield");
         (
             Tile {
+                signs: Vec::new(),
                 fine_height: Some(fine),
                 ..t.clone()
             },
@@ -87,6 +88,7 @@ mod tests {
         let t = tile(0, 0, grid(26, |_, _| 0.0), Vec::new());
         let fine = Heightfield::from_meters(101, 101, &vec![3.0; 101 * 101]).unwrap();
         let with = Tile {
+            signs: Vec::new(),
             fine_height: Some(fine),
             ..t.clone()
         };
@@ -164,6 +166,7 @@ mod tests {
             },
         ] {
             let with = Tile {
+                signs: Vec::new(),
                 fine_height: Some(bad),
                 ..t.clone()
             };

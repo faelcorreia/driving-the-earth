@@ -777,6 +777,10 @@ mod tests {
 
     fn road_piece(points: Vec<[f64; 2]>) -> Polyline {
         Polyline {
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
             highway: "residential".into(),
             name: String::new(),
             points,
