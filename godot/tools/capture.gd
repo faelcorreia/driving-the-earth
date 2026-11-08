@@ -2,10 +2,13 @@ extends SceneTree
 
 ## Captura visual da cena M1 (V1). Uso:
 ##   godot --path godot -s tools/capture.gd -- --map casa-10km --times 17:45,18:10 --out <dir>
-## Opcionais: --start 17:42 (hora local em que o relógio começa), --settle 30 (s reais de espera
+## Opcionais: --start 17:42 (hora local em que o relógio começa), --date 2026-11-24 (dia civil BRT
+## em que começa; com --start põe o relógio nessa data e hora), --settle 30 (s reais de espera
 ## com o mundo parado, antes do primeiro horário), --az 160 (ou lista 160,250: uma foto da
 ## câmera por azimute), --fast 60 (velocidade do avanço do relógio), --moon 1 (foto apontada
 ## para o disco da lua). Horário anterior ao --start é lido como do dia seguinte (ex.: 04:30).
+## --point spawn|pole|high (padrão spawn): onde o carro fica. pole = sob a luz de poste acesa mais
+## próxima do spawn; high = ponto mais alto da estrada do casa-10km (Crista Serra do Curral).
 ## Diagnóstico (opcionais, sem efeito quando ausentes): --exposure 6.0 (tonemap_exposure do
 ## WorldEnvironment), --pool 0 (lamp_real_lights do World: 0 desliga as luzes reais do poste),
 ## --top 1 (fotos de cima a TOP_HEIGHT_M: <HHMM>_top_car.png, _top_pole.png, _top_between.png;
@@ -23,6 +26,11 @@ const SIZE := Vector2i(1280, 720)
 const EYE_HEIGHT_M := 1.2
 const SETTLE_FRAMES := 60
 const TOP_HEIGHT_M := 14.0
+## --point high: ponto da estrada mais alta do casa-10km (bake: x leste, y norte, em m; cota 1379,6 m).
+const SERRA_POINT_M := Vector2(778.8, -6614.4)
+const SERRA_ALT_M := 1379.6
+## Physics frames the car gets to drop onto the streamed road after a --point teleport.
+const POINT_SETTLE_FRAMES := 600
 
 
 func _initialize() -> void:
@@ -35,6 +43,7 @@ func _parse_args() -> Dictionary:
 		"times": "17:45,18:10,18:25,19:00",
 		"out": "",
 		"start": "17:42",
+		"date": "",
 		"settle": "30",
 		"az": "160",
 		"fast": "60",
@@ -43,6 +52,7 @@ func _parse_args() -> Dictionary:
 		"pool": "",
 		"top": "0",
 		"car_under_pole": "0",
+		"point": "spawn",
 	}
 	var args := OS.get_cmdline_user_args()
 	var i := 0
@@ -67,6 +77,39 @@ func _nearest_pool_light(world: Node, from: Vector3) -> Node3D:
 				best_d = d
 				best = n
 	return best
+
+
+## Moves the car to a capture point (--point). "spawn" leaves it where the game put it. "pole" puts
+## it under the lit pool light nearest to the spawn. "high" puts it on the highest road point of
+## casa-10km, Crista Serra do Curral (bake frame: x east, y north, m from the map center; 1380 m).
+func _apply_point(point: String, world: Node, car: Node3D) -> void:
+	# Tiles stream in around the car and the body drops onto them: wait for both before the clock runs.
+	print("capture: car at the game's spawn %s" % car.global_position)
+	if point == "spawn":
+		return
+	var at := car.global_position
+	if point == "pole":
+		var pole := _nearest_pool_light(world, car.global_position)
+		if pole == null:
+			push_error("capture: no lit pool light for --point pole")
+			quit(1)
+			return
+		at = Vector3(pole.global_position.x, car.global_position.y, pole.global_position.z)
+	elif point == "high":
+		at = Vector3(SERRA_POINT_M.x, SERRA_ALT_M + 2.0, -SERRA_POINT_M.y)
+	else:
+		push_error("capture: --point must be spawn, pole or high, got %s" % point)
+		quit(2)
+		return
+	# The body's state lives in the physics server: a plain node move is undone at the next
+	# physics sync, so teleport through the server and stop the car.
+	var rid: RID = car.get_rid()
+	PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_TRANSFORM, Transform3D(car.global_transform.basis, at))
+	PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, Vector3.ZERO)
+	PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY, Vector3.ZERO)
+	for i in POINT_SETTLE_FRAMES:
+		await physics_frame
+	print("capture: point %s, car set at %s, settled at %s" % [point, at, car.global_position])
 
 
 func _hm_to_min(hm: String) -> float:
@@ -120,6 +163,14 @@ func run() -> void:
 		return
 	# Relógio parado até o primeiro horário; o mundo carrega em tempo real.
 	clock.set("speed", 0.0)
+	# --date põe o relógio no dia pedido, às --start horas (senão, começa na hora real do sistema).
+	if opts["date"] != "":
+		var ymd: PackedStringArray = opts["date"].split("-")
+		if ymd.size() != 3:
+			push_error("capture: --date must be YYYY-MM-DD, got %s" % opts["date"])
+			quit(2)
+			return
+		clock.call("set_local_time", ymd[0].to_int(), ymd[1].to_int(), ymd[2].to_int(), _hm_to_min(opts["start"]) / 60.0)
 
 	var waited := 0.0
 	var settle := float(opts["settle"])
@@ -137,6 +188,8 @@ func run() -> void:
 	var wenv := main.find_child("WorldEnvironment", true, false) as WorldEnvironment
 	if opts["exposure"] != "" and wenv != null and wenv.environment != null:
 		wenv.environment.tonemap_exposure = float(opts["exposure"])
+
+	await _apply_point(opts["point"], world, car)
 
 	var start_min := _hm_to_min(opts["start"])
 	var fast := float(opts["fast"])

@@ -174,6 +174,12 @@ impl EnvironmentClock {
         self.jump(Shortcut::Sunset);
     }
 
+    /// Põe o relógio na data e hora locais (BRT) dadas: capturas com `--date`. Sai do tempo real.
+    #[func]
+    fn set_local_time(&mut self, year: i64, month: i64, day: i64, hour: f64) {
+        self.set_game_time(sky::local_to_unix(year, month as u32, day as u32, hour));
+    }
+
     /// Seletor de velocidade do painel: índice em `Speed::ALL`.
     #[func]
     fn on_speed_selected(&mut self, index: i64) {
