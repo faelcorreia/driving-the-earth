@@ -1,6 +1,7 @@
-//! Distant terrain: plain DEM mesh (no buildings, roads or collision) in square rings around
-//! the car, beyond the detailed tiles. Built on a background thread from the Copernicus rasters
-//! (read once, smoothed the same way the tiles are baked).
+//! Distant terrain: plain DEM mesh (no buildings or collision) in square rings around the car,
+//! beyond the detailed tiles, plus the road centerlines of the same area as flat strips on the
+//! DEM (no collision either). Built on a background thread from the Copernicus rasters (read
+//! once, smoothed the same way the tiles are baked) and from `roads.bin`.
 //!
 //! Layout: rings are centered on the car snapped to the tile lattice, so their edges fall on
 //! grid lines of every ring. A cell whose center lies in a loaded tile is left out, because the
@@ -32,7 +33,8 @@ use godot::classes::{
 };
 use godot::prelude::*;
 use tilebake::dem::{height_at_any, read_smoothed_dem, MapGrid, Raster};
-use tileformat::MapMeta;
+use tileformat::roads::{read_roads_file, roads_path};
+use tileformat::{road_width_m, MapMeta, Polyline};
 
 use crate::geometry::MeshData;
 
@@ -72,6 +74,13 @@ const FAR_M: f32 = 12000.0;
 /// Fog color, the horizon color of the sky.
 pub(crate) const FOG_COLOR: (f32, f32, f32) = (0.62, 0.82, 0.98);
 const UP: [f32; 3] = [0.0, 1.0, 0.0];
+/// Road strips sit this far above the DEM at their corners, so the coarse terrain cells between
+/// the samples do not cover them.
+const ROAD_LIFT_M: f32 = 0.5;
+/// Spacing of the road points kept for the strips, in meters.
+const ROAD_STEP_M: f64 = 40.0;
+/// Road color, the same as the detailed roads (`earth_world.rs`).
+const ROAD_RGB: (f32, f32, f32) = (0.22, 0.22, 0.24);
 
 /// Terrain of one ring. Cells inside `inner_half_m` are left out (the inner ring has them) and
 /// so are cells whose center lies in a tile of `loaded`. `height(x, y)` gives the height at local
@@ -187,6 +196,105 @@ pub fn build_rings(
         .collect()
 }
 
+/// Road strips of the roads outside the detailed tiles, inside the outer ring around `center`.
+/// A segment is kept when one of its ends lies in an unloaded tile, so the strips meet the
+/// detailed roads at the tile seam (they overlap a few meters there, no gap). Each segment is a
+/// flat quad, `road_width_m` wide, at the DEM height under its corners plus `ROAD_LIFT_M`.
+/// Points closer than `ROAD_STEP_M` to the last kept one are dropped (OSM nodes are ~2.5 m apart,
+/// far finer than the rings), the last point of a piece is always kept.
+pub fn build_roads(
+    roads: &[(i32, i32, Vec<Polyline>)],
+    center: [f64; 2],
+    tile_m: f64,
+    loaded: &HashSet<(i32, i32)>,
+    height: &dyn Fn(f64, f64) -> f32,
+) -> MeshData {
+    let reach = RINGS[RINGS.len() - 1].half_m + tile_m;
+    let in_window =
+        |p: [f64; 2]| (p[0] - center[0]).abs() <= reach && (p[1] - center[1]).abs() <= reach;
+    let unloaded = |p: [f64; 2]| {
+        let tile = (
+            (p[0] / tile_m).floor() as i32,
+            (p[1] / tile_m).floor() as i32,
+        );
+        !loaded.contains(&tile)
+    };
+    let mut mesh = MeshData {
+        vertices: Vec::new(),
+        normals: Vec::new(),
+        colors: Vec::new(),
+        uvs: Vec::new(),
+        uv2: Vec::new(),
+        indices: Vec::new(),
+    };
+    for (_, _, pieces) in roads {
+        for piece in pieces {
+            let half = road_width_m(&piece.highway) / 2.0;
+            let points = decimate(&piece.points, ROAD_STEP_M);
+            for w in points.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if !(in_window(a) || in_window(b)) || !(unloaded(a) || unloaded(b)) {
+                    continue;
+                }
+                push_segment(&mut mesh, a, b, half, height);
+            }
+        }
+    }
+    mesh
+}
+
+/// The points of a piece kept at least `step` meters apart, the last one always kept.
+fn decimate(points: &[[f64; 2]], step: f64) -> Vec<[f64; 2]> {
+    let mut kept: Vec<[f64; 2]> = Vec::with_capacity(points.len() / 4 + 2);
+    let Some(&first) = points.first() else {
+        return kept;
+    };
+    kept.push(first);
+    for (k, &p) in points.iter().enumerate().skip(1) {
+        let last = *kept.last().unwrap_or(&first);
+        let d = (p[0] - last[0]).hypot(p[1] - last[1]);
+        let is_end = k + 1 == points.len();
+        if d >= step || (is_end && d > 1e-6) {
+            kept.push(p);
+        }
+    }
+    kept
+}
+
+/// One flat quad along the segment `a`-`b`, `half` meters to each side. Skipped when a corner
+/// has no height.
+fn push_segment(
+    mesh: &mut MeshData,
+    a: [f64; 2],
+    b: [f64; 2],
+    half: f64,
+    height: &dyn Fn(f64, f64) -> f32,
+) {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = dx.hypot(dy);
+    if len < 1e-6 {
+        return;
+    }
+    let n = [-dy / len * half, dx / len * half];
+    let corners = [
+        [a[0] + n[0], a[1] + n[1]],
+        [a[0] - n[0], a[1] - n[1]],
+        [b[0] - n[0], b[1] - n[1]],
+        [b[0] + n[0], b[1] + n[1]],
+    ];
+    let heights: Vec<f32> = corners.iter().map(|c| height(c[0], c[1])).collect();
+    if heights.iter().any(|h| !h.is_finite()) {
+        return;
+    }
+    let base = mesh.vertices.len() as u32;
+    for (c, h) in corners.iter().zip(&heights) {
+        mesh.vertices.push(world(c[0], c[1], h + ROAD_LIFT_M));
+        mesh.normals.push(UP);
+    }
+    push_facing(mesh, base, base + 1, base + 2, UP);
+    push_facing(mesh, base, base + 2, base + 3, UP);
+}
+
 /// Local `(x, y)` (east, north) plus height to Godot world space.
 fn world(x: f64, y: f64, height: f32) -> [f32; 3] {
     [x as f32, height, -(y as f32)]
@@ -258,20 +366,23 @@ struct Job {
     loaded: HashSet<(i32, i32)>,
 }
 
-/// One ring as the arrays of a Godot surface. Built on the loader thread (plain data, so it can
-/// cross threads), copied into packed arrays on the main thread.
+/// One ring (or the road strips) as the arrays of a Godot surface. Built on the loader thread
+/// (plain data, so it can cross threads), copied into packed arrays on the main thread.
 struct Surface {
     vertices: Vec<Vector3>,
     normals: Vec<Vector3>,
     indices: Vec<i32>,
+    /// Road strips take the road material, the rings the terrain material.
+    road: bool,
 }
 
 impl Surface {
-    fn from_mesh(data: &MeshData) -> Self {
+    fn from_mesh(data: &MeshData, road: bool) -> Self {
         Surface {
             vertices: data.vertices.iter().map(|&p| vec3(p)).collect(),
             normals: data.normals.iter().map(|&p| vec3(p)).collect(),
             indices: data.indices.iter().map(|&i| i as i32).collect(),
+            road,
         }
     }
 }
@@ -299,10 +410,12 @@ pub struct TerrainLod {
     failed: bool,
     builds: u32,
     material: Gd<StandardMaterial3D>,
+    road_material: Gd<StandardMaterial3D>,
 }
 
 impl TerrainLod {
-    /// Starts the loader thread, which reads the Copernicus rasters of `<cache_root>/<id>/raw/copernicus`.
+    /// Starts the loader thread, which reads the Copernicus rasters of `<cache_root>/<id>/raw/copernicus`
+    /// and the road pieces of `<cache_root>/<id>/roads.bin` (missing in old caches: no roads).
     pub fn start(
         cache_root: &Path,
         id: &str,
@@ -310,6 +423,7 @@ impl TerrainLod {
         material: Gd<StandardMaterial3D>,
     ) -> Self {
         let dir = cache_root.join(id).join("raw").join("copernicus");
+        let roads_file = roads_path(cache_root, id);
         let grid = MapGrid::from_meta(meta);
         let tile_m = meta.tile_size_m;
         let (jobs, job_rx) = mpsc::channel::<Job>();
@@ -328,6 +442,17 @@ impl TerrainLod {
                     return;
                 }
             };
+            let roads = match read_roads_file(&roads_file) {
+                Ok(roads) => roads,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => {
+                    let _ = res_tx.send(Err(format!(
+                        "cannot read roads for terrain LOD in {}: {e}",
+                        roads_file.display()
+                    )));
+                    return;
+                }
+            };
             for job in job_rx {
                 if worker_cancel.load(Ordering::Relaxed) {
                     break;
@@ -337,11 +462,16 @@ impl TerrainLod {
                     let (lat, lon) = grid.latlon(x, y);
                     height_at_any(&rasters, lat, lon).unwrap_or(f32::NAN)
                 };
-                let surfaces: Vec<Surface> = build_rings(job.center, tile_m, &job.loaded, &height)
-                    .iter()
-                    .filter(|m| !m.is_empty())
-                    .map(Surface::from_mesh)
-                    .collect();
+                let mut surfaces: Vec<Surface> =
+                    build_rings(job.center, tile_m, &job.loaded, &height)
+                        .iter()
+                        .filter(|m| !m.is_empty())
+                        .map(|m| Surface::from_mesh(m, false))
+                        .collect();
+                let strips = build_roads(&roads, job.center, tile_m, &job.loaded, &height);
+                if !strips.is_empty() {
+                    surfaces.push(Surface::from_mesh(&strips, true));
+                }
                 let built = Built {
                     surfaces,
                     build_ms: t0.elapsed().as_secs_f64() * 1000.0,
@@ -351,6 +481,8 @@ impl TerrainLod {
                 }
             }
         });
+        let mut road_material = StandardMaterial3D::new_gd();
+        road_material.set_albedo(Color::from_rgb(ROAD_RGB.0, ROAD_RGB.1, ROAD_RGB.2));
         TerrainLod {
             jobs: Some(jobs),
             results,
@@ -362,6 +494,7 @@ impl TerrainLod {
             failed: false,
             builds: 0,
             material,
+            road_material,
         }
     }
 
@@ -380,7 +513,7 @@ impl TerrainLod {
                 self.builds += 1;
                 let triangles: usize = built.surfaces.iter().map(|s| s.indices.len() / 3).sum();
                 let t0 = Instant::now();
-                let node = build_node(&built.surfaces, &self.material);
+                let node = build_node(&built.surfaces, &self.material, &self.road_material);
                 godot_print!(
                     "terrain LOD: build {} with {triangles} triangles, {:.1} ms in the loader, {:.1} ms on the main thread",
                     self.builds,
@@ -475,8 +608,13 @@ fn load_rasters(dir: &Path, cancel: &AtomicBool) -> io::Result<Vec<Raster>> {
     Ok(rasters)
 }
 
-/// One node with a surface per ring. No collision: the detailed tiles carry it.
-fn build_node(surfaces: &[Surface], material: &Gd<StandardMaterial3D>) -> Gd<MeshInstance3D> {
+/// One node with a surface per ring and one for the road strips. No collision: the detailed
+/// tiles carry it.
+fn build_node(
+    surfaces: &[Surface],
+    material: &Gd<StandardMaterial3D>,
+    road_material: &Gd<StandardMaterial3D>,
+) -> Gd<MeshInstance3D> {
     let mut mesh = ArrayMesh::new_gd();
     // One bulk copy per packed array: per-element pushes into Godot arrays cost a call each.
     for data in surfaces {
@@ -489,10 +627,12 @@ fn build_node(surfaces: &[Surface], material: &Gd<StandardMaterial3D>) -> Gd<Mes
         arrays.set(ArrayType::NORMAL.ord() as usize, &normals.to_variant());
         arrays.set(ArrayType::INDEX.ord() as usize, &indices.to_variant());
         mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
+        let own = if data.road { road_material } else { material };
+        let index = mesh.get_surface_count() - 1;
+        mesh.surface_set_material(index, &own.clone().upcast::<Material>());
     }
     let mut node = MeshInstance3D::new_alloc();
     node.set_mesh(&mesh);
-    node.set_material_override(&material.clone().upcast::<Material>());
     node.upcast_mut::<GeometryInstance3D>()
         .set_cast_shadows_setting(ShadowCastingSetting::OFF);
     node
@@ -633,6 +773,70 @@ mod tests {
             let cross_y = (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]);
             assert!(cross_y < 0.0, "{t:?} is back-facing for Godot");
         }
+    }
+
+    fn road_piece(points: Vec<[f64; 2]>) -> Polyline {
+        Polyline {
+            highway: "residential".into(),
+            name: String::new(),
+            points,
+            z: Vec::new(),
+            zl: Vec::new(),
+            zr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn roads_inside_loaded_tiles_are_left_out_and_seams_are_kept() {
+        // Tile (0, 0) (x in [0, 250)) is loaded. Segments with both ends in it are left out; a
+        // segment with one end in an unloaded tile is kept, so the strip reaches the seam.
+        let loaded: HashSet<(i32, i32)> = [(0, 0)].into_iter().collect();
+        let roads = vec![(
+            0,
+            0,
+            vec![road_piece(vec![
+                [100.0, 0.0],
+                [200.0, 0.0],
+                [300.0, 0.0],
+                [400.0, 0.0],
+            ])],
+        )];
+        let mesh = build_roads(&roads, [0.0, 0.0], TILE, &loaded, &flat);
+        // Segments: 100-200 (both in tile 0, dropped), 200-300 (kept, 300 unloaded), 300-400 (kept).
+        assert_eq!(mesh.indices.len() / 3, 2 * 2);
+        assert!(mesh.vertices.iter().all(|v| v[1] > 0.0));
+    }
+
+    #[test]
+    fn road_strips_skip_unknown_heights_and_the_outer_window() {
+        let far = vec![(
+            0,
+            0,
+            vec![road_piece(vec![[20_000.0, 0.0], [20_100.0, 0.0]])],
+        )];
+        let mesh = build_roads(&far, [0.0, 0.0], TILE, &HashSet::new(), &flat);
+        assert!(mesh.is_empty());
+        let hole = |x: f64, _: f64| if x > 300.0 { f32::NAN } else { 0.0 };
+        let near = vec![(
+            0,
+            0,
+            vec![road_piece(vec![[100.0, 0.0], [200.0, 0.0], [400.0, 0.0]])],
+        )];
+        let mesh = build_roads(&near, [0.0, 0.0], TILE, &HashSet::new(), &hole);
+        // 100-200 is known; 200-400 has an unknown corner at x > 300 and is dropped.
+        assert_eq!(mesh.indices.len() / 3, 2);
+    }
+
+    #[test]
+    fn decimate_keeps_spacing_and_the_last_point() {
+        let dense: Vec<[f64; 2]> = (0..=20).map(|k| [k as f64 * 2.5, 0.0]).collect(); // 0..50 m
+        let kept = decimate(&dense, 10.0);
+        // 0, 10, 20, 30, 40 (spacing >= 10), then 50, the last point, which is 10 m after 40.
+        assert_eq!(kept.len(), 6);
+        assert_eq!(kept.last(), Some(&[50.0, 0.0]));
+        // A short last step is still kept, so the piece reaches its end.
+        let short = vec![[0.0, 0.0], [10.0, 0.0], [12.0, 0.0]];
+        assert_eq!(decimate(&short, 10.0).last(), Some(&[12.0, 0.0]));
     }
 
     #[test]
