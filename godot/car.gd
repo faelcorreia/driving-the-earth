@@ -54,6 +54,11 @@ const BRAKE_MIN_SPEED := 0.5
 var _tail_mats: Array[StandardMaterial3D] = []
 var _braking := false
 var _clock: Node = null
+## m/s to km/h.
+const KMH_PER_MS := 3.6
+var _hud_value: Label = null
+var _hud_unit: Label = null
+var _shown_kmh := -1
 
 
 func _ready() -> void:
@@ -203,14 +208,37 @@ func _physics_process(_delta: float) -> void:
 	_braking = (throttle < 0.0 and forward_speed > BRAKE_MIN_SPEED) or (throttle > 0.0 and forward_speed < -BRAKE_MIN_SPEED)
 
 
-## True while the street lamps are on: asks the environment clock (the state the lamps use, without
-## the per-pole delay). Found by name among the world's children, once the clock exists.
-func _lamps_on() -> bool:
+## The environment clock, found by name among the world's children once it exists (null before).
+func _environment() -> Node:
 	if _clock == null:
 		_clock = get_parent().find_child("Environment", false, false)
-		if _clock == null:
-			return false
-	return _clock.lamps_on()
+	return _clock
+
+
+## True while the street lamps are on: asks the environment clock (the state the lamps use, without
+## the per-pole delay).
+func _lamps_on() -> bool:
+	var env := _environment()
+	if env == null:
+		return false
+	return env.lamps_on()
+
+
+## Speed readout in the HUD (group `speed_hud`, see main.tscn). The number is rewritten only when the
+## whole km/h value changes; the unit comes from the clock's i18n lookup once both exist.
+func _update_hud() -> void:
+	if _hud_value == null:
+		var hud := get_tree().get_first_node_in_group("speed_hud")
+		var env := _environment()
+		if hud == null or env == null:
+			return
+		_hud_value = hud.get_node("Readout/Value") as Label
+		_hud_unit = hud.get_node("Readout/Unit") as Label
+		_hud_unit.text = env.hud_text("hud.speed_unit")
+	var kmh := int(roundf(linear_velocity.length() * KMH_PER_MS))
+	if kmh != _shown_kmh:
+		_shown_kmh = kmh
+		_hud_value.text = str(kmh)
 
 
 func _process(_delta: float) -> void:
@@ -222,3 +250,4 @@ func _process(_delta: float) -> void:
 			mat.emission_energy_multiplier = TAIL_EMISSION_BRAKE
 		else:
 			mat.emission_energy_multiplier = TAIL_EMISSION_ON if on else 0.0
+	_update_hud()
