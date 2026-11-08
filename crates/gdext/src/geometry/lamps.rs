@@ -322,8 +322,11 @@ fn point_in_ring(p: [f64; 2], ring: &[[f64; 2]]) -> bool {
     inside
 }
 
+/// Highways that cross a road on foot or by bike: they do not keep a lamp away from the crossing.
+const PEDESTRIAN_AXES: [&str; 5] = ["footway", "pedestrian", "steps", "cycleway", "path"];
+
 fn near_other_axis(p: [f64; 2], others: &[&Polyline]) -> bool {
-    others.iter().any(|r| {
+    others.iter().filter(|r| !PEDESTRIAN_AXES.contains(&r.highway.as_str())).any(|r| {
         r.points
             .windows(2)
             .any(|w| dist_to_segment(p, w[0], w[1]) < LAMP_CROSSING_CLEAR_M)
@@ -429,6 +432,26 @@ mod tests {
                     >= LAMP_CROSSING_CLEAR_M)
         );
         assert_eq!(lamps.len(), 9);
+    }
+
+    #[test]
+    fn footway_crossing_does_not_push_a_lamp_away() {
+        let r = straight("residential", 350.0);
+        let none = lamps_of_road(0, &r, &[], &[]);
+        // Same crossing geometry as above, but a footway: the lamp at 52.5 m stays.
+        let foot = road("footway", &[[52.5, -50.0], [52.5, 50.0]]);
+        let lamps = lamps_of_road(0, &r, &[&foot], &[]);
+        assert_eq!(lamps.len(), none.len());
+    }
+
+    #[test]
+    fn steps_cycleway_and_path_do_not_push_a_lamp_away() {
+        let r = straight("residential", 350.0);
+        let none = lamps_of_road(0, &r, &[], &[]);
+        for highway in ["pedestrian", "steps", "cycleway", "path"] {
+            let axis = road(highway, &[[52.5, -50.0], [52.5, 50.0]]);
+            assert_eq!(lamps_of_road(0, &r, &[&axis], &[]).len(), none.len(), "{highway}");
+        }
     }
 
     #[test]
