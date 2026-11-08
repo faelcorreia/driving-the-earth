@@ -2,7 +2,8 @@ extends SceneTree
 
 ## Captura visual da cena M1 (V1). Uso:
 ##   godot --path godot -s tools/capture.gd -- --map casa-10km --times 17:45,18:10 --out <dir>
-## Opcionais: --start 17:42 (hora local em que o relógio começa), --settle 30 (s reais de espera
+## Opcionais: --start 17:42 (hora local em que o relógio começa), --date 2026-11-24 (dia civil BRT
+## em que começa; com --start põe o relógio nessa data e hora), --settle 30 (s reais de espera
 ## com o mundo parado, antes do primeiro horário), --az 160 (ou lista 160,250: uma foto da
 ## câmera por azimute), --fast 60 (velocidade do avanço do relógio), --moon 1 (foto apontada
 ## para o disco da lua). Horário anterior ao --start é lido como do dia seguinte (ex.: 04:30).
@@ -35,6 +36,7 @@ func _parse_args() -> Dictionary:
 		"times": "17:45,18:10,18:25,19:00",
 		"out": "",
 		"start": "17:42",
+		"date": "",
 		"settle": "30",
 		"az": "160",
 		"fast": "60",
@@ -120,6 +122,14 @@ func run() -> void:
 		return
 	# Relógio parado até o primeiro horário; o mundo carrega em tempo real.
 	clock.set("speed", 0.0)
+	# --date põe o relógio no dia pedido, às --start horas (senão, começa na hora real do sistema).
+	if opts["date"] != "":
+		var ymd: PackedStringArray = opts["date"].split("-")
+		if ymd.size() != 3:
+			push_error("capture: --date must be YYYY-MM-DD, got %s" % opts["date"])
+			quit(2)
+			return
+		clock.call("set_local_time", ymd[0].to_int(), ymd[1].to_int(), ymd[2].to_int(), _hm_to_min(opts["start"]) / 60.0)
 
 	var waited := 0.0
 	var settle := float(opts["settle"])
