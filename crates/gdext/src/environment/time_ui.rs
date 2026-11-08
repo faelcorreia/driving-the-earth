@@ -1,11 +1,16 @@
 //! Painel de hora do jogo, lógica pura (sem Godot): lê e formata data e hora locais de Belo
-//! Horizonte, escolhe a velocidade, calcula os atalhos (agora, nascer e pôr do sol) e os
-//! astros do dia. Textos de UI ficam no `ui_text` (quem desenha o painel pede as chaves).
+//! Horizonte, escolhe a velocidade, calcula os atalhos (agora, nascer e pôr do sol, meia-noite,
+//! lua cheia e lua nova), os astros do dia, e anda pelos campos de data e hora com passo e
+//! limites. Textos de UI ficam no `ui_text` (quem desenha o painel pede as chaves).
 
 use super::sky::{self, MoonState};
 
 /// Velocidade acelerada do painel: segundos de jogo por segundo real. Igual ao atalho `\`.
 pub const FAST_SPEED: f64 = 60.0;
+
+/// Menor e maior ano escolhíveis no painel.
+const YEAR_MIN: i64 = 1900;
+const YEAR_MAX: i64 = 2199;
 
 /// Velocidade do relógio escolhida no painel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,16 +72,170 @@ pub enum Shortcut {
     Sunrise,
     /// Próximo pôr do sol a partir da hora do jogo.
     Sunset,
+    /// Próxima meia-noite local (00:00 do dia seguinte à hora do jogo).
+    Midnight,
+    /// Próxima lua cheia a partir da hora do jogo.
+    FullMoon,
+    /// Próxima lua nova a partir da hora do jogo.
+    NewMoon,
+}
+
+/// Campo do seletor de data e hora, na ordem em que o painel os mostra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Day,
+    Month,
+    Year,
+    Hour,
+    Minute,
+}
+
+impl Field {
+    /// Os campos na ordem do painel.
+    pub const ALL: [Field; 5] = [
+        Field::Day,
+        Field::Month,
+        Field::Year,
+        Field::Hour,
+        Field::Minute,
+    ];
+
+    /// Menor e maior valor do campo, dados o mês e o ano escolhidos (o dia depende do mês).
+    pub fn bounds(self, year: i64, month: u32) -> (i64, i64) {
+        match self {
+            Field::Day => (1, i64::from(days_in_month(year, month))),
+            Field::Month => (1, 12),
+            Field::Year => (YEAR_MIN, YEAR_MAX),
+            Field::Hour => (0, 23),
+            Field::Minute => (0, 59),
+        }
+    }
+
+    /// Chave de i18n do nome do campo.
+    pub fn key(self) -> &'static str {
+        match self {
+            Field::Day => "time.day",
+            Field::Month => "time.month",
+            Field::Year => "time.year",
+            Field::Hour => "time.hour",
+            Field::Minute => "time.minute",
+        }
+    }
+}
+
+/// Data e hora escolhidas nos campos do painel (dia civil local de Belo Horizonte).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Picked {
+    pub year: i64,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+}
+
+impl Picked {
+    /// Campos com a data e a hora locais de `unix`.
+    pub fn from_unix(unix: f64) -> Picked {
+        let (year, month, day) = sky::local_date(unix);
+        // A margem evita que 17:30 saia como 17:29 por erro de ponto flutuante.
+        let minutes = ((sky::local_hour(unix) * 60.0 + 1e-6).floor() as u32).min(24 * 60 - 1);
+        Picked {
+            year,
+            month,
+            day,
+            hour: minutes / 60,
+            minute: minutes % 60,
+        }
+    }
+
+    /// Instante Unix da data e hora escolhidas.
+    pub fn to_unix(self) -> f64 {
+        sky::local_to_unix(
+            self.year,
+            self.month,
+            self.day,
+            f64::from(self.hour) + f64::from(self.minute) / 60.0,
+        )
+    }
+
+    /// Valor atual de um campo.
+    pub fn value(self, field: Field) -> i64 {
+        match field {
+            Field::Day => i64::from(self.day),
+            Field::Month => i64::from(self.month),
+            Field::Year => self.year,
+            Field::Hour => i64::from(self.hour),
+            Field::Minute => i64::from(self.minute),
+        }
+    }
+
+    /// Anda `delta` passos no campo, parando nos limites (sem dar a volta). Depois o dia cai para
+    /// o último dia do mês, se o mês ou o ano mudou (31/01 + 1 mês = 28/02; 29/02/2028 + 1 ano
+    /// = 28/02/2029).
+    pub fn step(self, field: Field, delta: i64) -> Picked {
+        let (lo, hi) = field.bounds(self.year, self.month);
+        let value = (self.value(field) + delta).clamp(lo, hi);
+        let mut next = self;
+        match field {
+            Field::Day => next.day = value as u32,
+            Field::Month => next.month = value as u32,
+            Field::Year => next.year = value,
+            Field::Hour => next.hour = value as u32,
+            Field::Minute => next.minute = value as u32,
+        }
+        let (_, last_day) = Field::Day.bounds(next.year, next.month);
+        next.day = next.day.min(last_day as u32);
+        next
+    }
 }
 
 /// Instante Unix de destino de um atalho. `None` se o sol não nasce ou não se põe em 24 h
-/// (regiões polares, em tese: BH não cai aqui).
+/// (regiões polares, em tese: BH não cai aqui) ou se a fase da lua não aparece em 35 dias.
 pub fn shortcut_target(shortcut: Shortcut, sim_unix: f64, real_unix: f64) -> Option<f64> {
     match shortcut {
         Shortcut::Now => Some(real_unix),
         Shortcut::Sunrise => sky::next_sunrise(sim_unix),
         Shortcut::Sunset => sky::next_sunset(sim_unix),
+        Shortcut::Midnight => Some(next_midnight(sim_unix)),
+        Shortcut::FullMoon => next_moon_phase(sim_unix, true),
+        Shortcut::NewMoon => next_moon_phase(sim_unix, false),
     }
+}
+
+/// Instante da próxima meia-noite local: 00:00 do dia civil seguinte a `sim_unix`.
+pub fn next_midnight(sim_unix: f64) -> f64 {
+    let (y, m, d) = sky::local_date(sim_unix);
+    // A hora 24 de um dia é a meia-noite do seguinte (BRT não tem horário de verão).
+    sky::local_to_unix(y, m, d, 24.0)
+}
+
+/// Primeiro instante depois de `from_unix`, em até 35 dias, da lua cheia (`full`) ou da nova.
+/// A lua cheia é quando a lua passa a minguar (elongação de 180°); a nova, quando passa a
+/// crescer (0°). Varredura de 1 h, depois bisseção sobre a mudança de `waxing`.
+pub fn next_moon_phase(from_unix: f64, full: bool) -> Option<f64> {
+    // Estado de `waxing` depois da fase: a cheia termina em minguante, a nova em crescente.
+    let target = !full;
+    let mut prev = from_unix;
+    let mut prev_waxing = sky::moon(prev).waxing;
+    for i in 1..=35 * 24 {
+        let t = from_unix + 3600.0 * f64::from(i);
+        let waxing = sky::moon(t).waxing;
+        if waxing != prev_waxing && waxing == target {
+            let (mut lo, mut hi) = (prev, t);
+            for _ in 0..30 {
+                let mid = 0.5 * (lo + hi);
+                if sky::moon(mid).waxing == prev_waxing {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return Some(0.5 * (lo + hi));
+        }
+        prev = t;
+        prev_waxing = waxing;
+    }
+    None
 }
 
 /// Nascer e pôr do sol do dia civil local (BRT) de `sim_unix`, como instantes Unix.
@@ -124,63 +283,6 @@ pub fn format_date(year: i64, month: u32, day: u32) -> String {
     format!("{day:02}/{month:02}/{year:04}")
 }
 
-/// Hora decimal local de um texto "HH:MM" ou "H:MM" (17:30 vira 17.5). `None` se inválido.
-pub fn parse_time(text: &str) -> Option<f64> {
-    let (h, m) = text.trim().split_once(':')?;
-    let h = parse_digits(h, 2)?;
-    let m = parse_digits(m, 2)?;
-    if h > 23 || m > 59 {
-        return None;
-    }
-    Some(f64::from(h) + f64::from(m) / 60.0)
-}
-
-/// Data local de um texto "DD/MM/AAAA" ou "AAAA-MM-DD". Confere o dia do mês (e ano bissexto).
-/// `None` se inválida.
-pub fn parse_date(text: &str) -> Option<(i64, u32, u32)> {
-    let t = text.trim();
-    let (year, month, day) = if t.contains('/') {
-        let mut parts = t.split('/');
-        let (d, m, y) = (parts.next()?, parts.next()?, parts.next()?);
-        if parts.next().is_some() {
-            return None;
-        }
-        (
-            parse_digits(y, 4)?,
-            parse_digits(m, 2)?,
-            parse_digits(d, 2)?,
-        )
-    } else {
-        let mut parts = t.split('-');
-        let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
-        if parts.next().is_some() {
-            return None;
-        }
-        (
-            parse_digits(y, 4)?,
-            parse_digits(m, 2)?,
-            parse_digits(d, 2)?,
-        )
-    };
-    let year = i64::from(year);
-    if !(1900..=2199).contains(&year) || !(1..=12).contains(&month) {
-        return None;
-    }
-    if day < 1 || day > days_in_month(year, month) {
-        return None;
-    }
-    Some((year, month, day))
-}
-
-/// Número de até `max_len` dígitos, sem sinal nem espaço.
-fn parse_digits(text: &str, max_len: usize) -> Option<u32> {
-    let text = text.trim();
-    if text.is_empty() || text.len() > max_len || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    text.parse().ok()
-}
-
 fn days_in_month(year: i64, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -200,33 +302,155 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_time_accepts_hh_mm_and_rejects_the_rest() {
-        assert_eq!(parse_time("17:30"), Some(17.5));
-        assert_eq!(parse_time("9:05"), Some(9.0 + 5.0 / 60.0));
-        assert_eq!(parse_time(" 08:15 "), Some(8.25));
-        assert_eq!(parse_time("00:00"), Some(0.0));
-        assert_eq!(parse_time("23:59"), Some(23.0 + 59.0 / 60.0));
-        assert_eq!(parse_time("24:00"), None);
-        assert_eq!(parse_time("12:60"), None);
-        assert_eq!(parse_time("1230"), None);
-        assert_eq!(parse_time("+5:00"), None);
-        assert_eq!(parse_time("ab:cd"), None);
-        assert_eq!(parse_time(""), None);
+    fn day_bounds_follow_the_month_and_leap_years() {
+        assert_eq!(Field::Day.bounds(2026, 1), (1, 31));
+        assert_eq!(Field::Day.bounds(2026, 4), (1, 30));
+        assert_eq!(
+            Field::Day.bounds(2026, 2),
+            (1, 28),
+            "2026 is not a leap year"
+        );
+        assert_eq!(Field::Day.bounds(2028, 2), (1, 29), "2028 is a leap year");
+        assert_eq!(
+            Field::Day.bounds(1900, 2),
+            (1, 28),
+            "1900 is not a leap year"
+        );
+        assert_eq!(Field::Day.bounds(2000, 2), (1, 29), "2000 is a leap year");
+        assert_eq!(Field::Month.bounds(2026, 1), (1, 12));
+        assert_eq!(Field::Year.bounds(2026, 1), (1900, 2199));
+        assert_eq!(Field::Hour.bounds(2026, 1), (0, 23));
+        assert_eq!(Field::Minute.bounds(2026, 1), (0, 59));
     }
 
     #[test]
-    fn parse_date_accepts_both_formats_and_checks_the_calendar() {
-        assert_eq!(parse_date("15/11/2026"), Some((2026, 11, 15)));
-        assert_eq!(parse_date("2026-11-15"), Some((2026, 11, 15)));
-        assert_eq!(parse_date("29/02/2028"), Some((2028, 2, 29)));
-        assert_eq!(parse_date("29/02/2026"), None, "2026 is not a leap year");
-        assert_eq!(parse_date("31/04/2026"), None);
-        assert_eq!(parse_date("00/11/2026"), None);
-        assert_eq!(parse_date("15/13/2026"), None);
-        assert_eq!(parse_date("15/11/1800"), None);
-        assert_eq!(parse_date("15/11/2026/1"), None);
-        assert_eq!(parse_date("15-11"), None);
-        assert_eq!(parse_date(""), None);
+    fn steps_stop_at_each_field_limit() {
+        let p = Picked {
+            year: 2026,
+            month: 11,
+            day: 15,
+            hour: 17,
+            minute: 30,
+        };
+        assert_eq!(p.step(Field::Hour, 100).hour, 23);
+        assert_eq!(p.step(Field::Hour, -100).hour, 0);
+        assert_eq!(p.step(Field::Minute, 100).minute, 59);
+        assert_eq!(p.step(Field::Minute, -100).minute, 0);
+        assert_eq!(p.step(Field::Month, 20).month, 12);
+        assert_eq!(p.step(Field::Month, -20).month, 1);
+        assert_eq!(p.step(Field::Year, 1000).year, 2199);
+        assert_eq!(p.step(Field::Year, -1000).year, 1900);
+        assert_eq!(p.step(Field::Day, 100).day, 30, "November has 30 days");
+        assert_eq!(p.step(Field::Day, -100).day, 1);
+        assert_eq!(p.step(Field::Hour, 1).hour, 18, "one step is one unit");
+        assert_eq!(p.step(Field::Minute, -1).minute, 29);
+    }
+
+    #[test]
+    fn day_follows_the_month_and_leap_years_when_they_change() {
+        let jan_31 = Picked {
+            year: 2026,
+            month: 1,
+            day: 31,
+            hour: 0,
+            minute: 0,
+        };
+        let feb = jan_31.step(Field::Month, 1);
+        assert_eq!((feb.month, feb.day), (2, 28));
+
+        let mar_31 = Picked { month: 3, ..jan_31 };
+        assert_eq!(mar_31.step(Field::Month, -1).day, 28);
+
+        let leap_day = Picked {
+            year: 2028,
+            month: 2,
+            day: 29,
+            hour: 0,
+            minute: 0,
+        };
+        assert_eq!(
+            leap_day.step(Field::Year, 1).day,
+            28,
+            "2029 is not a leap year"
+        );
+        assert_eq!(
+            leap_day.step(Field::Year, -4).day,
+            29,
+            "2024 is a leap year"
+        );
+        assert_eq!(
+            leap_day.step(Field::Day, 1).day,
+            29,
+            "day stops at the month end"
+        );
+    }
+
+    #[test]
+    fn picked_round_trips_through_unix() {
+        for (y, m, d, h, mi) in [
+            (2026, 11, 15, 17, 30),
+            (2028, 2, 29, 0, 0),
+            (2030, 12, 31, 23, 59),
+        ] {
+            let p = Picked {
+                year: y,
+                month: m,
+                day: d,
+                hour: h,
+                minute: mi,
+            };
+            assert_eq!(Picked::from_unix(p.to_unix()), p);
+        }
+    }
+
+    #[test]
+    fn midnight_is_the_start_of_the_next_local_day() {
+        let noon = sky::local_to_unix(2026, 12, 31, 12.0);
+        let midnight = next_midnight(noon);
+        assert_eq!(sky::local_date(midnight), (2027, 1, 1));
+        assert_eq!(format_hm(sky::local_hour(midnight)), "00:00");
+
+        let feb = sky::local_to_unix(2027, 2, 28, 23.0);
+        assert_eq!(sky::local_date(next_midnight(feb)), (2027, 3, 1));
+    }
+
+    #[test]
+    fn moon_phase_jumps_land_on_full_and_new_moons() {
+        let from = sky::local_to_unix(2026, 11, 15, 12.0);
+        for full in [true, false] {
+            let t = next_moon_phase(from, full).expect("a phase within 35 days");
+            assert!(t > from && t < from + 35.0 * 86400.0);
+            let moon = sky::moon(t);
+            if full {
+                assert!(
+                    moon.illumination > 0.99,
+                    "full moon at {}",
+                    moon.illumination
+                );
+            } else {
+                assert!(
+                    moon.illumination < 0.01,
+                    "new moon at {}",
+                    moon.illumination
+                );
+            }
+            // A fase seguinte da mesma espécie vem um ciclo depois (~29,5 dias).
+            let next = next_moon_phase(t + 86400.0, full).expect("next phase");
+            let cycle_days = (next - t) / 86400.0;
+            assert!(
+                (28.0..31.0).contains(&cycle_days),
+                "cycle {cycle_days} days"
+            );
+        }
+    }
+
+    #[test]
+    fn new_shortcuts_are_after_the_game_time() {
+        let from = sky::local_to_unix(2026, 11, 15, 12.0);
+        for shortcut in [Shortcut::Midnight, Shortcut::FullMoon, Shortcut::NewMoon] {
+            let t = shortcut_target(shortcut, from, 0.0).expect("target");
+            assert!(t > from, "{shortcut:?}");
+        }
     }
 
     #[test]

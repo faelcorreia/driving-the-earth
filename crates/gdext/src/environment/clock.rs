@@ -3,12 +3,12 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use godot::classes::RenderingServer;
 use godot::classes::directional_light_3d::ShadowMode;
 use godot::classes::environment::{AmbientSource, BgMode, ToneMapper};
 use godot::classes::input::MouseMode;
 use godot::classes::light_3d::Param;
 use godot::classes::rendering_server::GlobalShaderParameterType;
-use godot::classes::RenderingServer;
 use godot::classes::{
     Camera3D, DirectionalLight3D, Environment, INode, Input, InputEvent, Node, Shader,
     ShaderMaterial, Sky, WorldEnvironment,
@@ -17,7 +17,7 @@ use godot::prelude::*;
 
 use super::sky::{self, Crossing, LightThreshold, ThresholdBank};
 use super::time_panel::TimePanel;
-use super::time_ui::{self, Shortcut, Speed, FAST_SPEED};
+use super::time_ui::{self, FAST_SPEED, Field, Shortcut, Speed};
 
 /// Passo de tempo do atalho de depuração `[` e `]`, em segundos de jogo.
 const DEBUG_STEP_S: f64 = 15.0 * 60.0;
@@ -134,16 +134,22 @@ impl EnvironmentClock {
         self.lamp_on_since.is_some()
     }
 
-    /// Botão "Aplicar" do painel de hora: lê data e hora dos campos.
+    /// Botão "Aplicar" do painel de hora: leva o relógio à data e hora escolhidas nos campos.
     #[func]
     fn on_set_pressed(&mut self) {
-        self.apply_typed_time();
+        self.apply_picked_time();
     }
 
-    /// Enter em um campo do painel de hora: o mesmo que "Aplicar".
+    /// Botão de passo do painel de hora: `field_index` é o índice em `Field::ALL` e `delta` o
+    /// passo (-1 ou +1).
     #[func]
-    fn on_text_submitted(&mut self, _text: GString) {
-        self.apply_typed_time();
+    fn on_step_pressed(&mut self, field_index: i64, delta: i64) {
+        let field = usize::try_from(field_index)
+            .ok()
+            .and_then(|i| Field::ALL.get(i).copied());
+        if let (Some(field), Some(panel)) = (field, self.panel.as_mut()) {
+            panel.step(field, delta);
+        }
     }
 
     #[func]
@@ -159,6 +165,21 @@ impl EnvironmentClock {
     #[func]
     fn on_sunset_pressed(&mut self) {
         self.jump(Shortcut::Sunset);
+    }
+
+    #[func]
+    fn on_midnight_pressed(&mut self) {
+        self.jump(Shortcut::Midnight);
+    }
+
+    #[func]
+    fn on_full_moon_pressed(&mut self) {
+        self.jump(Shortcut::FullMoon);
+    }
+
+    #[func]
+    fn on_new_moon_pressed(&mut self) {
+        self.jump(Shortcut::NewMoon);
     }
 
     /// Seletor de velocidade do painel: índice em `Speed::ALL`.
@@ -405,19 +426,12 @@ impl EnvironmentClock {
         }
     }
 
-    /// Aplica a data e a hora digitadas no painel; se alguma não for válida, mostra o erro.
-    fn apply_typed_time(&mut self) {
-        let Some((date, hour)) = self.panel.as_ref().map(|p| p.typed()) else {
+    /// Aplica a data e a hora escolhidas nos campos do painel. Os campos já são válidos.
+    fn apply_picked_time(&mut self) {
+        let Some(target) = self.panel.as_ref().map(|p| p.picked().to_unix()) else {
             return;
         };
-        match (time_ui::parse_date(&date), time_ui::parse_time(&hour)) {
-            (Some((y, m, d)), Some(h)) => self.set_game_time(sky::local_to_unix(y, m, d, h)),
-            _ => {
-                if let Some(panel) = self.panel.as_mut() {
-                    panel.show_error(true);
-                }
-            }
-        }
+        self.set_game_time(target);
     }
 
     /// Abre ou fecha o painel de hora. Ao abrir, os campos mostram a hora do jogo.
@@ -478,6 +492,7 @@ impl INode for EnvironmentClock {
             old.queue_free();
         }
         self.base_mut().set_process(true);
+        self.base_mut().set_process_input(true);
         self.base_mut().set_process_unhandled_input(true);
         // Limiar de postes: acendem em 0,40 e apagam em 0,50 (histerese).
         self.bank.add(LightThreshold {
@@ -563,6 +578,36 @@ impl INode for EnvironmentClock {
                     "off"
                 }
             );
+        }
+    }
+
+    /// Antes do foco da interface: com o painel de hora aberto e foco num campo, cima e baixo
+    /// mudam o valor (teclado e d-pad), em vez de mover o foco. O analógico não passa, para o
+    /// passo não disparar a cada tremor do stick.
+    fn input(&mut self, event: Gd<InputEvent>) {
+        let delta = if event.is_action("ui_up") {
+            1
+        } else if event.is_action("ui_down") {
+            -1
+        } else {
+            return;
+        };
+        if !event.is_pressed() || event.is_class("InputEventJoypadMotion") {
+            return;
+        }
+        let focus = self
+            .base()
+            .get_viewport()
+            .and_then(|v| v.gui_get_focus_owner())
+            .map(|c| c.instance_id());
+        let used = match self.panel.as_mut() {
+            Some(panel) if panel.is_open() => panel.step_focused(focus, delta),
+            _ => false,
+        };
+        if used {
+            if let Some(mut viewport) = self.base().get_viewport() {
+                viewport.set_input_as_handled();
+            }
         }
     }
 

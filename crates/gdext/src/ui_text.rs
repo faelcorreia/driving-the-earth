@@ -41,10 +41,13 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Game: {date} {hour} (BRT)",
         "Jogo: {date} {hour} (BRT)",
     ),
-    ("time.date_label", "Date", "Data"),
-    ("time.hour_label", "Hour", "Hora"),
-    ("time.date_example", "DD/MM/YYYY", "DD/MM/AAAA"),
-    ("time.hour_example", "HH:MM", "HH:MM"),
+    ("time.day", "Day", "Dia"),
+    ("time.month", "Month", "Mês"),
+    ("time.year", "Year", "Ano"),
+    ("time.hour", "Hour", "Hora"),
+    ("time.minute", "Minute", "Minuto"),
+    ("time.decrease", "Decrease {field}", "Diminuir {field}"),
+    ("time.increase", "Increase {field}", "Aumentar {field}"),
     ("time.set", "Set", "Aplicar"),
     (
         "time.invalid",
@@ -58,6 +61,9 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("time.now", "Now", "Agora"),
     ("time.sunrise", "Sunrise", "Nascer do sol"),
     ("time.sunset", "Sunset", "Pôr do sol"),
+    ("time.midnight", "Midnight", "Meia-noite"),
+    ("time.full_moon", "Full moon", "Lua cheia"),
+    ("time.new_moon", "New moon", "Lua nova"),
     (
         "time.line",
         "Sunrise {rise}  ·  Sunset {set}  ·  Moon {moon} {percent}%",
@@ -80,8 +86,8 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("time.moon.waning_crescent", "waning crescent", "minguante"),
     (
         "time.hint",
-        "T or Esc closes the panel",
-        "T ou Esc fecha o painel",
+        "Up/Down: change  |  Left/Right: move  |  T or Esc closes",
+        "Cima/baixo: mudar  |  esquerda/direita: mover  |  T ou Esc fecha",
     ),
     (
         "home.hint",
