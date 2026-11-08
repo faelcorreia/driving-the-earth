@@ -783,6 +783,7 @@ mod tests {
             z: Vec::new(),
             zl: Vec::new(),
             zr: Vec::new(),
+            lit: None,
         }
     }
 

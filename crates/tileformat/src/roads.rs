@@ -129,6 +129,7 @@ pub fn read_roads_file(path: &Path) -> io::Result<Vec<(i32, i32, Vec<Polyline>)>
                 z: Vec::new(),
                 zl: Vec::new(),
                 zr: Vec::new(),
+                lit: None,
             });
         }
         out.push((x, y, roads));
@@ -151,6 +152,7 @@ mod tests {
             z: vec![],
             zl: vec![],
             zr: vec![],
+            lit: None,
         }
     }
 

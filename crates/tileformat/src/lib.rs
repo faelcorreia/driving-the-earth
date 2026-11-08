@@ -255,6 +255,10 @@ pub struct Polyline {
     /// Height of the right edge at each point (`z` plus half the width times the transverse slope).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub zr: Vec<f32>,
+    /// OSM `lit` tag: `Some(true)` for "yes", `Some(false)` for "no"; `None` when the way has no
+    /// `lit` tag or another value, and in tiles baked before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lit: Option<bool>,
 }
 
 /// Road width in meters by OSM `highway` class.
@@ -398,6 +402,7 @@ mod tests {
                 z: Vec::new(),
                 zl: Vec::new(),
                 zr: Vec::new(),
+                lit: None,
             }],
             buildings: vec![Polygon {
                 points: vec![[0.0, 0.0], [10.5, 0.0], [10.5, 8.25], [0.0, 8.25]],
@@ -459,6 +464,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.roads[0].name, "");
+    }
+
+    #[test]
+    fn lit_round_trips_and_is_omitted_when_absent() {
+        let mut tile = sample_tile();
+        tile.roads[0].lit = Some(true);
+        let text = serde_json::to_string(&tile).unwrap();
+        assert!(text.contains("\"lit\":true"), "{text}");
+        let back: Tile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.roads[0].lit, Some(true));
+        tile.roads[0].lit = Some(false);
+        let text = serde_json::to_string(&tile).unwrap();
+        assert!(text.contains("\"lit\":false"), "{text}");
+        let back: Tile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.roads[0].lit, Some(false));
+        tile.roads[0].lit = None;
+        let text = serde_json::to_string(&tile).unwrap();
+        assert!(!text.contains("lit"), "{text}");
+        // Tiles baked before the field existed read with no `lit`.
+        let old: Tile = serde_json::from_str(
+            r#"{"x":0,"y":0,"height":{"cols":1,"rows":1,"values":[1.0]},
+            "roads":[{"highway":"primary","points":[[0.0,0.0],[1.0,0.0]]}],"buildings":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.roads[0].lit, None);
     }
 
     #[test]

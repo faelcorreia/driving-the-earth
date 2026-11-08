@@ -151,6 +151,11 @@ pub fn add_way(e: &Value, grid: &MapGrid, roads: &mut Vec<Polyline>, buildings: 
                 z: Vec::new(),
                 zl: Vec::new(),
                 zr: Vec::new(),
+                lit: match e["tags"]["lit"].as_str() {
+                    Some("yes") => Some(true),
+                    Some("no") => Some(false),
+                    _ => None,
+                },
             });
         }
     }
@@ -237,6 +242,7 @@ pub fn build_tile_from(
                 z,
                 zl,
                 zr,
+                lit: road.lit,
             });
         }
     }
@@ -757,6 +763,7 @@ mod tests {
                 z: vec![],
                 zl: vec![],
                 zr: vec![],
+                lit: None,
             }],
             buildings: vec![],
             ground: vec![],

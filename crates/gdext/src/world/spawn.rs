@@ -144,6 +144,7 @@ mod tests {
                     zr: Vec::new(),
                     highway: "residential".into(),
                     points,
+                    lit: None,
                 })
                 .collect(),
             buildings: vec![],
@@ -219,6 +220,7 @@ mod point_tests {
                 zr: Vec::new(),
                 highway: "residential".into(),
                 points,
+                lit: None,
             }],
             buildings: vec![],
             ground: vec![],

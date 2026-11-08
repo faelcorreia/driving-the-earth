@@ -109,6 +109,7 @@ fn neighborhood_geometry_matches_whole_map() {
         zr: Vec::new(),
         highway: "residential".into(),
         points,
+        lit: None,
     };
     // A road crosses the border between (0, 0) and (1, 0); the others are sloped.
     write_tile(
@@ -268,6 +269,7 @@ fn road_over_a_tile_border_follows_the_neighbor_terrain() {
         zr: Vec::new(),
         highway: "residential".into(),
         points: vec![[10.0, 10.0], [23.0, 10.0]],
+        lit: None,
     };
     let a = tile(0, 0, grid(3, |_, _| 10.0), vec![road]);
     let b = tile(1, 0, grid(3, |_, _| 20.0), Vec::new());

@@ -108,6 +108,7 @@ fn road_never_goes_under_the_terrain() {
         zr: Vec::new(),
         highway: "residential".into(),
         points: vec![[60.0, 100.0], [120.0, 128.0], [190.0, 150.0], [200.0, 60.0]],
+        lit: None,
     };
     let t = tile(
         0,
@@ -154,6 +155,7 @@ fn road_with_profile_follows_its_heights() {
         z: vec![0.0, 10.0],
         zl: Vec::new(),
         zr: Vec::new(),
+        lit: None,
     };
     let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
     let g = tile_geometry(&t, 250.0);
@@ -179,6 +181,7 @@ fn terrain_under_a_profiled_road_follows_its_profile() {
         z: vec![0.0, 0.0],
         zl: Vec::new(),
         zr: Vec::new(),
+        lit: None,
     };
     let raw = tile(0, 0, grid(26, crest), Vec::new());
     let with = tile(0, 0, grid(26, crest), vec![road.clone()]);
@@ -238,6 +241,7 @@ fn road_ends_meet_across_tiles() {
         zr: Vec::new(),
         highway: "residential".into(),
         points: vec![[x0, 125.0], [x1, 125.0]],
+        lit: None,
     };
     let gl = tile_geometry(
         &tile(
@@ -292,6 +296,7 @@ fn road_height_is_continuous_across_the_tile_border() {
         z,
         zl: Vec::new(),
         zr: Vec::new(),
+        lit: None,
     };
     let half = road_width_m("residential") / 2.0;
     let t0 = tile(
@@ -404,6 +409,7 @@ fn road_becomes_front_up_ribbon_on_terrain() {
         zr: Vec::new(),
         highway: "residential".into(),
         points: vec![[0.0, 10.0], [20.0, 10.0]],
+        lit: None,
     };
     let t = tile(0, 0, grid(3, |_, _| 50.0), vec![road]);
     let g = tile_geometry(&t, 20.0);
@@ -449,6 +455,7 @@ fn road_end_on_crossed_road_leaves_no_wedge() {
         zr: Vec::new(),
         highway: "primary".into(),
         points: vec![[end[0] - 80.0 * s, end[1] - 80.0 * s], end],
+        lit: None,
     };
     let b = Polyline {
         name: String::new(),
@@ -457,6 +464,7 @@ fn road_end_on_crossed_road_leaves_no_wedge() {
         zr: Vec::new(),
         highway: "residential".into(),
         points: vec![[0.0, 125.0], [250.0, 125.0]],
+        lit: None,
     };
     let t = tile(0, 0, grid(26, |_, _| 50.0), vec![a, b]);
     let g = tile_geometry(&t, 250.0);
@@ -591,6 +599,7 @@ fn no_terrain_vertex_above_the_ribbon_in_the_corridor() {
             z,
             zl: Vec::new(),
             zr: Vec::new(),
+            lit: None,
         };
         let t = tile(
             0,
@@ -623,6 +632,7 @@ fn tile_geometry_timing() {
             z: vec![-2.0, 6.0],
             zl: Vec::new(),
             zr: Vec::new(),
+            lit: None,
         })
         .collect();
     let t = tile(0, 0, grid(26, |u, v| hill(u * 250.0, v * 250.0)), roads);
@@ -659,6 +669,7 @@ fn probe_many_point_profile_on_axis() {
         z: z.clone(),
         zl: Vec::new(),
         zr: Vec::new(),
+        lit: None,
     };
     let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
     let g = tile_geometry(&t, 250.0);
@@ -762,6 +773,7 @@ fn ribbon_mesh_matches_profile_on_axis_and_edges_within_2cm() {
         z: vec![0.0, 0.7, 1.4],
         zl: vec![0.05, 0.75, 1.45],
         zr: vec![-0.05, 0.65, 1.35],
+        lit: None,
     };
     let half = tileformat::road_width_m(&road.highway) / 2.0;
     let t = tile(0, 0, grid(26, |_, _| 0.0), vec![road]);
