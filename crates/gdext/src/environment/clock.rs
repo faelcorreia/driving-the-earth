@@ -50,6 +50,10 @@ const HAZE_GLOBAL: &str = "haze_color";
 const FOG_DEPTH_CURVE: f32 = 2.0;
 /// Saturação da luz ambiente em relação ao cinza médio do céu (0 neutro, 1 cor do céu).
 const AMBIENT_SAT: f32 = 0.35;
+/// Piso de luz ambiente noturna (cor, azulada), somado à luz ambiente quando não há sol. Sem ele
+/// a noite sem lua era breu total: o céu escuro dá quase zero de luz nas faces sem sol.
+/// Some por completo com o sol (`light` 1) e fica inteiro no escuro (`light` 0).
+const NIGHT_AMBIENT_RGB: (f32, f32, f32) = (0.55, 0.6, 0.8);
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
@@ -361,6 +365,12 @@ impl EnvironmentClock {
                 .global_shader_parameter_set(HAZE_GLOBAL, &rgb_variant(fog));
             let gray = (look.mid[0] + look.mid[1] + look.mid[2]) / 3.0;
             let amb = look.mid.map(|c| gray + (c - gray) * AMBIENT_SAT);
+            let night = (1.0 - self.light) as f32;
+            let amb = [
+                amb[0] + NIGHT_AMBIENT_RGB.0 * night,
+                amb[1] + NIGHT_AMBIENT_RGB.1 * night,
+                amb[2] + NIGHT_AMBIENT_RGB.2 * night,
+            ];
             env.set_ambient_light_color(Color::from_rgb(amb[0], amb[1], amb[2]));
             env.set_ambient_light_energy((AMBIENT_MIN + (1.0 - AMBIENT_MIN) * self.light) as f32);
         }
