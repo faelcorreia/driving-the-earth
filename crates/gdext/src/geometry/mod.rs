@@ -81,8 +81,9 @@ pub const MESH_CELL_HYSTERESIS_M: f64 = 25.0;
 /// Terrain, ribbons and buildings of one tile. `ground(x, y)` is the 10 m grid at any map point;
 /// `around` are the neighboring tiles, whose roads count near the borders of this one. The drawn
 /// terrain has a vertex every `mesh_cell_m` (a multiple of `TERRAIN_FINE_CELL_M`), sampled from
-/// the same field as the ribbons, so they lie on it. The collision heightfield is always the
-/// recorded 2,5 m grid, whatever the drawn side.
+/// the same field as the ribbons, so they lie on it. The collision heightfield is the recorded
+/// 2,5 m grid with the road profiles applied (`collision_heights`), so the ribbons lie on it too,
+/// whatever the drawn side.
 pub fn tile_geometry_at(
     tile: &Tile,
     tile_m: f64,
@@ -100,7 +101,17 @@ pub fn tile_geometry_at(
             .flat_map(|t| t.roads.iter()),
         origin,
     );
+    // The collision follows the same profiles on the 2,5 m grid (`collision_heights`). A mesh on that
+    // grid already has them in its interior, so the collision reads it; a coarser mesh gets its own
+    // surface on the fine grid, from a copy of the field made before the surface takes it.
+    let fine = cell == TERRAIN_FINE_CELL_M;
+    let fine_field = (!fine).then(|| field.clone());
     let surface = Surface::new(field, tile, tile_m, ground, [x0, y0], n, cell);
+    let collision = if fine {
+        surface.collision_grid(&|x, y| sample_height(tile, tile_m, x, y))
+    } else {
+        collision_heights(tile, tile_m, fine_field.filter(|f| !f.is_empty()))
+    };
     let h = |i: usize, j: usize| surface.heights[i * n + j];
 
     let mut terrain = MeshData::default();
@@ -145,23 +156,32 @@ pub fn tile_geometry_at(
         buildings,
         building_prisms,
         lamps,
-        collision: collision_heights(tile, tile_m),
+        collision,
         mesh_cell_m,
     }
 }
 
-/// The recorded 2,5 m heightfield of the tile (`sample_height`, so a tile baked without one
-/// falls back to its 10 m grid), `TERRAIN_FINE_N` squared, row-major.
-fn collision_heights(tile: &Tile, tile_m: f64) -> Vec<f32> {
+/// The 2,5 m heightfield of the tile's collision, `TERRAIN_FINE_N` squared, row-major: the recorded
+/// grid (`sample_height`, so a tile baked without one falls back to its 10 m grid), with the road
+/// profiles applied where they are. A road with a profile lifts or lowers the ground under it, and
+/// its ribbon sits on that profile: the collision must follow it, or the ribbon hangs over the
+/// ground (a car whose wheels reach only the ground then stops on the ribbon's edge). The ground
+/// passed to the surface is the recorded grid itself, so the points away from every road keep it.
+/// `field` is the road field of the tile and its neighbors, `None` when there is no road in them.
+fn collision_heights(tile: &Tile, tile_m: f64, field: Option<Field>) -> Vec<f32> {
     let n = TERRAIN_FINE_N;
     let (x0, y0) = (tile.x as f64 * tile_m, tile.y as f64 * tile_m);
-    let cell = tile_m / (n - 1) as f64;
-    (0..n * n)
-        .map(|k| {
-            let (i, j) = (k / n, k % n);
-            sample_height(tile, tile_m, x0 + j as f64 * cell, y0 + i as f64 * cell)
-        })
-        .collect()
+    let cell = TERRAIN_FINE_CELL_M;
+    let recorded = |x: f64, y: f64| sample_height(tile, tile_m, x, y);
+    match field {
+        Some(field) => Surface::new(field, tile, tile_m, &recorded, [x0, y0], n, cell).heights,
+        None => (0..n * n)
+            .map(|k| {
+                let (i, j) = (k / n, k % n);
+                recorded(x0 + j as f64 * cell, y0 + i as f64 * cell)
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
