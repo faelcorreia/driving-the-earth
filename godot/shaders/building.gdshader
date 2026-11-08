@@ -2,7 +2,8 @@ shader_type spatial;
 
 // Buildings (B1 + L1c): the vertex color is the facade. Windows are a mask on the wall, no geometry.
 // UV (from building.rs): x = perimeter in m (continuous around the ring), y = height above the flat
-// base in m. A roof has x < 0. UV2.x = seed of the building, 0..1.
+// base in m. A roof has x < 0. UV2.x = seed of the building, 0..1. UV2.y = height of the vertex above
+// the terrain under it, in m: windows, doors and the shop band only show above 1 m of ground.
 // Day: a 1.5 m x 1.2 m window (sill 1.0 m, 3 m pitch, 3 m floors) is a bluish-grey glass. Ground floor:
 // half of the buildings have a dark shop band instead. Night: a share of the windows of each building
 // (30-60%, by seed) is lit, warm or cold by seed, after a delay of 0..25 min after the street lamps.
@@ -28,6 +29,7 @@ uniform float ramp_s = 60.0;
 varying vec2 wall_uv;
 varying float seed;
 varying float dist;
+varying float clearance;
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -36,11 +38,14 @@ float hash(vec2 p) {
 void vertex() {
 	wall_uv = UV;
 	seed = UV2.x;
+	clearance = UV2.y;
 	dist = length((MODELVIEW_MATRIX * vec4(VERTEX, 1.0)).xyz);
 }
 
 void fragment() {
 	float wall = step(0.0, wall_uv.x);
+	// Only the wall above 1 m of ground is a facade: the part sunk in the terrain gets no mask.
+	float above_ground = step(1.0, clearance);
 	float fade = 1.0 - smoothstep(fade_begin, fade_end, dist);
 
 	// Along the wall, the window grid moves by a seed offset. The cell coordinate wraps, but the
@@ -59,8 +64,8 @@ void fragment() {
 	// Ground floor shop band (no windows there) on about half of the buildings.
 	float ground = 1.0 - step(1.0, floor_i);
 	float shop = step(seed, 0.5) * ground * wall;
-	float band = shop * (1.0 - smoothstep(-ay, ay, cy - 2.2)) * fade;
-	float win = mx * my * fade * wall * (1.0 - shop);
+	float band = shop * (1.0 - smoothstep(-ay, ay, cy - 2.2)) * fade * above_ground;
+	float win = mx * my * fade * wall * (1.0 - shop) * above_ground;
 
 	vec3 facade = COLOR.rgb;
 	facade = mix(facade, glass_color, win * glass_mix);
