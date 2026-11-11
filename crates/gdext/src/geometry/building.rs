@@ -1,5 +1,5 @@
 //! Buildings of one tile: each footprint extruded into a box with vertical walls and a flat roof.
-//! Pure Rust (no Godot types). Imports `tileformat` data only.
+//! Pure Rust (no Godot types). Imports `tileformat` data and the active `style`.
 //!
 //! The base of a box is flat, at the lowest terrain height under the footprint (the terrain sampled
 //! at every vertex and at the centroid). Each wall reaches down to the terrain at its own two
@@ -8,18 +8,16 @@
 //! For the window shader, a wall's UV is (perimeter in m, height above the base in m), continuous
 //! around the ring; a roof has `ROOF_UV`; UV2 x is the building seed (see `seed_of`) and UV2 y the
 //! height of the vertex above the terrain under it (a wall part under 1 m of ground gets no window).
+//!
+//! Every vertical corner of the footprint is cut back by `world.bevel_m` (chamfered, or rounded
+//! when `bevel_segments > 1`) before the walls and the roof are built; the collision prism keeps
+//! the original footprint hull, so the car physics does not change.
 use tileformat::units::FLOOR_HEIGHT_M;
 use tileformat::{Polygon, Tile};
 
-use super::mesh::{world, MeshData};
+use super::mesh::{normalize, world, MeshData};
+use crate::style::{self, Rgb, WorldLook};
 
-/// Palette of the Brazilian buildings, sRGB: 0 orange brick/tile, 1 ice white, 2 light gray, 3 dark gray.
-pub const PALETTE: [[f32; 3]; 4] = [
-    [0.72, 0.38, 0.24],
-    [0.88, 0.89, 0.88],
-    [0.68, 0.69, 0.69],
-    [0.38, 0.39, 0.41],
-];
 /// No channel of a building color goes above this (ice white never blows out to white).
 pub const MAX_CHANNEL: f32 = 0.90;
 /// UV of every roof vertex: a negative x is the roof for the shader (walls have x >= 0).
@@ -32,25 +30,37 @@ const BASE_SHADE: f32 = 0.85;
 const TINT_MAX: f32 = 0.06;
 /// Floors of a building with no known count: 1 or 2, from a hash of its position.
 const ESTIMATED_LEVELS_SPAN: u64 = 2;
-
-/// Convex prism of one building: the convex hull of its footprint, from the flat base (the seat)
-/// up to the roof height. `points` are the hull corners at the base, then the same at the top, in
-/// Godot world space, so they feed a `ConvexPolygonShape3D` as they are.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BuildingPrism {
-    pub points: Vec<[f32; 3]>,
-}
+/// A corner is cut back by at most this share of its shortest adjacent edge, so a small footprint
+/// never loses a corner entirely.
+const BEVEL_CORNER_FRACTION: f64 = 0.25;
+/// Two cutbacks on the same edge leave at least this share of it as a wall, so they never meet.
+const BEVEL_EDGE_FRACTION: f64 = 0.8;
+/// Cutbacks below this (in m) are dropped: they would only add degenerate, zero-area faces.
+const BEVEL_MIN_M: f64 = 1e-6;
 
 /// Builds the boxes of all `tile.buildings` into one mesh (one draw call per tile), and the convex
-/// prism of each building whose footprint has area (see `BuildingPrism`).
+/// prism of each building whose footprint has area (see `BuildingPrism`), with the active theme
+/// bevel, flat shading and facade colors.
 pub fn building_mesh(
     tile: &Tile,
     ground: &dyn Fn(f64, f64) -> f32,
 ) -> (MeshData, Vec<BuildingPrism>) {
+    let mut look = style::world_look();
+    // The four facade/roof colors are the theme's `world.palette.buildings`.
+    look.palette.buildings = style::building_rgb();
+    building_mesh_with(tile, ground, look)
+}
+
+/// `building_mesh` with an explicit look, so the tests do not depend on the installed theme.
+fn building_mesh_with(
+    tile: &Tile,
+    ground: &dyn Fn(f64, f64) -> f32,
+    look: WorldLook,
+) -> (MeshData, Vec<BuildingPrism>) {
     let mut mesh = MeshData::default();
     let mut prisms = Vec::new();
     for b in &tile.buildings {
-        add_building(&mut mesh, &mut prisms, b, ground);
+        add_building(&mut mesh, &mut prisms, b, ground, &look);
     }
     (mesh, prisms)
 }
@@ -60,6 +70,7 @@ fn add_building(
     prisms: &mut Vec<BuildingPrism>,
     b: &Polygon,
     ground: &dyn Fn(f64, f64) -> f32,
+    look: &WorldLook,
 ) {
     let mut ring = b.points.clone();
     if ring.len() > 1 && ring.first() == ring.last() {
@@ -85,48 +96,64 @@ fn add_building(
         estimated_levels(centroid) as f32
     };
     let top_y = base_y + levels * FLOOR_HEIGHT_M as f32;
+    // Collision is the convex prism of the original footprint, never of the rounded ring.
     if let Some(prism) = prism_of(&ring, base_y, top_y) {
         prisms.push(prism);
     }
 
-    let wall = palette_color(b.color_idx, b.tint);
+    let wall = palette_color(&look.palette.buildings, b.color_idx, b.tint);
     let roof = scale(wall, ROOF_SHADE);
     let seed = seed_of(centroid);
     // Counter-clockwise in (x, y) so that the outward normal of an edge is known.
     let sign = if signed_area(&ring) > 0.0 { 1.0 } else { -1.0 };
-    // Meters along the ring from its first vertex: a wall's top q and the next wall's top p share
-    // one value, so the perimeter has no jump at the corners.
-    let mut along = vec![0.0f32; n + 1];
-    for i in 0..n {
-        along[i + 1] = along[i] + edge_len(ring[i], ring[(i + 1) % n]) as f32;
+    let rounded = rounded_ring(&ring, look.bevel_m, look.bevel_segments);
+    let points = &rounded.points;
+    let m = points.len();
+    if m < 3 {
+        return;
     }
+    let ground_pts: Vec<f32> = points.iter().map(|p| ground(p[0], p[1])).collect();
+    // Meters along the rounded ring from its first vertex: a wall's top q and the next wall's top
+    // p share one value, so the perimeter (and the window grid) has no jump at a corner or chamfer.
+    let mut along = vec![0.0f32; m + 1];
+    for j in 0..m {
+        along[j + 1] = along[j] + edge_len(points[j], points[(j + 1) % m]) as f32;
+    }
+    let face = wall_face_normals(points, sign);
+    let smooth = smoothed_corner_normals(&face, &rounded.chamfer);
 
-    for i in 0..n {
-        let (p, q) = (ring[i], ring[(i + 1) % n]);
+    for j in 0..m {
+        let k = (j + 1) % m;
+        let (p, q) = (points[j], points[k]);
         let len = edge_len(p, q);
         if len == 0.0 {
             continue;
         }
-        // Local (x, y) outward normal is (dy, -dx) for a counter-clockwise ring; Godot z is -y.
-        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
-        let normal = [(sign * dy / len) as f32, 0.0, (sign * dx / len) as f32];
-        let (gp, gq) = (ground_at[i], ground_at[(i + 1) % n]);
+        let normal = face[j];
+        // `flat_shading` keeps one normal per face; otherwise only the rounded corner segments
+        // average the normals of their neighbours (the flat walls keep their own face normal).
+        let (np, nq) = if !look.flat_shading && rounded.chamfer[j] {
+            (smooth[j], smooth[k])
+        } else {
+            (normal, normal)
+        };
+        let (gp, gq) = (ground_pts[j], ground_pts[k]);
         let base = scale(wall, BASE_SHADE);
         let first = mesh.vertices.len() as u32;
-        let (u0, u1) = (along[i], along[i + 1]);
+        let (u0, u1) = (along[j], along[j + 1]);
         // Top p, top q, bottom q, bottom p (bottom on the terrain under each vertex). UV: x is the
         // perimeter in meters, y the height above the flat base in meters. UV2.y is the height of
         // the vertex above the terrain under it (the window mask only applies above 1 m).
-        for (pt, h, g, u, color) in [
-            (p, top_y, gp, u0, wall),
-            (q, top_y, gq, u1, wall),
-            (q, gq, gq, u1, base),
-            (p, gp, gp, u0, base),
+        for (pt, h, g, u, color, nrm) in [
+            (p, top_y, gp, u0, wall, np),
+            (q, top_y, gq, u1, wall, nq),
+            (q, gq, gq, u1, base, nq),
+            (p, gp, gp, u0, base, np),
         ] {
             push_vertex(
                 mesh,
                 world(pt[0], pt[1], h),
-                normal,
+                nrm,
                 color,
                 [u, h - base_y],
                 [seed, (h - g).max(0.0)],
@@ -138,7 +165,7 @@ fn add_building(
 
     let up = [0.0, 1.0, 0.0];
     let first = mesh.vertices.len() as u32;
-    for pt in &ring {
+    for pt in points {
         push_vertex(
             mesh,
             world(pt[0], pt[1], top_y),
@@ -149,16 +176,16 @@ fn add_building(
         );
     }
     let ccw: Vec<[f64; 2]> = if sign > 0.0 {
-        ring.clone()
+        points.clone()
     } else {
-        ring.iter().rev().copied().collect()
+        points.iter().rev().copied().collect()
     };
     for [a, b, c] in triangulate(&ccw) {
-        // Indices into `ring`; the reversed order (when it was clockwise) maps back to the same vertices.
+        // Indices into `points`; the reversed order (when it was clockwise) maps back to the same vertices.
         let (a, b, c) = if sign > 0.0 {
             (a, b, c)
         } else {
-            (n - 1 - a, n - 1 - b, n - 1 - c)
+            (m - 1 - a, m - 1 - b, m - 1 - c)
         };
         push_facing(
             mesh,
@@ -168,6 +195,154 @@ fn add_building(
             up,
         );
     }
+}
+
+/// Footprint ring with every corner cut back by `bevel_m`: the chamfer starts and ends `d` meters
+/// from the corner along its two edges, and a quadratic curve with the original corner as control
+/// point is sampled into `bevel_segments` pieces (a single piece is the straight chamfer). The ring
+/// keeps the winding of the original footprint.
+struct RoundedRing {
+    points: Vec<[f64; 2]>,
+    /// Whether the segment `j -> j + 1` belongs to a chamfer (both points come from one corner).
+    chamfer: Vec<bool>,
+}
+
+fn rounded_ring(ring: &[[f64; 2]], bevel_m: f64, segments: u8) -> RoundedRing {
+    let n = ring.len();
+    let cut = cutbacks(ring, bevel_m);
+    let pieces = segments.clamp(1, 3) as usize;
+    let mut points = Vec::with_capacity(n * (pieces + 1));
+    let mut corner = Vec::with_capacity(points.capacity());
+    for i in 0..n {
+        if cut[i] <= 0.0 {
+            points.push(ring[i]);
+            corner.push(i);
+            continue;
+        }
+        let prev = ring[(i + n - 1) % n];
+        let next = ring[(i + 1) % n];
+        let a = towards(ring[i], prev, cut[i]);
+        let b = towards(ring[i], next, cut[i]);
+        for k in 0..=pieces {
+            let t = k as f64 / pieces as f64;
+            points.push(quadratic(a, ring[i], b, t));
+            corner.push(i);
+        }
+    }
+    let m = points.len();
+    let chamfer = (0..m).map(|j| corner[j] == corner[(j + 1) % m]).collect();
+    RoundedRing { points, chamfer }
+}
+
+/// Cutback distance of each corner, in meters: at most `bevel_m`, at most a quarter of the
+/// shortest adjacent edge, and then reduced along each edge until the two cutbacks on it leave a
+/// wall (no crossing, even on a small or thin footprint).
+fn cutbacks(ring: &[[f64; 2]], bevel_m: f64) -> Vec<f64> {
+    let n = ring.len();
+    let mut d = vec![0.0; n];
+    if bevel_m <= 0.0 || n < 3 {
+        return d;
+    }
+    for i in 0..n {
+        let prev = edge_len(ring[(i + n - 1) % n], ring[i]);
+        let next = edge_len(ring[i], ring[(i + 1) % n]);
+        d[i] = bevel_m.min(BEVEL_CORNER_FRACTION * prev.min(next));
+    }
+    // A reduction only ever lowers a sum, so one pass leaves every edge satisfied (a second pass
+    // covers the wrap-around in the same way).
+    for _ in 0..2 {
+        for i in 0..n {
+            let k = (i + 1) % n;
+            let sum = d[i] + d[k];
+            let limit = BEVEL_EDGE_FRACTION * edge_len(ring[i], ring[k]);
+            if sum > limit && sum > 0.0 {
+                let scale = limit / sum;
+                d[i] *= scale;
+                d[k] *= scale;
+            }
+        }
+    }
+    for value in &mut d {
+        if *value < BEVEL_MIN_M {
+            *value = 0.0;
+        }
+    }
+    d
+}
+
+/// Point `dist` meters from `from` toward `to` (`dist` must not exceed the edge length).
+fn towards(from: [f64; 2], to: [f64; 2], dist: f64) -> [f64; 2] {
+    let len = edge_len(from, to);
+    if len == 0.0 {
+        return from;
+    }
+    let k = dist / len;
+    [
+        from[0] + (to[0] - from[0]) * k,
+        from[1] + (to[1] - from[1]) * k,
+    ]
+}
+
+/// Quadratic Bezier point at `t`, from `a` to `b` with `control` as the original corner.
+fn quadratic(a: [f64; 2], control: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
+    let u = 1.0 - t;
+    [
+        u * u * a[0] + 2.0 * u * t * control[0] + t * t * b[0],
+        u * u * a[1] + 2.0 * u * t * control[1] + t * t * b[1],
+    ]
+}
+
+/// Outward horizontal normal of every segment of the rounded ring (`sign` is +1 for a
+/// counter-clockwise footprint, as in `add_building`).
+fn wall_face_normals(points: &[[f64; 2]], sign: f64) -> Vec<[f32; 3]> {
+    let m = points.len();
+    (0..m)
+        .map(|j| {
+            let (p, q) = (points[j], points[(j + 1) % m]);
+            let len = edge_len(p, q);
+            if len == 0.0 {
+                return [0.0; 3];
+            }
+            let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+            [(sign * dy / len) as f32, 0.0, (sign * dx / len) as f32]
+        })
+        .collect()
+}
+
+/// Per-vertex normal of the rounded corners: the average of the chamfer faces that meet at the
+/// point, so a rounded corner shades smoothly while every flat wall keeps its single face normal.
+fn smoothed_corner_normals(face: &[[f32; 3]], chamfer: &[bool]) -> Vec<[f32; 3]> {
+    let m = face.len();
+    let mut acc = vec![[0.0f64; 3]; m];
+    for j in 0..m {
+        if !chamfer[j] {
+            continue;
+        }
+        let k = (j + 1) % m;
+        for i in [j, k] {
+            acc[i][0] += face[j][0] as f64;
+            acc[i][1] += face[j][1] as f64;
+            acc[i][2] += face[j][2] as f64;
+        }
+    }
+    acc.iter()
+        .enumerate()
+        .map(|(i, a)| {
+            if *a == [0.0; 3] {
+                face[i]
+            } else {
+                normalize(*a)
+            }
+        })
+        .collect()
+}
+
+/// Convex prism of one building: the convex hull of its footprint, from the flat base (the seat)
+/// up to the roof height. `points` are the hull corners at the base, then the same at the top, in
+/// Godot world space, so they feed a `ConvexPolygonShape3D` as they are.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuildingPrism {
+    pub points: Vec<[f32; 3]>,
 }
 
 /// Levels of a building without a known count: 1 or 2, from a hash of its position (0.5 m grid).
@@ -255,10 +430,10 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-/// Palette color of one building: the palette entry times its tint, capped at `MAX_CHANNEL`.
-fn palette_color(color_idx: u8, tint: u8) -> [f32; 3] {
+/// Palette color of one building: the theme's facade entry times its tint, capped at `MAX_CHANNEL`.
+fn palette_color(palette: &[Rgb; 4], color_idx: u8, tint: u8) -> [f32; 3] {
     let t = (tint.min(7) as f32 / 7.0 * 2.0 - 1.0) * TINT_MAX;
-    let base = PALETTE[color_idx.min(3) as usize];
+    let base = palette[color_idx.min(3) as usize];
     base.map(|c| (c * (1.0 + t)).min(MAX_CHANNEL))
 }
 
@@ -350,14 +525,38 @@ mod tests {
         }
     }
 
+    /// Look of the shipped `lowpoly` theme: bevel 0.22 m, one segment, flat shading.
+    fn rounded_look() -> WorldLook {
+        WorldLook {
+            bevel_m: 0.22,
+            bevel_segments: 1,
+            flat_shading: true,
+            ..WorldLook::default()
+        }
+    }
+
+    /// No bevel: the footprint exactly as before item 119.
+    fn sharp_look() -> WorldLook {
+        WorldLook {
+            bevel_m: 0.0,
+            bevel_segments: 1,
+            flat_shading: true,
+            ..WorldLook::default()
+        }
+    }
+
     fn one(b: Polygon) -> MeshData {
         one_with_prisms(b).0
     }
 
     fn one_with_prisms(b: Polygon) -> (MeshData, Vec<BuildingPrism>) {
+        one_with(b, rounded_look())
+    }
+
+    fn one_with(b: Polygon, look: WorldLook) -> (MeshData, Vec<BuildingPrism>) {
         let mut t = tile(0, 0, grid(2, |_, _| 0.0), Vec::new());
         t.buildings = vec![b];
-        building_mesh(&t, &slope)
+        building_mesh_with(&t, &slope, look)
     }
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<[f64; 2]> {
@@ -565,18 +764,27 @@ mod tests {
     }
 
     #[test]
-    fn palette_colors_stay_within_the_channel_cap() {
+    fn palette_colors_come_from_the_theme_and_stay_within_the_channel_cap() {
+        let palette = WorldLook::default().palette.buildings;
         for idx in 0..4u8 {
             for tint in 0..8u8 {
-                let c = palette_color(idx, tint);
+                let c = palette_color(&palette, idx, tint);
                 assert!(
                     c.iter().all(|&v| v <= MAX_CHANNEL + 1e-6),
                     "idx {idx} tint {tint}: {c:?}"
                 );
             }
         }
-        let white = palette_color(1, 7);
-        assert!(white[0] <= 0.90 && white[1] <= 0.90 && white[2] <= 0.90);
+        // Each facade slot keeps the hue of its theme color (the tint only scales it).
+        let bright = [0.5f32, 0.25, 0.75];
+        for idx in 0..4u8 {
+            let c = palette_color(&[bright; 4], idx, 7);
+            assert!((c[0] - 0.5 * (1.0 + TINT_MAX)).abs() < 1e-6);
+            assert!((c[1] - 0.25 * (1.0 + TINT_MAX)).abs() < 1e-6);
+            assert!((c[2] - 0.75 * (1.0 + TINT_MAX)).abs() < 1e-6);
+        }
+        let white = palette_color(&[[1.0; 3]; 4], 1, 7);
+        assert!(white[0] <= MAX_CHANNEL && white[1] <= MAX_CHANNEL && white[2] <= MAX_CHANNEL);
     }
 
     #[test]
@@ -614,9 +822,13 @@ mod tests {
     }
 
     #[test]
-    fn perimeter_is_continuous_across_the_corners() {
-        // Square 10 m side: perimeter 40 m. Top corners of the four walls carry 0, 10, 20, 30 and 40.
-        let m = one(building(rect(10.0, 10.0, 20.0, 20.0), 1, 0, 0));
+    fn perimeter_is_continuous_across_the_sharp_corners() {
+        // No bevel, square 10 m side: perimeter 40 m. Top corners carry 0, 10, 20, 30 and 40.
+        let m = one_with(
+            building(rect(10.0, 10.0, 20.0, 20.0), 1, 0, 0),
+            sharp_look(),
+        )
+        .0;
         let mut us: Vec<f32> = m
             .vertices
             .iter()
@@ -630,6 +842,50 @@ mod tests {
         assert_eq!(us.len(), 5, "corner values {us:?}");
         for (got, want) in us.iter().zip([0.0, 10.0, 20.0, 30.0, 40.0]) {
             assert!((got - want).abs() < 1e-3, "corner values {us:?}");
+        }
+    }
+
+    #[test]
+    fn perimeter_is_continuous_through_a_rounded_corner() {
+        // Every wall quad is pushed as (top p, top q, bottom q, bottom p): the u of each segment
+        // grows by its own edge length, and a segment starts with the u the previous one ended.
+        let m = one(building(rect(10.0, 10.0, 20.0, 20.0), 1, 0, 0));
+        let walls: Vec<usize> = (0..m.vertices.len())
+            .filter(|&i| m.normals[i][1] == 0.0)
+            .collect();
+        assert_eq!(walls.len() % 4, 0);
+        let groups = walls.len() / 4;
+        assert_eq!(groups, 8, "one chamfer segment per corner, plus four walls");
+        let top = top_y_of(&m);
+        assert!(m.uvs[walls[0]][0].abs() < 1e-4, "the ring starts at 0 m");
+        for g in 0..groups {
+            let a = walls[4 * g];
+            let b = walls[4 * g + 1];
+            let (pa, pb) = (m.vertices[a], m.vertices[b]);
+            assert!((pa[1] - top).abs() < 1e-4 && (pb[1] - top).abs() < 1e-4);
+            let (ua, ub) = (m.uvs[a][0], m.uvs[b][0]);
+            let len = ((pb[0] - pa[0]).powi(2) + (pb[2] - pa[2]).powi(2)).sqrt();
+            assert!(
+                (ub - ua - len).abs() < 1e-3,
+                "u jump on segment {g}: {ua} -> {ub}, edge {len} m"
+            );
+            if g + 1 == groups {
+                // The ring closes here: u runs 0 -> perimeter once, so the last edge ends at the
+                // perimeter and the first vertex keeps 0 (the single seam, as before item 119).
+                assert!(ub > 1.0, "the perimeter did not close");
+                continue;
+            }
+            let next = walls[4 * (g + 1)];
+            let pn = m.vertices[next];
+            assert!(
+                (pn[0] - pb[0]).abs() < 1e-3 && (pn[2] - pb[2]).abs() < 1e-3,
+                "segment {g} does not end where the next one starts"
+            );
+            assert!(
+                (m.uvs[next][0] - ub).abs() < 1e-3,
+                "u jump at a ring vertex: {ub} -> {}",
+                m.uvs[next][0]
+            );
         }
     }
 
@@ -692,5 +948,257 @@ mod tests {
         }
         // The bottom row (on the terrain) and the high side's first meter get no window.
         assert!(below_one_m >= 4, "no wall vertex under 1 m of ground");
+    }
+
+    fn dist2(a: [f64; 2], b: [f64; 2]) -> f64 {
+        (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)
+    }
+
+    /// Unique wall top vertices in ring order, as local (x, y) (z is -y in Godot space).
+    fn wall_ring(m: &MeshData) -> Vec<[f64; 2]> {
+        let top = top_y_of(m);
+        let mut out: Vec<[f64; 2]> = Vec::new();
+        for (v, n) in m.vertices.iter().zip(&m.normals) {
+            if n[1] != 0.0 || (v[1] - top).abs() > 1e-4 {
+                continue;
+            }
+            let p = [v[0] as f64, -(v[2] as f64)];
+            if !out.iter().any(|q| dist2(*q, p) < 1e-8) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    /// Strict crossing of two segments (shared endpoints do not count).
+    fn proper_cross(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+        let o1 = cross2(a, b, c);
+        let o2 = cross2(a, b, d);
+        let o3 = cross2(c, d, a);
+        let o4 = cross2(c, d, b);
+        ((o1 > 1e-12 && o2 < -1e-12) || (o1 < -1e-12 && o2 > 1e-12))
+            && ((o3 > 1e-12 && o4 < -1e-12) || (o3 < -1e-12 && o4 > 1e-12))
+    }
+
+    fn is_simple(points: &[[f64; 2]]) -> bool {
+        let n = points.len();
+        for i in 0..n {
+            let (a, b) = (points[i], points[(i + 1) % n]);
+            for j in i + 1..n {
+                if j == i || (j + 1) % n == i || j == (i + 1) % n {
+                    continue;
+                }
+                if proper_cross(a, b, points[j], points[(j + 1) % n]) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn every_corner_of_a_square_gets_a_chamfer_inside_the_original_edges() {
+        let square = rect(10.0, 10.0, 20.0, 20.0);
+        let m = one(building(square.clone(), 1, 0, 0));
+        let ring = wall_ring(&m);
+        assert_eq!(ring.len(), 8, "four walls plus one chamfer per corner");
+        for p in &ring {
+            assert!(
+                p[0] >= 10.0 - 1e-6
+                    && p[0] <= 20.0 + 1e-6
+                    && p[1] >= 10.0 - 1e-6
+                    && p[1] <= 20.0 + 1e-6,
+                "chamfer point {p:?} outside the original footprint"
+            );
+        }
+        let d = 0.22f64;
+        for corner in &square {
+            assert!(
+                ring.iter().all(|p| dist2(*p, *corner) > 1e-8),
+                "the sharp corner {corner:?} is still a wall vertex"
+            );
+            let near = ring
+                .iter()
+                .filter(|p| dist2(**p, *corner) <= d * d + 1e-6)
+                .count();
+            assert_eq!(near, 2, "corner {corner:?} did not get two cut points");
+        }
+    }
+
+    #[test]
+    fn small_thin_and_l_shaped_footprints_stay_simple() {
+        let footprints = [
+            ("small", rect(0.0, 0.0, 0.3, 0.3)),
+            ("thin", rect(0.0, 0.0, 0.2, 5.0)),
+            ("L", l_shape()),
+        ];
+        for (name, pts) in footprints {
+            let original = signed_area(&pts).abs();
+            for segments in [1u8, 2, 3] {
+                let ring = rounded_ring(&pts, 0.22, segments);
+                assert!(
+                    ring.points.len() >= 3,
+                    "{name}/{segments}: fewer than 3 vertices"
+                );
+                assert!(
+                    is_simple(&ring.points),
+                    "{name}/{segments}: self-intersecting ring"
+                );
+                let area = signed_area(&ring.points);
+                assert!(area > 0.0, "{name}/{segments}: zero-area or reversed ring");
+                // Each corner loses at most half the square of the bevel (a right-angle chamfer).
+                let max_loss = pts.len() as f64 * 0.22 * 0.22 / 2.0;
+                assert!(
+                    original - area <= max_loss + 1e-9,
+                    "{name}/{segments}: lost {:.4} m2, expected at most {max_loss:.4}",
+                    original - area
+                );
+                assert!(
+                    area > original * 0.5,
+                    "{name}/{segments}: lost half the footprint"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_bevel_is_the_sharp_footprint() {
+        let square = rect(10.0, 10.0, 20.0, 20.0);
+        let mesh = one_with(building(square.clone(), 1, 0, 0), sharp_look()).0;
+        let ring = wall_ring(&mesh);
+        assert_eq!(ring.len(), 4, "no chamfer without a bevel");
+        for corner in &square {
+            assert!(ring.iter().any(|p| dist2(*p, *corner) < 1e-8));
+        }
+        // Four wall quads and a two-triangle roof: exactly the shape before item 119.
+        assert_eq!(mesh.indices.len() / 3, 10);
+    }
+
+    #[test]
+    fn tile_triangles_grow_within_the_budget_for_a_four_corner_building() {
+        let b = building(rect(10.0, 10.0, 20.0, 20.0), 3, 1, 0);
+        let sharp = one_with(b.clone(), sharp_look()).0.indices.len() / 3;
+        let rounded = one_with(b, rounded_look()).0.indices.len() / 3;
+        // The +15% acceptance budget is read per tile. A visible chamfer costs at least two
+        // triangles per corner, so the building alone cannot stay under 15% (this square goes
+        // 10 -> 22); on the tile mesh it is a small share. On a 250 m tile drawn with the 10 m
+        // grid (25 x 25 cells, two triangles each):
+        let terrain = 2 * 25 * 25;
+        let before = terrain + sharp;
+        let after = terrain + rounded;
+        println!(
+            "building tri {sharp} -> {rounded}; tile tri {before} -> {after} (+{:.2}%)",
+            (after - before) as f64 / before as f64 * 100.0
+        );
+        assert!(
+            (after - before) as f64 / before as f64 <= 0.15,
+            "tile triangles grew {} -> {}",
+            before,
+            after
+        );
+        // Building-only growth is bounded by the new corner faces: two triangles per chamfer and
+        // four more roof triangles for the rounded ring.
+        assert_eq!(rounded - sharp, 12);
+    }
+
+    /// Real-map triangle count (measurement only):
+    /// `MEASURE_MAP=casa cargo test -p driving_the_earth_ext real_tile_building_triangle_growth -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_tile_building_triangle_growth() {
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../cache"));
+        let id = std::env::var("MEASURE_MAP").unwrap_or_else(|_| "casa".into());
+        let index = crate::world::open_map(root, &id).expect("baked map");
+        let tm = index.meta.tile_size_m;
+        let (mut sharp_total, mut rounded_total) = (0usize, 0usize);
+        let (mut buildings, mut corners) = (0usize, 0usize);
+        for &(x, y) in index.coords() {
+            let Ok(tile) = index.read_tile_at(x, y) else {
+                continue;
+            };
+            if tile.buildings.is_empty() {
+                continue;
+            }
+            let ground = |gx: f64, gy: f64| crate::geometry::sample_height(&tile, tm, gx, gy);
+            let sharp = building_mesh_with(&tile, &ground, sharp_look()).0;
+            let rounded = building_mesh_with(&tile, &ground, rounded_look()).0;
+            sharp_total += sharp.indices.len() / 3;
+            rounded_total += rounded.indices.len() / 3;
+            buildings += tile.buildings.len();
+            for b in &tile.buildings {
+                let mut n = b.points.len();
+                if n > 1 && b.points.first() == b.points.last() {
+                    n -= 1;
+                }
+                corners += n;
+            }
+        }
+        println!(
+            "{id}: {buildings} buildings, {corners} corners; building triangles {sharp_total} -> {rounded_total} (+{:.1}%)",
+            (rounded_total - sharp_total) as f64 / sharp_total.max(1) as f64 * 100.0
+        );
+        assert!(rounded_total > sharp_total);
+    }
+
+    #[test]
+    fn collision_prism_is_the_original_footprint_hull() {
+        for pts in [rect(10.0, 10.0, 20.0, 20.0), l_shape()] {
+            let (_, sharp) = one_with(building(pts.clone(), 2, 0, 0), sharp_look());
+            let (_, rounded) = one_with(building(pts.clone(), 2, 0, 0), rounded_look());
+            assert_eq!(sharp, rounded, "the bevel changed the collision prism");
+            assert_eq!(rounded.len(), 1);
+            let hull = base_corners(&rounded[0], slope(10.0, 0.0));
+            for corner in &hull {
+                assert!(
+                    pts.iter().any(|p| dist2(*p, *corner) < 1e-6),
+                    "hull corner {corner:?} is not an original footprint vertex"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flat_shading_is_faceted_and_smooth_only_on_the_rounded_corner() {
+        let square = rect(10.0, 10.0, 20.0, 20.0);
+        let flat_look = WorldLook {
+            bevel_segments: 3,
+            ..rounded_look()
+        };
+        let smooth_look = WorldLook {
+            flat_shading: false,
+            ..flat_look
+        };
+        let flat = one_with(building(square.clone(), 1, 0, 0), flat_look).0;
+        let smooth = one_with(building(square, 1, 0, 0), smooth_look).0;
+        // Groups of four wall vertices, one group per ring segment. A group is "flat" when all of
+        // its vertices share one normal.
+        let constant_groups = |m: &MeshData| {
+            let walls: Vec<usize> = (0..m.normals.len())
+                .filter(|&i| m.normals[i][1] == 0.0)
+                .collect();
+            assert_eq!(walls.len() % 4, 0);
+            (0..walls.len() / 4)
+                .filter(|&g| {
+                    let n = m.normals[walls[4 * g]];
+                    walls[4 * g..4 * g + 4].iter().all(|&i| m.normals[i] == n)
+                })
+                .count()
+        };
+        let groups = flat.normals.iter().filter(|n| n[1] == 0.0).count() / 4;
+        assert_eq!(
+            groups, 16,
+            "four corners with three segments plus four walls"
+        );
+        assert_eq!(
+            constant_groups(&flat),
+            groups,
+            "flat shading is not faceted"
+        );
+        // Only the four long walls keep one normal; the 12 chamfer faces smooth into each other.
+        assert_eq!(
+            constant_groups(&smooth),
+            4,
+            "smooth shading bled into the flat walls"
+        );
     }
 }
