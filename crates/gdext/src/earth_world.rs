@@ -1,22 +1,24 @@
 //! Godot node that streams a baked map around the car. The map is opened without reading
-//! its tiles; the car is spawned on the road nearest to home (the map center), facing south,
-//! on terrain loaded synchronously. Then the tiles within `view_radius_m` of the car are
-//! built in the background and instantiated on the main thread, a few per frame, and tiles
-//! that fall beyond the radius plus a margin are freed.
+//! its tiles; the car is spawned on the road nearest to home (the map center), facing south.
+//! The opening runs in real stages across frames (see `LoadingStage`) behind `loading.tscn`:
+//! map, spawn search, one spawn tile per frame, car, environment and stream. Then the tiles
+//! within `view_radius_m` of the car are built in the background and instantiated on the main
+//! thread, a few per frame, and tiles that fall beyond the radius plus a margin are freed.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use godot::classes::file_access::ModeFlags;
 use godot::classes::{
-    CanvasLayer, FileAccess, INode3D, MeshInstance3D, Node3D, ProjectSettings, RigidBody3D,
-    ShaderMaterial, StandardMaterial3D, Os,
+    CanvasLayer, FileAccess, INode3D, MeshInstance3D, Node3D, PackedScene, ProjectSettings,
+    RigidBody3D, ShaderMaterial, StandardMaterial3D, Os,
 };
 use godot::prelude::*;
+use worldmap::home::Home;
 
 use crate::environment::lamps::{delay_s, is_lit};
 use crate::environment::EnvironmentClock;
@@ -31,6 +33,7 @@ use crate::render::{
     terrain_material,
 };
 use crate::style;
+use crate::ui_text::{language, text as ui_text, Lang};
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::{find_spawn, find_spawn_near, inside_loaded_map};
@@ -61,6 +64,82 @@ const DEV_CACHE_ROOT: &str = "res://../cache";
 const DEV_DEFAULT_MAP: &str = "casa-10km";
 /// The last map opened, as its id in a text file.
 const LAST_MAP_PATH: &str = "user://last_map.txt";
+/// Canvas layer of the loading screen, above the 3D view and below the world map.
+const LOADING_CANVAS_LAYER: i32 = 15;
+
+/// Real steps of the opening, one per frame (except the tiles, one per frame each). The loading
+/// screen is added and drawn before the first one; the car exists only after `PlacingCar`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LoadingStage {
+    /// `open_map`: read the map metadata and register the map as the last one.
+    #[default]
+    OpeningMap,
+    /// Saved home, spawn search, materials and the list of spawn tiles.
+    ReadingMap,
+    /// The spawn tiles, one `load_now` per frame.
+    BuildingTiles,
+    /// `spawn_car`.
+    PlacingCar,
+    /// `Environment` clock and the pool of real lamp lights.
+    Environment,
+    /// Loader thread, distant lights, terrain LOD and the world map view.
+    StartingStream,
+    /// Screen closed; the normal streaming `process` runs.
+    Ready,
+}
+
+/// Stage after `stage`. A pure function, so the order is unit-tested without Godot.
+fn next_stage(stage: LoadingStage) -> LoadingStage {
+    match stage {
+        LoadingStage::OpeningMap => LoadingStage::ReadingMap,
+        LoadingStage::ReadingMap => LoadingStage::BuildingTiles,
+        LoadingStage::BuildingTiles => LoadingStage::PlacingCar,
+        LoadingStage::PlacingCar => LoadingStage::Environment,
+        LoadingStage::Environment => LoadingStage::StartingStream,
+        LoadingStage::StartingStream | LoadingStage::Ready => LoadingStage::Ready,
+    }
+}
+
+/// Progress (0..1) of `stage`. `built` and `total` only matter while building the spawn tiles.
+fn stage_progress(stage: LoadingStage, built: usize, total: usize) -> f64 {
+    match stage {
+        LoadingStage::OpeningMap => 0.02,
+        LoadingStage::ReadingMap => 0.12,
+        LoadingStage::BuildingTiles => {
+            let done = built.min(total.max(1)) as f64 / total.max(1) as f64;
+            0.20 + 0.36 * done
+        }
+        LoadingStage::PlacingCar => 0.60,
+        LoadingStage::Environment => 0.72,
+        LoadingStage::StartingStream => 0.86,
+        LoadingStage::Ready => 1.0,
+    }
+}
+
+/// Line of the loading screen for `stage`.
+fn stage_key(stage: LoadingStage) -> &'static str {
+    match stage {
+        LoadingStage::OpeningMap => "loading.opening_map",
+        LoadingStage::ReadingMap => "loading.reading_map",
+        LoadingStage::BuildingTiles => "loading.building_tiles",
+        LoadingStage::PlacingCar => "loading.placing_car",
+        LoadingStage::Environment => "loading.environment",
+        LoadingStage::StartingStream | LoadingStage::Ready => "loading.ready",
+    }
+}
+
+/// Stage name for the log.
+fn stage_label(stage: LoadingStage) -> &'static str {
+    match stage {
+        LoadingStage::OpeningMap => "opening map",
+        LoadingStage::ReadingMap => "reading map",
+        LoadingStage::BuildingTiles => "building tiles",
+        LoadingStage::PlacingCar => "placing car",
+        LoadingStage::Environment => "environment",
+        LoadingStage::StartingStream => "starting stream",
+        LoadingStage::Ready => "ready",
+    }
+}
 
 /// Streams `<cache_root>/<map_id>` around the car. With no map (no `map_id`, no last map, folder
 /// missing) it emits `no_map` and opens the world map with its message; no error is logged.
@@ -144,6 +223,30 @@ pub struct EarthWorld {
     /// Distant lights: the background load, then the node once built.
     far_loader: Option<Receiver<io::Result<FarLoad>>>,
     far: Option<DistantLights>,
+
+    /// Loading screen (item 123), the stage it is on and the timers of the stage and of the whole
+    /// opening. `ready` only adds the screen; `process` runs one stage per frame.
+    loading: Option<Gd<Node>>,
+    stage: LoadingStage,
+    loading_started: Option<Instant>,
+    stage_started: Option<Instant>,
+    /// First `process` only draws the screen: the expensive stages start on the next frame.
+    first_frame_pending: bool,
+    /// `--loading-hold <seconds>`: debug hold of the last stage, 0 disables it.
+    loading_hold_s: f64,
+    loading_hold_until: Option<Instant>,
+    lang: Option<Lang>,
+    /// Map state kept between the staged steps: index and cache opened, map id, spawn pose and the
+    /// spawn tiles still to build.
+    pending_index: Option<Arc<MapIndex>>,
+    pending_cache: Option<PathBuf>,
+    pending_map_id: String,
+    pending_picker_key: Option<String>,
+    pending_car_position: Option<Vector3>,
+    pending_car_yaw: f32,
+    pending_tiles: VecDeque<(i32, i32)>,
+    pending_built: usize,
+    pending_total: usize,
 
     /// Worst `process` call and worst tile instantiation since the last log line, seconds.
     worst_frame: f64,
@@ -249,152 +352,31 @@ fn write_last_map(id: &str) {
 impl INode3D for EarthWorld {
     fn ready(&mut self) {
         self.base_mut().set_process(true);
-        self.load_style();
-        let home = home_store::load();
-        if let Some(h) = home {
-            crate::environment::sky::set_home(h.lat, h.lon);
-        }
-        let (cache_root_res, dev_cache) = self.resolved_cache_root();
-        // The property shows the root in use, so the bot and the capture read the same cache.
-        self.cache_root = cache_root_res.clone();
-        let cache_root = PathBuf::from(
-            ProjectSettings::singleton()
-                .globalize_path(&cache_root_res)
-                .to_string(),
-        );
-        let id = self.resolved_map_id(dev_cache);
-        let opened = if id.is_empty() {
-            godot_print!("no map: no map_id, no last map and no development cache");
-            None
-        } else {
-            match open_map(&cache_root, &id) {
-                Ok(index) => Some(index),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    godot_print!("no map: '{id}' not found in {}", cache_root.display());
-                    None
-                }
-                Err(e) => {
-                    godot_error!("cannot open map '{id}' from {}: {e}", cache_root.display());
-                    None
-                }
-            }
-        };
-        let Some(index) = opened else {
-            self.signals().no_map().emit();
-            self.add_map_view(Some("home.no_map"));
-            return;
-        };
-        write_last_map(&id);
-        self.start_gps(&cache_root.display().to_string(), &id);
-        let tile_m = index.meta.tile_size_m;
-        godot_print!(
-            "map '{id}' opened: {} tiles, streamed within {} m",
-            index.coords().len(),
-            self.view_radius_m
-        );
-        self.terrain_mat = Some(terrain_material());
-        self.road_mat = Some(road_material());
-        self.vertex_mat = Some(material((1.0, 1.0, 1.0)));
-        self.building_mat = building_material();
-        if self.building_mat.is_none() {
-            godot_warn!("building shader not loaded: buildings have no windows");
-        }
-        self.lamp_mats = LampMaterials::new();
-        if self.lamp_mats.is_none() {
-            godot_warn!("lamp shaders not loaded: street lamps are not drawn");
-        }
-        self.lamp_lights = Some(LampLights::new());
-        if self.far_lights_enabled {
-            let path = cache_root.join(&id).join("far_lights.bin");
-            self.far_loader = Some(spawn_load(path, self.far_lights_max.max(0) as usize));
-        }
-
-        // Spawn on the road nearest to the saved home when it is inside the loaded map. Without a
-        // saved home, or with one outside the map, spawn on the road nearest to the map center
-        // and open the world map so the player chooses (no grey screen).
-        let grid = MapGrid::from_meta(&index.meta);
-        let saved_local = home.and_then(|h| {
-            inside_loaded_map(&grid, index.meta.radius_m, h.lat, h.lon, |t| {
-                index.has_tile(t.0, t.1)
-            })
-        });
-        let saved_pose = match saved_local {
-            Some(local) => match find_spawn_near(&index, local, self.view_radius_m as f64) {
-                Ok(pose) => pose,
-                Err(e) => {
-                    godot_error!("cannot read map '{id}': {e}");
-                    return;
-                }
-            },
-            None => None,
-        };
-        let picker_key = match (home, saved_pose) {
-            (Some(_), Some(_)) => None,
-            (Some(_), None) if saved_local.is_some() => Some("home.no_road_start"),
-            (Some(_), None) => Some("home.outside_saved"),
-            (None, _) => Some("home.none_start"),
-        };
-        let pose = match saved_pose {
-            Some(pose) => Ok(Some(pose)),
-            None => find_spawn(&index, self.view_radius_m as f64),
-        };
-        let (x, y, yaw) = match pose {
-            Ok(Some(pose)) => (pose.x, pose.y, pose.yaw),
-            Ok(None) => {
-                godot_warn!("map '{id}' has no road to spawn on, spawning at the map center");
-                (0.0, 0.0, std::f32::consts::PI)
-            }
-            Err(e) => {
-                godot_error!("cannot read map '{id}': {e}");
-                return;
-            }
-        };
-        let spawn_tile = ((x / tile_m).floor() as i32, (y / tile_m).floor() as i32);
-        let near = match index.neighborhood(spawn_tile.0, spawn_tile.1) {
-            Ok(map) => map,
-            Err(e) => {
-                godot_error!("cannot read tiles at the spawn point of '{id}': {e}");
-                return;
-            }
-        };
-        let Some(height) = near.height_at(x, y) else {
-            godot_error!("map '{id}' has no tile at the spawn point, car not spawned");
-            return;
-        };
-        // The car lands on the spawn tile and its neighbors, so those are built now.
-        for ty in spawn_tile.1 - 1..=spawn_tile.1 + 1 {
-            for tx in spawn_tile.0 - 1..=spawn_tile.0 + 1 {
-                self.load_now(&index, (tx, ty));
-            }
-        }
-
-        let position = Vector3::new(x as f32, height + SPAWN_LIFT_M, -(y as f32));
-        match spawn_car(position, yaw) {
-            Some(car) => {
-                self.base_mut().add_child(&car);
-                self.car = Some(car);
-            }
-            None => {
-                godot_error!("cannot instantiate res://car.tscn");
-                return;
-            }
-        }
-        self.add_environment();
-        self.add_lamp_lights();
-        if let (Some(car), Some(material)) = (&self.car, &self.terrain_mat) {
-            lod::configure_view(self.base().get_parent(), car);
-            self.lod = Some(TerrainLod::start(
-                &cache_root,
-                &id,
-                &index.meta,
-                material.clone(),
-            ));
-        }
-        self.start_loader(Arc::new(index));
-        self.add_map_view(picker_key);
+        // Only the screen and the state are set up here: the map is opened in the first `process`,
+        // after the screen has been drawn, so the expensive work never runs over a grey frame.
+        self.lang = Some(language(&Os::singleton().get_locale().to_string()));
+        self.loading_started = Some(Instant::now());
+        self.show_loading();
+        self.stage = LoadingStage::OpeningMap;
+        self.stage_started = Some(Instant::now());
+        self.first_frame_pending = true;
+        self.loading_hold_s = self.loading_hold_seconds();
     }
 
     fn process(&mut self, delta: f64) {
+        if self.stage != LoadingStage::Ready {
+            self.loading_tick();
+            return;
+        }
+        // `--loading-hold` keeps the last stage up for a while (for a capture), still with the
+        // normal streaming running; without it the screen was already closed by `enter_ready`.
+        if let Some(until) = self.loading_hold_until {
+            if Instant::now() >= until {
+                self.loading_hold_until = None;
+                self.finish_loading();
+            }
+        }
+
         let frame_start = Instant::now();
         let (Some(index), Some(p)) = (self.index.clone(), self.car_position()) else {
             return;
@@ -517,6 +499,397 @@ impl INode3D for EarthWorld {
 }
 
 impl EarthWorld {
+    /// Adds the loading screen of item 123, above the 3D view. It ignores the mouse. A missing
+    /// scene is a warning: the stages still run, only without the card.
+    fn show_loading(&mut self) {
+        let scene: Gd<PackedScene> = match try_load("res://loading.tscn") {
+            Ok(scene) => scene,
+            Err(e) => {
+                godot_warn!("loading screen res://loading.tscn not loaded ({e:?}): opening without it");
+                return;
+            }
+        };
+        let Some(node) = scene.instantiate() else {
+            godot_warn!("loading screen res://loading.tscn could not be instantiated");
+            return;
+        };
+        if let Ok(mut layer) = node.clone().try_cast::<CanvasLayer>() {
+            layer.set_layer(LOADING_CANVAS_LAYER);
+        }
+        self.base_mut().add_child(&node);
+        self.loading = Some(node);
+        self.set_loading_text("set_title", "intro.title");
+        self.set_loading_text("set_hint", "loading.hint");
+        self.set_loading(
+            "loading.opening_map",
+            stage_progress(LoadingStage::OpeningMap, 0, 1),
+        );
+    }
+
+    /// Calls `method` on the screen with one translated line (title or hint).
+    fn set_loading_text(&mut self, method: &str, key: &str) {
+        let line = ui_text(key, self.lang.unwrap_or(Lang::En));
+        if let Some(mut loading) = self.loading.clone() {
+            loading.call(method, &[line.to_variant()]);
+        }
+    }
+
+    /// Sends one line of text (in the player's language) and a 0..1 progress to the screen.
+    fn set_loading(&mut self, key: &str, progress: f64) {
+        let line = ui_text(key, self.lang.unwrap_or(Lang::En));
+        if let Some(mut loading) = self.loading.clone() {
+            let args = [line.to_variant(), progress.clamp(0.0, 1.0).to_variant()];
+            loading.call("set_stage", &args);
+        }
+    }
+
+    /// Hides and frees the screen. Idempotent, so the failure path and `ready` can both call it.
+    fn finish_loading(&mut self) {
+        let Some(mut loading) = self.loading.take() else {
+            return;
+        };
+        loading.call("finish", &[]);
+        loading.queue_free();
+        if let Some(started) = self.loading_started {
+            godot_print!(
+                "loading: screen closed at {:.1} ms",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    /// No map, or a map that could not be read: close the screen and open the world map with
+    /// `home.no_map`, exactly as the old `ready` did on the no-map path. Never leaves it stuck.
+    fn fail_loading(&mut self) {
+        godot_print!(
+            "loading: stage '{}' failed, closing the screen and opening the world map",
+            stage_label(self.stage)
+        );
+        self.finish_loading();
+        self.stage = LoadingStage::Ready;
+        self.pending_index = None;
+        self.pending_cache = None;
+        self.pending_picker_key = None;
+        self.pending_car_position = None;
+        self.pending_tiles.clear();
+        self.pending_built = 0;
+        self.pending_total = 0;
+        self.signals().no_map().emit();
+        self.add_map_view(Some("home.no_map"));
+    }
+
+    /// One loading step per frame. The very first frame only draws the screen; the cost of the
+    /// map starts on the next one.
+    fn loading_tick(&mut self) {
+        if self.first_frame_pending {
+            self.first_frame_pending = false;
+            return;
+        }
+        match self.stage {
+            LoadingStage::OpeningMap => self.stage_opening_map(),
+            LoadingStage::ReadingMap => self.stage_reading_map(),
+            LoadingStage::BuildingTiles => self.stage_building_tiles(),
+            LoadingStage::PlacingCar => self.stage_placing_car(),
+            LoadingStage::Environment => self.stage_environment(),
+            LoadingStage::StartingStream => self.stage_starting_stream(),
+            LoadingStage::Ready => {}
+        }
+    }
+
+    /// Moves to `stage`, logs how long the previous one took and updates the screen.
+    fn begin_stage(&mut self, stage: LoadingStage) {
+        if let Some(started) = self.stage_started {
+            godot_print!(
+                "loading: stage '{}' took {:.1} ms",
+                stage_label(self.stage),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        self.stage = stage;
+        self.stage_started = Some(Instant::now());
+        let progress = stage_progress(stage, self.pending_built, self.pending_total);
+        self.set_loading(stage_key(stage), progress);
+    }
+
+    /// The map is open and the car is in the tree: it can drive from now on. The screen closes
+    /// itself here (or after `--loading-hold`, for a capture).
+    fn enter_ready(&mut self) {
+        self.begin_stage(next_stage(LoadingStage::StartingStream));
+        if let Some(started) = self.loading_started {
+            godot_print!(
+                "loading: first playable frame at {:.1} ms",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        self.pending_index = None;
+        self.pending_cache = None;
+        self.pending_tiles.clear();
+        // "Ready" is shown by `StartingStream`; the real closing happens on this first playable
+        // frame, unless a capture asked to hold the screen (`--loading-hold`).
+        if self.loading_hold_s > 0.0 {
+            self.loading_hold_until =
+                Some(Instant::now() + Duration::from_secs_f64(self.loading_hold_s));
+        } else {
+            self.finish_loading();
+        }
+    }
+
+    /// Stage 1: read the theme and open the map (metadata only; no tile is read here).
+    fn stage_opening_map(&mut self) {
+        self.load_style();
+        let (cache_root_res, dev_cache) = self.resolved_cache_root();
+        // The property shows the root in use, so the bot and the capture read the same cache.
+        self.cache_root = cache_root_res.clone();
+        let cache_root = PathBuf::from(
+            ProjectSettings::singleton()
+                .globalize_path(&cache_root_res)
+                .to_string(),
+        );
+        let id = self.resolved_map_id(dev_cache);
+        let opened = if id.is_empty() {
+            godot_print!("no map: no map_id, no last map and no development cache");
+            None
+        } else {
+            match open_map(&cache_root, &id) {
+                Ok(index) => Some(index),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    godot_print!("no map: '{id}' not found in {}", cache_root.display());
+                    None
+                }
+                Err(e) => {
+                    godot_error!("cannot open map '{id}' from {}: {e}", cache_root.display());
+                    None
+                }
+            }
+        };
+        let Some(index) = opened else {
+            self.fail_loading();
+            return;
+        };
+        write_last_map(&id);
+        godot_print!(
+            "map '{id}' opened: {} tiles, streamed within {} m",
+            index.coords().len(),
+            self.view_radius_m
+        );
+        self.pending_cache = Some(cache_root);
+        self.pending_map_id = id;
+        self.pending_index = Some(Arc::new(index));
+        self.begin_stage(next_stage(LoadingStage::OpeningMap));
+    }
+
+    /// Stage 2: home, spawn search, materials and the list of spawn tiles (built one per frame).
+    fn stage_reading_map(&mut self) {
+        let (Some(index), Some(cache_root)) = (self.pending_index.clone(), self.pending_cache.clone())
+        else {
+            godot_error!("loading: map state is missing, cannot read the map");
+            self.fail_loading();
+            return;
+        };
+        let id = self.pending_map_id.clone();
+
+        let home: Option<Home> = home_store::load();
+        if let Some(h) = home {
+            crate::environment::sky::set_home(h.lat, h.lon);
+        }
+        self.start_gps(&cache_root.display().to_string(), &id);
+        self.terrain_mat = Some(terrain_material());
+        self.road_mat = Some(road_material());
+        self.vertex_mat = Some(material((1.0, 1.0, 1.0)));
+        self.building_mat = building_material();
+        if self.building_mat.is_none() {
+            godot_warn!("building shader not loaded: buildings have no windows");
+        }
+        self.lamp_mats = LampMaterials::new();
+        if self.lamp_mats.is_none() {
+            godot_warn!("lamp shaders not loaded: street lamps are not drawn");
+        }
+        self.lamp_lights = Some(LampLights::new());
+
+        // Spawn on the road nearest to the saved home when it is inside the loaded map. Without a
+        // saved home, or with one outside the map, spawn on the road nearest to the map center
+        // and open the world map so the player chooses (no grey screen).
+        let grid = MapGrid::from_meta(&index.meta);
+        let saved_local = home.and_then(|h| {
+            inside_loaded_map(&grid, index.meta.radius_m, h.lat, h.lon, |t| {
+                index.has_tile(t.0, t.1)
+            })
+        });
+        let saved_pose = match saved_local {
+            Some(local) => match find_spawn_near(&index, local, self.view_radius_m as f64) {
+                Ok(pose) => pose,
+                Err(e) => {
+                    godot_error!("cannot read map '{id}': {e}");
+                    self.fail_loading();
+                    return;
+                }
+            },
+            None => None,
+        };
+        let picker_key = match (home, saved_pose) {
+            (Some(_), Some(_)) => None,
+            (Some(_), None) if saved_local.is_some() => Some("home.no_road_start".to_string()),
+            (Some(_), None) => Some("home.outside_saved".to_string()),
+            (None, _) => Some("home.none_start".to_string()),
+        };
+        let pose = match saved_pose {
+            Some(pose) => Ok(Some(pose)),
+            None => find_spawn(&index, self.view_radius_m as f64),
+        };
+        let (x, y, yaw) = match pose {
+            Ok(Some(pose)) => (pose.x, pose.y, pose.yaw),
+            Ok(None) => {
+                godot_warn!("map '{id}' has no road to spawn on, spawning at the map center");
+                (0.0, 0.0, std::f32::consts::PI)
+            }
+            Err(e) => {
+                godot_error!("cannot read map '{id}': {e}");
+                self.fail_loading();
+                return;
+            }
+        };
+        let tile_m = index.meta.tile_size_m;
+        let spawn_tile = ((x / tile_m).floor() as i32, (y / tile_m).floor() as i32);
+        let near = match index.neighborhood(spawn_tile.0, spawn_tile.1) {
+            Ok(map) => map,
+            Err(e) => {
+                godot_error!("cannot read tiles at the spawn point of '{id}': {e}");
+                self.fail_loading();
+                return;
+            }
+        };
+        let Some(height) = near.height_at(x, y) else {
+            godot_error!("map '{id}' has no tile at the spawn point, car not spawned");
+            self.fail_loading();
+            return;
+        };
+
+        self.pending_car_position = Some(Vector3::new(
+            x as f32,
+            height + SPAWN_LIFT_M,
+            -(y as f32),
+        ));
+        self.pending_car_yaw = yaw;
+        self.pending_picker_key = picker_key;
+        // The car lands on the spawn tile and its neighbors; these are built before it exists.
+        self.pending_tiles.clear();
+        for ty in spawn_tile.1 - 1..=spawn_tile.1 + 1 {
+            for tx in spawn_tile.0 - 1..=spawn_tile.0 + 1 {
+                if index.has_tile(tx, ty) {
+                    self.pending_tiles.push_back((tx, ty));
+                }
+            }
+        }
+        self.pending_built = 0;
+        self.pending_total = self.pending_tiles.len().max(1);
+        self.begin_stage(next_stage(LoadingStage::ReadingMap));
+    }
+
+    /// Stage 3: one spawn tile per frame, so the card repaints between tiles.
+    fn stage_building_tiles(&mut self) {
+        let Some(index) = self.pending_index.clone() else {
+            godot_error!("loading: map state is missing, cannot build the terrain");
+            self.fail_loading();
+            return;
+        };
+        let Some(t) = self.pending_tiles.pop_front() else {
+            self.begin_stage(next_stage(LoadingStage::BuildingTiles));
+            return;
+        };
+        self.load_now(&index, t);
+        self.pending_built += 1;
+        let progress =
+            stage_progress(LoadingStage::BuildingTiles, self.pending_built, self.pending_total);
+        self.set_loading("loading.building_tiles", progress);
+        if self.pending_tiles.is_empty() {
+            self.begin_stage(next_stage(LoadingStage::BuildingTiles));
+        }
+    }
+
+    /// Stage 4: the car, on the spawn tiles that are already built.
+    fn stage_placing_car(&mut self) {
+        let Some(position) = self.pending_car_position else {
+            godot_error!("loading: no spawn position, car not spawned");
+            self.fail_loading();
+            return;
+        };
+        // The car is instantiated here, on the built spawn tiles, but only enters the tree in
+        // `StartingStream`: the capture and the drive bot look for its Camera, and they must not
+        // find it before the loader and the map view are running.
+        match spawn_car(position, self.pending_car_yaw) {
+            Some(car) => self.car = Some(car),
+            None => {
+                godot_error!("cannot instantiate res://car.tscn");
+                self.fail_loading();
+                return;
+            }
+        }
+        self.begin_stage(next_stage(LoadingStage::PlacingCar));
+    }
+
+    /// Stage 5: the `Environment` clock and the pool of real lamp lights.
+    fn stage_environment(&mut self) {
+        self.add_environment();
+        self.add_lamp_lights();
+        self.begin_stage(next_stage(LoadingStage::Environment));
+    }
+
+    /// Stage 6: the loader thread, distant lights, terrain LOD and the world map view.
+    fn stage_starting_stream(&mut self) {
+        let (Some(index), Some(cache_root)) = (self.pending_index.clone(), self.pending_cache.clone())
+        else {
+            godot_error!("loading: map state is missing, cannot start the stream");
+            self.fail_loading();
+            return;
+        };
+        let id = self.pending_map_id.clone();
+        if self.far_lights_enabled {
+            let path = cache_root.join(&id).join("far_lights.bin");
+            self.far_loader = Some(spawn_load(path, self.far_lights_max.max(0) as usize));
+        }
+        let car = self.car.clone();
+        let material = self.terrain_mat.clone();
+        if let (Some(car), Some(material)) = (car, material) {
+            lod::configure_view(self.base().get_parent(), &car);
+            self.lod = Some(TerrainLod::start(
+                &cache_root,
+                &id,
+                &index.meta,
+                material,
+            ));
+        }
+        self.start_loader(index);
+        // The car (and its Camera) enters the tree only now, when streaming is already running:
+        // the tools that wait for the Camera then see a fully playable world.
+        if let Some(car) = self.car.clone() {
+            self.base_mut().add_child(&car);
+        }
+        let key = self.pending_picker_key.clone();
+        self.add_map_view(key.as_deref());
+        self.enter_ready();
+    }
+
+    /// `--loading-hold <seconds>` (or `--loading-hold=<seconds>`): keep the last stage visible
+    /// for a capture. 0 when absent.
+    fn loading_hold_seconds(&self) -> f64 {
+        let args = Os::singleton().get_cmdline_user_args();
+        let mut iter = args.as_slice().iter();
+        while let Some(arg) = iter.next() {
+            let arg = arg.to_string();
+            if arg == "--loading-hold" {
+                return iter
+                    .next()
+                    .and_then(|v| v.to_string().trim().parse::<f64>().ok())
+                    .unwrap_or(0.0)
+                    .max(0.0);
+            }
+            if let Some(value) = arg.strip_prefix("--loading-hold=") {
+                return value.trim().parse::<f64>().unwrap_or(0.0).max(0.0);
+            }
+        }
+        0.0
+    }
+
     /// Reads the active theme and installs it: `--style <id>` from the Godot user args wins, then
     /// the `style_id` export, then the default theme. A missing or broken file logs one warning
     /// and keeps the built-in defaults (equal to `lowpoly.json`).
@@ -866,5 +1239,40 @@ impl EarthWorld {
         let car = self.car.as_ref()?;
         let local = self.base().to_local(car.get_global_position());
         Some([local.x as f64, -local.z as f64])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loading_stages_advance_in_order_and_progress_never_goes_back() {
+        let order = [
+            LoadingStage::OpeningMap,
+            LoadingStage::ReadingMap,
+            LoadingStage::BuildingTiles,
+            LoadingStage::PlacingCar,
+            LoadingStage::Environment,
+            LoadingStage::StartingStream,
+            LoadingStage::Ready,
+        ];
+        for pair in order.windows(2) {
+            assert_eq!(next_stage(pair[0]), pair[1]);
+        }
+        assert_eq!(next_stage(LoadingStage::Ready), LoadingStage::Ready);
+
+        let mut previous = 0.0;
+        for stage in order {
+            for built in 0..=9 {
+                let progress = stage_progress(stage, built, 9);
+                assert!(progress >= previous, "{stage:?} went back at {built}");
+                assert!((0.0..=1.0).contains(&progress));
+                previous = progress;
+            }
+            assert!(!stage_key(stage).is_empty());
+            assert!(!stage_label(stage).is_empty());
+        }
+        assert_eq!(stage_progress(LoadingStage::Ready, 0, 9), 1.0);
     }
 }
