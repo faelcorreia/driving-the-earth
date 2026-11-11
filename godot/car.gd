@@ -1,5 +1,7 @@
 extends VehicleBody3D
 
+const LowpolyCar := preload("res://lowpoly_car.gd")
+
 ## Motor e direção simples. Entradas vêm das ações drive_* do InputMap.
 ## Frente do carro é -Z; rodas dianteiras esterçam, traseiras tracionam.
 ## Com engine_force positivo o VehicleBody3D anda para +Z, então o sinal é invertido.
@@ -52,6 +54,8 @@ const BRAKE_MIN_SPEED := 0.5
 @onready var _headlights: Array[SpotLight3D] = [$HeadlightLeft, $HeadlightRight]
 @onready var _tails: Array[MeshInstance3D] = [$TailLeft, $TailRight]
 var _tail_mats: Array[StandardMaterial3D] = []
+## Headlamp lens material (item 120), glows while the headlights are on.
+var _headlamp_mats: Array[StandardMaterial3D] = []
 var _braking := false
 var _clock: Node = null
 ## The world's Gps node (main.tscn), null when the car has none.
@@ -80,7 +84,15 @@ func _ready() -> void:
 	var shape := ConvexPolygonShape3D.new()
 	shape.points = points
 	$CabinShape.shape = shape
-	$CabinMesh.mesh = _prism_mesh(_cabin_profile, CABIN_HALF_WIDTH)
+	# Visible car (item 120): body, cabin, glass, lamps and wheels, built once from the theme.
+	var lowpoly := LowpolyCar.new()
+	var stats := lowpoly.apply(self, _cabin_profile, CABIN_HALF_WIDTH)
+	_headlamp_mats.append(stats["headlamp_material"] as StandardMaterial3D)
+	if "--car-stats" in OS.get_cmdline_user_args():
+		print("car: %d triangles (body %d, cabin %d, wheels %d, lamps %d); style '%s', flat shading %s, bevel %.3f m" % [
+			stats["triangles"], stats["body"], stats["cabin"], stats["wheels"], stats["lamps"],
+			stats["style_id"], str(stats["flat"]), stats["bevel"],
+		])
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_set_view(0)
 
@@ -92,49 +104,6 @@ func _set_view(index: int) -> void:
 		if i != index:
 			_views[i].set_active(false)
 	_views[index].set_active(true)
-
-
-## Malha de um prisma convexo: perfil (x = z do carro, y = altura) extrudado de -w a +w em X.
-## Cada triângulo sai com a normal para fora e ordem horária vista de fora (frente no Godot).
-func _prism_mesh(profile: PackedVector2Array, half_width: float) -> ArrayMesh:
-	var centroid := Vector3.ZERO
-	for p in profile:
-		centroid += Vector3(0.0, p.y, p.x)
-	centroid /= profile.size()
-
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var n := profile.size()
-	for i in n:
-		var a := profile[i]
-		var b := profile[(i + 1) % n]
-		var la := Vector3(-half_width, a.y, a.x)
-		var lb := Vector3(-half_width, b.y, b.x)
-		var ra := Vector3(half_width, a.y, a.x)
-		var rb := Vector3(half_width, b.y, b.x)
-		_add_face(st, centroid, la, lb, rb)
-		_add_face(st, centroid, la, rb, ra)
-	for i in range(1, n - 1):
-		var p0 := profile[0]
-		var p1 := profile[i]
-		var p2 := profile[i + 1]
-		_add_face(st, centroid, Vector3(-half_width, p0.y, p0.x), Vector3(-half_width, p1.y, p1.x), Vector3(-half_width, p2.y, p2.x))
-		_add_face(st, centroid, Vector3(half_width, p0.y, p0.x), Vector3(half_width, p2.y, p2.x), Vector3(half_width, p1.y, p1.x))
-	return st.commit()
-
-
-func _add_face(st: SurfaceTool, centroid: Vector3, a: Vector3, b: Vector3, c: Vector3) -> void:
-	var normal := (b - a).cross(c - a).normalized()
-	if normal.dot((a + b + c) / 3.0 - centroid) < 0.0:
-		normal = -normal
-	# Godot considera de frente o triângulo horário visto de fora, ou seja, cross(b-a, c-a) aponta para dentro.
-	if (b - a).cross(c - a).dot(normal) > 0.0:
-		var tmp := b
-		b = c
-		c = tmp
-	for v in [a, b, c]:
-		st.set_normal(normal)
-		st.add_vertex(v)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -253,6 +222,8 @@ func _process(_delta: float) -> void:
 	var on := _lamps_on()
 	for light in _headlights:
 		light.visible = on
+	for mat in _headlamp_mats:
+		mat.emission_energy_multiplier = 1.4 if on else 0.12
 	for mat in _tail_mats:
 		if _braking:
 			mat.emission_energy_multiplier = TAIL_EMISSION_BRAKE
