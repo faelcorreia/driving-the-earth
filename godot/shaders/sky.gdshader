@@ -25,11 +25,15 @@ uniform float moon_visibility = 0.0;
 // Cobertura de nuvens (0 a 1, de `EnvironmentClock.cloud_cover`): véu cinza sobre o céu. Sem formas
 // de nuvem ainda; a luz do sol e a ambiente são reduzidas em `clock.rs`.
 uniform float cloud_cover = 0.0;
+// Warm gray of a fully overcast sky (`sky::cloud_tint`), linear RGB.
+uniform vec3 cloud_tint = vec3(0.55, 0.55, 0.52);
 
 // Raio angular do disco do sol e da lua (~0,27 grau, 0,0047 rad) em 1 - cos(θ), ~θ²/2.
 const float DISK_R2 = 1.08e-5;
 // Fração do laranja do ocaso que aparece fora do lado do sol (mesma constante em sky.rs).
 const float WARM_HAZE = 0.35;
+// Sky-luminance gain of the cloud veil (same as `sky::CLOUD_LIFT_GAIN`).
+const float CLOUD_LIFT_GAIN = 2.5;
 
 float hash13(vec3 p) {
 	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
@@ -61,10 +65,11 @@ void sky() {
 	vec3 e = normalize(EYEDIR);
 	vec3 col = sky_base(e);
 
-	// Disco do sol: ganho alto para ficar branco-quente no alto e laranja no ocaso.
+	// Disco do sol: ganho alto para ficar branco-quente no alto e laranja no ocaso. The cloud veil
+	// hides most of the disk, otherwise a "cloudy" noon still shows a burning sun.
 	float d_sun = 1.0 - dot(e, sun_dir);
 	float disk = (1.0 - smoothstep(0.5 * DISK_R2, 1.5 * DISK_R2, d_sun)) * sun_disk;
-	col = mix(col, sun_color * 8.0, disk);
+	col = mix(col, sun_color * 8.0, disk * (1.0 - cloud_cover * 0.85));
 
 	// Disco da lua com fase por máscara: a parte iluminada fica do lado do sol. A fração
 	// iluminada k define o terminador: lit onde dot(uv, ld) > 1 - 2k.
@@ -94,6 +99,11 @@ void sky() {
 		col += vec3(0.85, 0.9, 1.0) * star * twinkle * star_strength * smoothstep(0.0, 0.2, e.y) * 0.8;
 	}
 
-	col = mix(col, vec3(dot(col, vec3(0.333))), cloud_cover * 0.5);
+	// Overcast veil, mirrored by `sky_color` in sky.rs: a warm gray instead of the sky's own
+	// average (which washed the blue into a flat, neutral white at noon). The gray is scaled by
+	// the sky's own brightness, so clouds at night stay dark instead of glowing.
+	float cloud_lift = clamp(dot(col, vec3(0.2126, 0.7152, 0.0722)) * CLOUD_LIFT_GAIN, 0.0, 1.0);
+	float veil = clamp(cloud_cover * (0.55 + 0.25 * (1.0 - e.y)), 0.0, 0.95);
+	col = mix(col, cloud_tint * cloud_lift, veil);
 	COLOR = col;
 }

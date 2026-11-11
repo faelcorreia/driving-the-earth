@@ -6,6 +6,8 @@
 use std::f64::consts::{PI, TAU};
 use std::sync::Mutex;
 
+use crate::style::{self, LightLook};
+
 /// Fuso de Belo Horizonte, UTC-3 (sem horário de verão desde 2019), em segundos.
 pub const LOCAL_UTC_OFFSET_S: f64 = -3.0 * 3600.0;
 /// Altitude do centro do sol no nascer/pôr aparente (refração + semidiâmetro), graus.
@@ -239,45 +241,6 @@ pub fn cloud_light_factor(cover: f64) -> f64 {
     1.0 - CLOUD_LIGHT_LOSS * cover.clamp(0.0, 1.0)
 }
 
-/// Interpolação linear de uma cor sobre paradas `(x, cor)` em ordem crescente de `x`.
-/// Fora das paradas, devolve a cor da parada mais próxima.
-pub fn gradient(stops: &[(f64, Rgb)], x: f64) -> Rgb {
-    let (first, last) = (stops[0], stops[stops.len() - 1]);
-    if x <= first.0 {
-        return first.1;
-    }
-    if x >= last.0 {
-        return last.1;
-    }
-    for pair in stops.windows(2) {
-        let ((x0, c0), (x1, c1)) = (pair[0], pair[1]);
-        if x <= x1 {
-            let t = ((x - x0) / (x1 - x0)) as f32;
-            return [0, 1, 2].map(|i| c0[i] + (c1[i] - c0[i]) * t);
-        }
-    }
-    last.1
-}
-
-/// Cor do sol pela altura: branco-amarelado no alto, laranja perto do horizonte, azul-escuro
-/// depois do ocaso.
-pub fn sun_tint(sun_alt_deg: f64) -> Rgb {
-    gradient(
-        &[
-            (-6.0, [0.12, 0.14, 0.28]),
-            (0.0, [1.0, 0.48, 0.18]),
-            (6.0, [1.0, 0.82, 0.60]),
-            (20.0, [1.0, 0.97, 0.92]),
-        ],
-        sun_alt_deg,
-    )
-}
-
-/// Energia da luz solar direta, 0 abaixo do crepúsculo civil e `max` ao meio-dia.
-pub fn sun_energy(sun_alt_deg: f64, max: f64) -> f64 {
-    max * ((sun_alt_deg - SUN_DARK_DEG) / (SUN_FULL_DEG - SUN_DARK_DEG)).clamp(0.0, 1.0)
-}
-
 /// Passo suave de Hermite (como o `smoothstep` do GLSL); aceita `e0 > e1` (passo invertido).
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -288,78 +251,353 @@ fn lerp3(a: Rgb, b: Rgb, t: f32) -> Rgb {
     [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t)
 }
 
-/// Cor do horizonte do lado oposto ao sol (e da neblina de horizonte): azul-marinho escuro à
-/// noite, com um leve brilho de cidade; azul claro de dia.
+fn clamp01(c: Rgb) -> Rgb {
+    c.map(|v| v.clamp(0.0, 1.0))
+}
+
+/// sRGB channels (0..1) to linear RGB, the space of the sky shader colors.
+pub fn srgb_to_linear(c: Rgb) -> Rgb {
+    c.map(|v| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    })
+}
+
+/// Linear RGB (0..1) to sRGB, for the colors Godot receives as `Color` (ambient light).
+pub fn linear_to_srgb(c: Rgb) -> Rgb {
+    c.map(|v| {
+        if v <= 0.003_130_8 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    })
+}
+
+/// One row of the time-of-day light table: a human moment, the sun altitude where it applies and
+/// its colors. Sky colors are linear RGB (the shader space); `sun` is sRGB (a Godot light color).
+///
+/// The table is keyed by sun altitude because that is what the sky responds to. The moments and
+/// what each one must look like (item 121):
+///
+/// | Moment           | Sun altitude | Look |
+/// |------------------|--------------|------|
+/// | night            | below -12    | deep navy zenith, warm city glow, moon and lamps as before |
+/// | blue hour        | -12 .. -6    | deep blues with a coral afterglow on the sunset side |
+/// | sunrise / sunset | -6 .. 0      | peach-orange sun (`sun_low`), soft contrast, long shadows (cool at dawn, warm at dusk) |
+/// | golden hour      | 0 .. 8       | orange/coral glow, long warm shadows, pale blue zenith |
+/// | morning          | 8 .. 30      | warm white sun (`sun_high`), clear saturated blue sky, crisp shadows |
+/// | noon             | 30 .. 70     | neutral-warm white sun, deep blue zenith, pale hazy horizon, high but unclipped contrast, short blue-violet shadows |
+/// | afternoon        | any, west    | the same altitude sampled ~4 deg lower plus a warm sun bias: golden |
+/// | apex             | 70 .. 90     | the sun overhead; energy and sky keep rising instead of clamping |
+///
+/// The afternoon is a direction, not an altitude: `afternoon_warmth` turns the sun's hour angle
+/// into a 0..1 weight and the table is sampled that much lower, so 15:30 is warmer than 09:00 at
+/// the same sun height. Theme anchors: `sun_high` is the sun at noon, `sun_low` the sun at the
+/// horizon, `sky_day` the deep blue of the zenith, `sky_horizon` the pale horizon and
+/// `shadow_tint` feeds the ambient fill (see `ambient_tint`).
+// `name` and `description` document the table for a human reader and are asserted by the tests;
+// the frame path only reads the colors and the altitude.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub struct Moment {
+    pub name: &'static str,
+    pub description: &'static str,
+    /// Sun altitude of the row, in degrees.
+    pub key_alt_deg: f64,
+    pub zenith: Rgb,
+    pub mid: Rgb,
+    pub horizon: Rgb,
+    pub sun: Rgb,
+    pub glow: Rgb,
+    pub glow_hi: Rgb,
+    /// How warm the ambient fill is on this row: 0 blue-violet (cool shadows), 1 warm gray
+    /// (golden-hour shadows). See `ambient_tint`.
+    pub ambient_warmth: f32,
+}
+
+/// Builds the seven rows of the table from the theme anchors. Called per frame; it is only a
+/// handful of color mixes, no allocation.
+pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
+    let day = srgb_to_linear(anchors.sky_day);
+    let pale = srgb_to_linear(anchors.sky_horizon);
+    // Deep zenith: the theme's day blue with the low channels pulled down. The top of the sky
+    // stays saturated instead of fading into the horizon's pale gray.
+    let deep = clamp01([0.53 * day[0], 0.65 * day[1], 1.09 * day[2]]);
+    let apex = clamp01([deep[0] * 1.08, deep[1] * 1.06, deep[2] * 1.08]);
+    let warm_white: Rgb = [1.0, 0.96, 0.90];
+    [
+        Moment {
+            name: "night",
+            description: "Deep navy sky with a warm city glow at the horizon; the moon and the street lamps light the scene.",
+            key_alt_deg: -18.0,
+            zenith: [0.006, 0.012, 0.036],
+            mid: [0.014, 0.024, 0.060],
+            horizon: [0.050, 0.055, 0.090],
+            sun: [0.10, 0.12, 0.24],
+            glow: [0.30, 0.16, 0.24],
+            glow_hi: [0.40, 0.26, 0.38],
+            ambient_warmth: 0.0,
+        },
+        Moment {
+            name: "blue hour",
+            description: "Deep blues with a coral afterglow on the sunset side; the first lamps and windows come on.",
+            key_alt_deg: -6.0,
+            zenith: [0.025, 0.045, 0.130],
+            mid: [0.090, 0.125, 0.280],
+            horizon: [0.160, 0.170, 0.300],
+            sun: [0.35, 0.20, 0.28],
+            glow: [0.95, 0.38, 0.30],
+            glow_hi: [0.95, 0.70, 0.45],
+            ambient_warmth: 0.15,
+        },
+        Moment {
+            name: "sunrise / sunset",
+            description: "Peach-orange sun, soft contrast and long shadows (cool at dawn, warm at dusk); the zenith is still petrol blue.",
+            key_alt_deg: -0.5,
+            zenith: [0.045, 0.150, 0.300],
+            mid: [0.260, 0.250, 0.420],
+            horizon: [0.300, 0.340, 0.520],
+            sun: lerp3(anchors.sun_low, [1.0, 0.42, 0.24], 0.35),
+            glow: [1.0, 0.42, 0.15],
+            glow_hi: [1.0, 0.70, 0.35],
+            ambient_warmth: 0.85,
+        },
+        Moment {
+            name: "golden hour",
+            description: "Orange/coral glow, long warm shadows and a pale blue zenith; the sun is warm white with a golden edge.",
+            key_alt_deg: 6.0,
+            zenith: [0.075, 0.220, 0.550],
+            mid: [0.300, 0.360, 0.620],
+            horizon: [0.600, 0.620, 0.750],
+            sun: lerp3(anchors.sun_low, anchors.sun_high, 0.45),
+            glow: [1.0, 0.52, 0.20],
+            glow_hi: [1.0, 0.82, 0.45],
+            ambient_warmth: 0.85,
+        },
+        Moment {
+            name: "morning",
+            description: "Warm white sun, a clear saturated blue sky and crisp shadows; contrast is already high.",
+            key_alt_deg: 14.0,
+            zenith: clamp01([0.48 * day[0], 0.59 * day[1], 0.89 * day[2]]),
+            mid: lerp3(day, pale, 0.18),
+            horizon: lerp3(pale, day, 0.10),
+            sun: lerp3(anchors.sun_low, anchors.sun_high, 0.80),
+            glow: [1.0, 0.72, 0.50],
+            glow_hi: [1.0, 0.92, 0.75],
+            ambient_warmth: 0.05,
+        },
+        Moment {
+            name: "noon",
+            description: "Neutral-warm white sun, deep blue zenith and a pale hazy horizon; high contrast without clipping, short blue-violet shadows.",
+            key_alt_deg: 45.0,
+            zenith: deep,
+            mid: lerp3(day, pale, 0.28),
+            horizon: lerp3(pale, warm_white, 0.12),
+            sun: anchors.sun_high,
+            glow: [1.0, 0.80, 0.62],
+            glow_hi: [1.0, 0.95, 0.85],
+            ambient_warmth: 0.0,
+        },
+        Moment {
+            name: "apex",
+            description: "The sun overhead: the table keeps brightening instead of clamping at 6 degrees; the zenith is at its deepest.",
+            key_alt_deg: 90.0,
+            zenith: apex,
+            mid: lerp3(day, pale, 0.30),
+            horizon: lerp3(pale, warm_white, 0.15),
+            sun: anchors.sun_high,
+            glow: [1.0, 0.82, 0.66],
+            glow_hi: [1.0, 0.96, 0.88],
+            ambient_warmth: 0.0,
+        },
+    ]
+}
+
+/// Interpolated colors at one sun altitude.
+#[derive(Clone, Copy, Debug)]
+struct Sample {
+    zenith: Rgb,
+    mid: Rgb,
+    horizon: Rgb,
+    sun: Rgb,
+    glow: Rgb,
+    glow_hi: Rgb,
+    ambient_warmth: f32,
+}
+
+impl Sample {
+    fn of(m: &Moment) -> Self {
+        Self {
+            zenith: m.zenith,
+            mid: m.mid,
+            horizon: m.horizon,
+            sun: m.sun,
+            glow: m.glow,
+            glow_hi: m.glow_hi,
+            ambient_warmth: m.ambient_warmth,
+        }
+    }
+}
+
+fn sample_table(table: &[Moment; 7], alt_deg: f64) -> Sample {
+    let clamped = alt_deg.clamp(table[0].key_alt_deg, table[6].key_alt_deg);
+    for pair in table.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if clamped <= b.key_alt_deg {
+            let t = ((clamped - a.key_alt_deg) / (b.key_alt_deg - a.key_alt_deg)) as f32;
+            return Sample {
+                zenith: lerp3(a.zenith, b.zenith, t),
+                mid: lerp3(a.mid, b.mid, t),
+                horizon: lerp3(a.horizon, b.horizon, t),
+                sun: lerp3(a.sun, b.sun, t),
+                glow: lerp3(a.glow, b.glow, t),
+                glow_hi: lerp3(a.glow_hi, b.glow_hi, t),
+                ambient_warmth: a.ambient_warmth + (b.ambient_warmth - a.ambient_warmth) * t,
+            };
+        }
+    }
+    Sample::of(&table[6])
+}
+
+/// Effective altitude lost by the afternoon sun in the table, in degrees.
+const AFTERNOON_SHIFT_DEG: f64 = 4.0;
+/// How far the afternoon sun color is pulled toward `sun_low`, 0..1 of the gap.
+const AFTERNOON_SUN_WARMTH: f32 = 0.10;
+/// Hour angle where the afternoon warm bias starts and where it is full, in degrees.
+const AFTERNOON_HA_START_DEG: f32 = 5.0;
+const AFTERNOON_HA_FULL_DEG: f32 = 45.0;
+
+/// Hour angle of the sun, in degrees (-180..180): negative before solar noon, positive after it.
+/// Uses the same low-precision solar position as `sun`, so it works in both hemispheres.
+pub fn sun_hour_angle_deg(unix_s: f64) -> f64 {
+    let jd = julian_day(unix_s);
+    let lon = sun_ecliptic_lon_rad(jd);
+    let eps = obliquity_rad(jd);
+    let ra_deg = (eps.cos() * lon.sin()).atan2(lon.cos()).to_degrees();
+    let (_, home_lon) = SKY_HOME.lock().map(|h| *h).unwrap_or(DEFAULT_HOME_DEG);
+    let gmst_deg = (280.46061837 + 360.98564736629 * (jd - JD_J2000)).rem_euclid(360.0);
+    (gmst_deg + home_lon - ra_deg + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// Afternoon weight 0..1 from the hour angle: 0 until 5 degrees past solar noon, 1 by 45 degrees.
+pub fn afternoon_warmth(hour_angle_deg: f64) -> f32 {
+    smooth(
+        AFTERNOON_HA_START_DEG,
+        AFTERNOON_HA_FULL_DEG,
+        hour_angle_deg as f32,
+    )
+}
+
+fn look_colors(anchors: &LightLook, alt_deg: f64, afternoon: f32) -> Sample {
+    let afternoon = afternoon.clamp(0.0, 1.0);
+    let table = moment_table(anchors);
+    let mut sample = sample_table(&table, alt_deg - AFTERNOON_SHIFT_DEG * f64::from(afternoon));
+    if afternoon > 0.0 {
+        sample.sun = lerp3(
+            sample.sun,
+            anchors.sun_low,
+            AFTERNOON_SUN_WARMTH * afternoon,
+        );
+    }
+    // The same low sun has cool shadows at dawn and warm ones at dusk. Use the unshifted row for
+    // the warmth (the afternoon shift would push the sunset row down into the blue hour) and let
+    // the warm fill of the golden rows apply only on the afternoon side.
+    let warmth = sample_table(&table, alt_deg).ambient_warmth;
+    sample.ambient_warmth = warmth * (0.25 + 0.75 * afternoon);
+    sample
+}
+
+/// Sun color by altitude, morning side, sRGB.
+// Kept as a table accessor for tests and later lighting slices; the frame path reads `SkyLook`.
+#[allow(dead_code)]
+pub fn sun_tint(sun_alt_deg: f64) -> Rgb {
+    sun_tint_at(sun_alt_deg, 0.0)
+}
+
+/// Sun color by altitude with the afternoon warm bias 0..1, sRGB.
+#[allow(dead_code)]
+pub fn sun_tint_at(sun_alt_deg: f64, afternoon: f32) -> Rgb {
+    look_colors(&style::light_look(), sun_alt_deg, afternoon).sun
+}
+
+/// Share of the sun energy left at the horizon; the air-mass term supplies the rest.
+const SUN_HORIZON_ENERGY: f64 = 0.45;
+
+/// Direct sun energy: zero at civil twilight, a steep sunrise ramp, then the air-mass term keeps
+/// rising all the way to the zenith (it is not clamped at `SUN_FULL_DEG`).
+pub fn sun_energy(sun_alt_deg: f64, max: f64) -> f64 {
+    let twilight = ((sun_alt_deg - SUN_DARK_DEG) / (0.0 - SUN_DARK_DEG)).clamp(0.0, 1.0);
+    let air_mass = if sun_alt_deg > 0.0 {
+        sun_alt_deg.to_radians().sin().max(0.0).sqrt()
+    } else {
+        0.0
+    };
+    max * twilight * (SUN_HORIZON_ENERGY + (1.0 - SUN_HORIZON_ENERGY) * air_mass)
+}
+
+/// Horizon color on the side opposite the sun, linear RGB (also the base of the depth fog).
+#[allow(dead_code)]
 pub fn horizon_tint(sun_alt_deg: f64) -> Rgb {
-    gradient(
-        &[
-            (-12.0, [0.07, 0.07, 0.12]),
-            (-6.0, [0.10, 0.12, 0.26]),
-            (-2.0, [0.22, 0.22, 0.36]),
-            (2.0, [0.45, 0.48, 0.62]),
-            (12.0, [0.70, 0.82, 0.95]),
-            (25.0, [0.72, 0.86, 1.0]),
-        ],
-        sun_alt_deg,
-    )
+    look_colors(&style::light_look(), sun_alt_deg, 0.0).horizon
 }
 
-/// Faixa intermediária do céu (entre horizonte e topo) do lado oposto ao sol.
+/// Intermediate sky band (between horizon and zenith) on the side opposite the sun, linear RGB.
+#[allow(dead_code)]
 pub fn mid_tint(sun_alt_deg: f64) -> Rgb {
-    gradient(
-        &[
-            (-12.0, [0.02, 0.03, 0.08]),
-            (-6.0, [0.12, 0.16, 0.30]),
-            (-2.0, [0.36, 0.30, 0.40]),
-            (2.0, [0.62, 0.60, 0.68]),
-            (12.0, [0.66, 0.80, 0.95]),
-            (25.0, [0.72, 0.86, 1.0]),
-        ],
-        sun_alt_deg,
-    )
+    look_colors(&style::light_look(), sun_alt_deg, 0.0).mid
 }
 
-/// Cor do topo do céu, pela altura do sol: azul-petróleo no crepúsculo, azul-escuro à noite.
+/// Zenith color, linear RGB: deep and saturated at noon, petrol blue at dusk, navy at night.
+#[allow(dead_code)]
 pub fn zenith_tint(sun_alt_deg: f64) -> Rgb {
-    gradient(
-        &[
-            (-12.0, [0.01, 0.02, 0.06]),
-            (-6.0, [0.04, 0.06, 0.15]),
-            (-2.0, [0.06, 0.16, 0.26]),
-            (1.0, [0.08, 0.24, 0.32]),
-            (6.0, [0.12, 0.32, 0.55]),
-            (12.0, [0.18, 0.38, 0.80]),
-            (25.0, [0.22, 0.48, 0.94]),
-        ],
-        sun_alt_deg,
-    )
+    look_colors(&style::light_look(), sun_alt_deg, 0.0).zenith
 }
 
-/// Brilho baixo do lado do ocaso: rosa escuro com o sol bem abaixo, laranja intenso no ocaso.
+/// Low glow band on the sunset side, linear RGB.
+#[allow(dead_code)]
 pub fn glow_tint(sun_alt_deg: f64) -> Rgb {
-    gradient(
-        &[
-            (-10.0, [0.45, 0.20, 0.32]),
-            (-5.0, [0.95, 0.38, 0.30]),
-            (-1.0, [1.0, 0.40, 0.12]),
-            (3.0, [1.0, 0.52, 0.20]),
-            (10.0, [1.0, 0.70, 0.45]),
-        ],
-        sun_alt_deg,
-    )
+    look_colors(&style::light_look(), sun_alt_deg, 0.0).glow
 }
 
-/// Banda alta do lado do ocaso: amarelo pálido logo acima do laranja.
+/// Upper glow band on the sunset side, linear RGB.
+#[allow(dead_code)]
 pub fn glow_hi_tint(sun_alt_deg: f64) -> Rgb {
-    gradient(
-        &[
-            (-10.0, [0.55, 0.30, 0.45]),
-            (-3.0, [0.95, 0.70, 0.45]),
-            (1.0, [1.0, 0.85, 0.45]),
-            (6.0, [1.0, 0.92, 0.70]),
-        ],
-        sun_alt_deg,
-    )
+    look_colors(&style::light_look(), sun_alt_deg, 0.0).glow_hi
+}
+
+/// Gain that turns the sky luminance into the brightness of the cloud veil (same in the shader):
+/// clouds are lit by the sky, so a cloudy night stays dark and a cloudy noon stays light gray.
+pub const CLOUD_LIFT_GAIN: f32 = 2.5;
+
+/// Warm gray of a fully overcast sky, linear RGB: the pale horizon anchor pulled toward a light
+/// warm gray, so an overcast noon reads as natural gray instead of flat white or blue.
+pub fn cloud_tint(anchors: &LightLook) -> Rgb {
+    let pale = srgb_to_linear(anchors.sky_horizon);
+    lerp3(pale, [0.435, 0.404, 0.352], 0.70)
+}
+
+/// Fraction of the theme's shadow tint mixed into the ambient fill.
+const AMBIENT_SHADOW_MIX: f32 = 0.40;
+/// Warm gray target of the golden-hour ambient fill, sRGB.
+const AMBIENT_WARM: Rgb = [0.60, 0.50, 0.45];
+
+/// Ambient fill color for the faces the sun does not reach, sRGB (a Godot light color): the sky's
+/// mid color, kept saturated, blended toward the theme's `shadow_tint` and pushed toward blue and
+/// a touch of red, so shadows read blue-violet instead of neutral gray. `warm` 0..1 moves the fill
+/// toward a warm gray for the golden hour, whose shadows are long and warm.
+pub fn ambient_tint(mid: Rgb, shadow_tint: Rgb, warm: f32) -> Rgb {
+    let sky = linear_to_srgb(mid);
+    let violet = [
+        (shadow_tint[0] * 1.06).clamp(0.0, 1.0),
+        (shadow_tint[1] * 0.75).clamp(0.0, 1.0),
+        (shadow_tint[2] * 1.12).clamp(0.0, 1.0),
+    ];
+    let fill = lerp3(sky, violet, AMBIENT_SHADOW_MIX);
+    lerp3(fill, AMBIENT_WARM, warm.clamp(0.0, 1.0))
 }
 
 /// Parâmetros do céu para o shader (`godot/shaders/sky.gdshader`) e para a neblina, pela altura
@@ -387,25 +625,46 @@ pub struct SkyLook {
     pub moon_phase: f32,
     /// Visibilidade do disco da lua, 0..1 (noite e lua acima do horizonte).
     pub moon_visibility: f32,
+    /// Warm gray of the overcast sky, linear RGB (the shader's `cloud_tint` uniform).
+    pub cloud_tint: Rgb,
+    /// Cloud cover 0..1 driving the shader's gray veil and the tone of the fog.
+    pub cloud_cover: f32,
+    /// Theme shadow tint, sRGB, kept for tests and later slices.
+    pub shadow_tint: Rgb,
+    /// Ambient fill of the shaded faces, sRGB (see `ambient_tint`).
+    pub ambient: Rgb,
 }
 
-/// Parâmetros do céu para uma altura do sol, luz global 0..1 e estado da lua.
-pub fn sky_look(sun_alt_deg: f64, light: f64, moon: &MoonState) -> SkyLook {
+/// Parâmetros do céu para uma altura do sol, luz global 0..1, estado da lua, weight of the
+/// afternoon warm bias 0..1 and cloud cover 0..1.
+pub fn sky_look(
+    sun_alt_deg: f64,
+    light: f64,
+    moon: &MoonState,
+    afternoon: f32,
+    cloud_cover: f32,
+) -> SkyLook {
     let alt = sun_alt_deg as f32;
+    let anchors = style::light_look();
+    let colors = look_colors(&anchors, sun_alt_deg, afternoon);
     SkyLook {
-        zenith: zenith_tint(sun_alt_deg),
-        mid: mid_tint(sun_alt_deg),
-        horizon: horizon_tint(sun_alt_deg),
-        glow: glow_tint(sun_alt_deg),
-        glow_hi: glow_hi_tint(sun_alt_deg),
+        zenith: colors.zenith,
+        mid: colors.mid,
+        horizon: colors.horizon,
+        glow: colors.glow,
+        glow_hi: colors.glow_hi,
         glow_strength: smooth(-10.0, -5.0, alt) * (1.0 - smooth(2.0, 8.0, alt)),
         halo_strength: 0.6 * smooth(-12.0, -4.0, alt) * (1.0 - 0.6 * smooth(8.0, 30.0, alt)),
-        sun_color: sun_tint(sun_alt_deg),
+        sun_color: colors.sun,
         sun_disk: smooth(-1.5, 0.0, alt),
         star_strength: smooth(0.15, 0.05, light as f32),
         moon_phase: moon.illumination as f32,
         moon_visibility: smooth(-1.0, 2.0, moon.position.altitude_deg as f32)
             * (1.0 - smooth(-4.0, 2.0, alt)),
+        cloud_tint: cloud_tint(&anchors),
+        cloud_cover: cloud_cover.clamp(0.0, 1.0),
+        shadow_tint: anchors.shadow_tint,
+        ambient: ambient_tint(colors.mid, anchors.shadow_tint, colors.ambient_warmth),
     }
 }
 
@@ -431,7 +690,14 @@ pub fn sky_color(look: &SkyLook, sun_dir: [f32; 3], eye: [f32; 3]) -> Rgb {
     // Halo: espalhamento para a frente em volta do sol.
     let cs = (eye[0] * sun_dir[0] + eye[1] * sun_dir[1] + eye[2] * sun_dir[2]).max(0.0);
     let halo = look.halo_strength * cs.powi(6) * 0.5;
-    [0, 1, 2].map(|i| c[i] + look.glow_hi[i] * halo)
+    let c = [0, 1, 2].map(|i| c[i] + look.glow_hi[i] * halo);
+    // Cloud veil, identical to the shader's last mix: heavier near the horizon, so the zenith
+    // keeps some blue and an overcast noon is a natural gray instead of flat white. The gray is
+    // scaled by the sky's own brightness, so a cloudy night stays dark instead of glowing.
+    let lift = ((0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) * CLOUD_LIFT_GAIN).clamp(0.0, 1.0);
+    let cloud = look.cloud_tint.map(|v| v * lift);
+    let veil = (look.cloud_cover * (0.55 + 0.25 * (1.0 - h))).clamp(0.0, 0.95);
+    lerp3(c, cloud, veil)
 }
 
 fn norm2(v: [f32; 2]) -> [f32; 2] {
@@ -726,6 +992,223 @@ mod tests {
         }
     }
 
+    fn saturation(c: Rgb) -> f32 {
+        let max = c[0].max(c[1]).max(c[2]);
+        let min = c[0].min(c[1]).min(c[2]);
+        if max <= 0.0 {
+            0.0
+        } else {
+            (max - min) / max
+        }
+    }
+
+    #[test]
+    fn moment_table_is_documented_and_monotonic() {
+        let anchors = crate::style::light_look();
+        let table = moment_table(&anchors);
+        assert_eq!(table.len(), 7);
+        for pair in table.windows(2) {
+            assert!(
+                pair[0].key_alt_deg < pair[1].key_alt_deg,
+                "table out of order at {}",
+                pair[1].name
+            );
+            for (what, a, b) in [
+                ("zenith", luma(pair[0].zenith), luma(pair[1].zenith)),
+                ("mid", luma(pair[0].mid), luma(pair[1].mid)),
+                ("horizon", luma(pair[0].horizon), luma(pair[1].horizon)),
+            ] {
+                assert!(
+                    a <= b + 1e-6,
+                    "{what} luma drops from {} to {}",
+                    pair[0].name,
+                    pair[1].name
+                );
+            }
+        }
+        for m in table {
+            assert!(!m.name.is_empty());
+            assert!(
+                m.description.len() > 20,
+                "row '{}' has no human description",
+                m.name
+            );
+            for c in [m.zenith, m.mid, m.horizon, m.sun, m.glow, m.glow_hi] {
+                assert!(
+                    c.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+                    "row '{}' has an invalid color {c:?}",
+                    m.name
+                );
+            }
+            assert!((0.0..=1.0).contains(&m.ambient_warmth));
+        }
+        // Sampling clamps outside the table instead of extrapolating.
+        assert_eq!(zenith_tint(120.0), zenith_tint(90.0));
+        assert_eq!(zenith_tint(-90.0), zenith_tint(-18.0));
+    }
+
+    #[test]
+    fn noon_sun_matches_the_theme_anchor_and_is_not_gray() {
+        let anchors = crate::style::light_look();
+        let sun = sun_tint(80.0);
+        for i in 0..3 {
+            assert!(
+                (sun[i] - anchors.sun_high[i]).abs() <= 0.06,
+                "noon sun {sun:?} is far from the theme sun_high {:?}",
+                anchors.sun_high
+            );
+            // #FFF6E8 +-: still a neutral-warm white.
+            let target = [1.0, 0.965, 0.910][i];
+            assert!(
+                (sun[i] - target).abs() <= 0.07,
+                "noon sun {sun:?} is far from #FFF6E8"
+            );
+        }
+        assert!(
+            saturation(sun) >= 0.10,
+            "noon sun is gray, not warm white: {sun:?}"
+        );
+        assert!(
+            sun[0] >= sun[1] && sun[1] >= sun[2],
+            "noon sun is not warm: {sun:?}"
+        );
+    }
+
+    #[test]
+    fn ambient_fill_and_shadow_are_blue_violet_not_gray() {
+        let anchors = crate::style::light_look();
+        let shadow = anchors.shadow_tint;
+        assert!(
+            shadow[2] > shadow[0] && shadow[2] > shadow[1],
+            "theme shadow tint is not blue: {shadow:?}"
+        );
+        for alt in [-30.0, 17.0, 60.0] {
+            let look = sky_look(alt, 0.8, &no_moon(), 0.0, 0.0);
+            let fill = look.ambient;
+            assert!(
+                fill[2] > fill[0] + 0.05 && fill[2] > fill[1] + 0.05,
+                "ambient fill at {alt} deg is not blue: {fill:?}"
+            );
+            // Some red keeps the blue from reading as cyan; the fill is blue-violet, not gray.
+            assert!(
+                fill[0] > 0.6 * fill[2],
+                "ambient fill at {alt} deg is not violet: {fill:?}"
+            );
+        }
+        // Golden hour is the documented exception: long warm shadows, but only at dusk.
+        let golden = sky_look(6.0, 0.8, &no_moon(), 1.0, 0.0).ambient;
+        assert!(
+            golden[0] > golden[2],
+            "golden-hour ambient is not warm: {golden:?}"
+        );
+        let dawn = sky_look(0.0, 0.8, &no_moon(), 0.0, 0.0).ambient;
+        let dusk = sky_look(0.0, 0.8, &no_moon(), 1.0, 0.0).ambient;
+        assert!(
+            dawn[2] > dawn[0],
+            "dawn ambient is not a cool shadow: {dawn:?}"
+        );
+        assert!(
+            dusk[0] > dusk[2],
+            "dusk ambient is not a warm shadow: {dusk:?}"
+        );
+    }
+
+    #[test]
+    fn sun_energy_keeps_rising_above_six_degrees() {
+        let max = 1.45;
+        let (e6, e20, e45, e89) = (
+            sun_energy(6.0, max),
+            sun_energy(20.0, max),
+            sun_energy(45.0, max),
+            sun_energy(89.0, max),
+        );
+        assert!(
+            e6 < e20 && e20 < e45 && e45 < e89,
+            "sun energy is clamped above 6 deg: {e6} {e20} {e45} {e89}"
+        );
+        assert!((e89 - max).abs() < 0.01, "zenith sun energy {e89} != {max}");
+        assert_eq!(sun_energy(-6.0, max), 0.0);
+        let mut prev = -1.0;
+        let mut alt = -6.0;
+        while alt <= 90.0 {
+            let energy = sun_energy(alt, 1.0);
+            assert!(energy >= prev - 1e-9, "sun energy drops at {alt} deg");
+            prev = energy;
+            alt += 0.5;
+        }
+    }
+
+    #[test]
+    fn overcast_noon_is_a_natural_warm_gray_not_flat_white() {
+        let anchors = crate::style::light_look();
+        let gray = cloud_tint(&anchors);
+        assert!(
+            gray.iter().all(|v| (0.0..=1.0).contains(v)),
+            "cloud tint out of range: {gray:?}"
+        );
+        assert!(
+            saturation(gray) <= 0.08,
+            "cloud tint is too saturated: {gray:?}"
+        );
+        assert!(gray[0] >= gray[2], "cloud tint is not warm: {gray:?}");
+
+        let sun_dir = [0.0_f32, 0.8, -0.6];
+        let clear = sky_look(60.0, 1.0, &no_moon(), 0.0, 0.0);
+        let cloudy = sky_look(60.0, 1.0, &no_moon(), 0.0, 0.7);
+        let up = [0.0_f32, 1.0, 0.0];
+        let clear_top = sky_color(&clear, sun_dir, up);
+        let cloudy_top = sky_color(&cloudy, sun_dir, up);
+        assert!(
+            cloudy_top[0] / cloudy_top[2] > clear_top[0] / clear_top[2] + 0.1,
+            "the cloud veil does not warm the zenith: {clear_top:?} -> {cloudy_top:?}"
+        );
+        assert!(luma(cloudy_top) > luma(clear_top));
+        assert!(cloudy_top.iter().all(|v| *v <= 1.0));
+
+        // Full overcast at the horizon is gray, not the pale blue of a clear sky.
+        let full = sky_look(60.0, 1.0, &no_moon(), 0.0, 1.0);
+        let horizon = sky_color(&full, sun_dir, [1.0, 0.0, 0.0]);
+        assert!(
+            saturation(horizon) < 0.08,
+            "full overcast horizon is not gray: {horizon:?}"
+        );
+    }
+
+    #[test]
+    fn afternoon_is_warmer_than_morning_at_the_same_altitude() {
+        let morning = sun_tint_at(30.0, 0.0);
+        let afternoon = sun_tint_at(30.0, 1.0);
+        assert!(
+            morning[2] - afternoon[2] > 0.01,
+            "afternoon {afternoon:?} is not warmer than morning {morning:?}"
+        );
+        assert!(
+            luma(look_colors(&crate::style::light_look(), 30.0, 1.0).zenith)
+                <= luma(zenith_tint(30.0)) + 1e-6
+        );
+        assert_eq!(afternoon_warmth(-40.0), 0.0);
+        assert_eq!(afternoon_warmth(60.0), 1.0);
+        assert!((0.0..1.0).contains(&afternoon_warmth(20.0)));
+    }
+
+    #[test]
+    fn sky_shader_mirrors_the_cloud_and_haze_parameters() {
+        const SHADER: &str = include_str!("../../../../godot/shaders/sky.gdshader");
+        for needle in [
+            "uniform vec3 cloud_tint",
+            "uniform float cloud_cover",
+            "const float CLOUD_LIFT_GAIN = 2.5;",
+            "float veil = clamp(cloud_cover * (0.55 + 0.25 * (1.0 - e.y)), 0.0, 0.95);",
+            "col = mix(col, cloud_tint * cloud_lift, veil);",
+            "const float WARM_HAZE = 0.35;",
+        ] {
+            assert!(
+                SHADER.contains(needle),
+                "sky.gdshader is missing {needle:?}: keep it in sync with sky.rs"
+            );
+        }
+    }
+
     #[test]
     fn sky_colors_are_finite_and_in_unit_range() {
         let moon = MoonState {
@@ -737,35 +1220,40 @@ mod tests {
         let mut alt = -90.0;
         while alt <= 90.0 {
             for light in [0.0, 0.5, 1.0] {
-                let look = sky_look(alt, light, &moon);
-                for c in [
-                    look.zenith,
-                    look.mid,
-                    look.horizon,
-                    look.glow,
-                    look.glow_hi,
-                    look.sun_color,
-                ] {
-                    assert!(
-                        c.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
-                        "alt {alt}: {c:?}"
-                    );
-                }
-                for x in [
-                    look.glow_strength,
-                    look.halo_strength,
-                    look.sun_disk,
-                    look.star_strength,
-                    look.moon_visibility,
-                ] {
-                    assert!(x.is_finite() && (0.0..=1.0).contains(&x), "alt {alt}: {x}");
-                }
-                for eye in eyes {
-                    let c = sky_color(&look, sun_dir, eye);
-                    assert!(
-                        c.iter().all(|v| v.is_finite() && (0.0..=1.5).contains(v)),
-                        "alt {alt}: {c:?}"
-                    );
+                for cover in [0.0, 0.7, 1.0] {
+                    let look = sky_look(alt, light, &moon, 0.0, cover);
+                    for c in [
+                        look.zenith,
+                        look.mid,
+                        look.horizon,
+                        look.glow,
+                        look.glow_hi,
+                        look.sun_color,
+                        look.cloud_tint,
+                        look.shadow_tint,
+                        look.ambient,
+                    ] {
+                        assert!(
+                            c.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+                            "alt {alt}: {c:?}"
+                        );
+                    }
+                    for x in [
+                        look.glow_strength,
+                        look.halo_strength,
+                        look.sun_disk,
+                        look.star_strength,
+                        look.moon_visibility,
+                    ] {
+                        assert!(x.is_finite() && (0.0..=1.0).contains(&x), "alt {alt}: {x}");
+                    }
+                    for eye in eyes {
+                        let c = sky_color(&look, sun_dir, eye);
+                        assert!(
+                            c.iter().all(|v| v.is_finite() && (0.0..=1.5).contains(v)),
+                            "alt {alt}: {c:?}"
+                        );
+                    }
                 }
             }
             alt += 0.5;
@@ -798,7 +1286,7 @@ mod tests {
     #[test]
     fn night_sky_is_dark_but_not_black() {
         for alt in [-90.0, -30.0, -12.0] {
-            let look = sky_look(alt, 0.0, &no_moon());
+            let look = sky_look(alt, 0.0, &no_moon(), 0.0, 0.0);
             assert!(luma(look.zenith) > 0.01, "zenith at {alt} too dark");
             assert!(
                 luma(look.horizon) > luma(look.zenith),
@@ -810,7 +1298,7 @@ mod tests {
     #[test]
     fn sunset_glows_on_the_sun_side_and_stays_blue_opposite() {
         let alt = -1.0;
-        let look = sky_look(alt, 0.5, &no_moon());
+        let look = sky_look(alt, 0.5, &no_moon(), 0.0, 0.0);
         // Sol no azimute 250 (oeste-sudoeste), abaixo do horizonte; olhar no mesmo azimute e
         // olhar para o lado oposto (70).
         let sun_dir = [-0.9_f32, -0.02, 0.2];
@@ -835,10 +1323,11 @@ mod tests {
     #[test]
     fn stars_only_when_light_is_low() {
         let moon = no_moon();
-        assert_eq!(sky_look(-30.0, 0.15, &moon).star_strength, 0.0);
-        assert_eq!(sky_look(-30.0, 0.6, &moon).star_strength, 0.0);
-        assert_eq!(sky_look(-30.0, 0.0, &moon).star_strength, 1.0);
-        let mid = sky_look(-30.0, 0.10, &moon).star_strength;
+        let look = |light| sky_look(-30.0, light, &moon, 0.0, 0.0);
+        assert_eq!(look(0.15).star_strength, 0.0);
+        assert_eq!(look(0.6).star_strength, 0.0);
+        assert_eq!(look(0.0).star_strength, 1.0);
+        let mid = look(0.10).star_strength;
         assert!((0.0..1.0).contains(&mid), "star fade {mid}");
     }
 }
