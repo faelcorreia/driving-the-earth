@@ -149,6 +149,37 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Ruas e bairros precisam de internet. Mostrando só as cidades.",
     ),
     ("hud.speed_unit", "km/h", "km/h"),
+    ("loading.title", "Loading", "Carregando"),
+    ("loading.opening_map", "Opening the map", "Abrindo o mapa"),
+    ("loading.reading_map", "Reading the map", "Lendo o mapa"),
+    (
+        "loading.building_tiles",
+        "Building the first blocks",
+        "Montando o terreno inicial",
+    ),
+    ("loading.placing_car", "Placing the car", "Posicionando o carro"),
+    (
+        "loading.environment",
+        "Turning on the lights",
+        "Acendendo as luzes",
+    ),
+    ("loading.ready", "Ready", "Pronto"),
+    (
+        "loading.hint",
+        "The first blocks load around the car.",
+        "Os primeiros quarteirões carregam ao redor do carro.",
+    ),
+    (
+        "loading.error",
+        "Could not load this map",
+        "Não foi possível carregar este mapa",
+    ),
+    (
+        "style.missing",
+        "Style '{id}' not found: using '{fallback}'",
+        "Estilo '{id}' não encontrado: usando '{fallback}'",
+    ),
+    ("style.active", "Style: {id}", "Estilo: {id}"),
     ("intro.title", "Driving the Earth", "Driving the Earth"),
 ];
 

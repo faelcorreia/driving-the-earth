@@ -14,21 +14,23 @@ use std::time::Instant;
 use godot::classes::file_access::ModeFlags;
 use godot::classes::{
     CanvasLayer, FileAccess, INode3D, MeshInstance3D, Node3D, ProjectSettings, RigidBody3D,
-    ShaderMaterial, StandardMaterial3D,
+    ShaderMaterial, StandardMaterial3D, Os,
 };
 use godot::prelude::*;
 
 use crate::environment::lamps::{delay_s, is_lit};
 use crate::environment::EnvironmentClock;
 use crate::geometry::lamps::LampPost;
-use crate::geometry::{mesh_cell_for, TileGeometry, GRASS_RGB};
+use crate::geometry::{mesh_cell_for, TileGeometry};
 use crate::home_store;
 use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::world_map::WorldMapView;
 use crate::render::{
-    building_body, building_material, material, solid_body, spawn_car, terrain_body,
+    building_body, building_material, material, road_material, solid_body, spawn_car, terrain_body,
+    terrain_material,
 };
+use crate::style;
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
 use crate::world::spawn::{find_spawn, find_spawn_near, inside_loaded_map};
@@ -39,8 +41,6 @@ use tileformat::units::lamps::LAMP_REAL_REACH_M;
 
 /// Height of the car above the terrain when spawned, in meters.
 const SPAWN_LIFT_M: f32 = 1.0;
-const TERRAIN_COLOR: (f32, f32, f32) = (GRASS_RGB[0], GRASS_RGB[1], GRASS_RGB[2]);
-const ROAD_COLOR: (f32, f32, f32) = (0.22, 0.22, 0.24);
 /// Tiles instantiated (nodes, meshes and collision shapes) on the main thread per frame.
 const TILES_PER_FRAME: usize = 2;
 /// Geometry requests the loader thread may have outstanding.
@@ -73,6 +73,11 @@ pub struct EarthWorld {
     #[init(val = GString::new())]
     #[export]
     map_id: GString,
+    /// Visual theme id (`godot/styles/<id>.json`). Empty: `--style <id>` from the command line,
+    /// else `lowpoly`.
+    #[init(val = GString::new())]
+    #[export]
+    style_id: GString,
     /// Cache root. `user://cache` by default; in development `res://../cache` is used instead
     /// when it exists. `res://` paths are resolved to the file system.
     #[init(val = GString::from(DEFAULT_CACHE_ROOT))]
@@ -223,6 +228,12 @@ fn read_last_map() -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
+/// Text of a theme file, or `None` when it is missing or cannot be read.
+fn read_style_file(path: &str) -> Option<String> {
+    let file = FileAccess::open(path, ModeFlags::READ)?;
+    Some(file.get_as_text().to_string())
+}
+
 /// Saves `id` as the last map opened. A failure is a warning: the game still runs.
 fn write_last_map(id: &str) {
     let Some(mut file) = FileAccess::open(LAST_MAP_PATH, ModeFlags::WRITE) else {
@@ -238,6 +249,7 @@ fn write_last_map(id: &str) {
 impl INode3D for EarthWorld {
     fn ready(&mut self) {
         self.base_mut().set_process(true);
+        self.load_style();
         let home = home_store::load();
         if let Some(h) = home {
             crate::environment::sky::set_home(h.lat, h.lon);
@@ -280,8 +292,8 @@ impl INode3D for EarthWorld {
             index.coords().len(),
             self.view_radius_m
         );
-        self.terrain_mat = Some(material(TERRAIN_COLOR));
-        self.road_mat = Some(material(ROAD_COLOR));
+        self.terrain_mat = Some(terrain_material());
+        self.road_mat = Some(road_material());
         self.vertex_mat = Some(material((1.0, 1.0, 1.0)));
         self.building_mat = building_material();
         if self.building_mat.is_none() {
@@ -505,6 +517,70 @@ impl INode3D for EarthWorld {
 }
 
 impl EarthWorld {
+    /// Reads the active theme and installs it: `--style <id>` from the Godot user args wins, then
+    /// the `style_id` export, then the default theme. A missing or broken file logs one warning
+    /// and keeps the built-in defaults (equal to `lowpoly.json`).
+    fn load_style(&self) {
+        let args: Vec<String> = Os::singleton()
+            .get_cmdline_user_args()
+            .as_slice()
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+        let exported = self.style_id.to_string();
+        let id = style::theme_id_from_args(&args)
+            .or_else(|| {
+                let id = exported.trim();
+                (!id.is_empty()).then(|| id.to_string())
+            })
+            .unwrap_or_else(|| style::DEFAULT_ID.to_string());
+        let path = format!("res://styles/{id}.json");
+        let (theme, source) = match read_style_file(&path) {
+            Some(text) => match style::parse(&text, &id) {
+                Ok(theme) => (theme, "file"),
+                Err(e) => {
+                    godot_warn!("style '{path}' is broken ({e}): using the built-in defaults");
+                    (style::builtin(&id), "built-in defaults")
+                }
+            },
+            None => {
+                godot_warn!("style '{path}' not found: using the built-in defaults");
+                (style::builtin(&id), "built-in defaults")
+            }
+        };
+        let palette = theme.world.palette;
+        let (light, ui) = (theme.light, theme.ui);
+        godot_print!(
+            "style '{}' active from {}: flat shading {}, bevel {} m in {} segment(s), shadow softness {}; palette grass {}, road {}, buildings {} {} {} {}, lamp {}, car {}; light sun {} / {}, sky {} / {}, shadow {}; ui panel {}, ink {}, accent {}, border {} {} px, radius {} px",
+            theme.id,
+            source,
+            theme.world.flat_shading,
+            theme.world.bevel_m,
+            theme.world.bevel_segments,
+            theme.world.shadow_softness,
+            style::to_hex(palette.grass),
+            style::to_hex(palette.road),
+            style::to_hex(palette.buildings[0]),
+            style::to_hex(palette.buildings[1]),
+            style::to_hex(palette.buildings[2]),
+            style::to_hex(palette.buildings[3]),
+            style::to_hex(palette.lamp),
+            style::to_hex(palette.car),
+            style::to_hex(light.sun_high),
+            style::to_hex(light.sun_low),
+            style::to_hex(light.sky_day),
+            style::to_hex(light.sky_horizon),
+            style::to_hex(light.shadow_tint),
+            style::to_hex(ui.panel),
+            style::to_hex(ui.ink),
+            style::to_hex(ui.accent),
+            style::to_hex(ui.border),
+            ui.border_width,
+            ui.corner_radius
+        );
+        style::install(theme);
+    }
+
     /// The cache root to open, and whether it is the repo cache of development. The repo cache
     /// replaces the default root only when the default is kept and the folder exists.
     fn resolved_cache_root(&self) -> (GString, bool) {

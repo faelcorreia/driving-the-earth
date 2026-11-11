@@ -17,6 +17,7 @@ pub(crate) mod world_map;
 pub(crate) mod world_map_detail;
 
 use crate::geometry::MeshData;
+use crate::style;
 use tileformat::units::{TERRAIN_FINE_CELL_M, TERRAIN_FINE_N};
 
 pub(crate) fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
@@ -29,6 +30,18 @@ pub(crate) fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
         true,
     );
     mat
+}
+
+/// Material of terrain without per-vertex ground cover: the grass color of the active theme.
+pub(crate) fn terrain_material() -> Gd<StandardMaterial3D> {
+    let grass = style::world_palette().grass;
+    material((grass[0], grass[1], grass[2]))
+}
+
+/// Material of the road ribbons: the asphalt color of the active theme.
+pub(crate) fn road_material() -> Gd<StandardMaterial3D> {
+    let road = style::road_rgb();
+    material((road[0], road[1], road[2]))
 }
 
 /// Instantiates the car at `position`, turned by `yaw` about +Y.

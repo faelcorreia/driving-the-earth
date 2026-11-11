@@ -9,6 +9,7 @@ mod intro;
 #[cfg(test)]
 mod measure;
 mod render;
+mod style;
 mod ui_text;
 mod world;
 

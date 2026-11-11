@@ -5,6 +5,10 @@ config/name="Driving the Earth"
 run/main_scene="res://intro.tscn"
 config/features=PackedStringArray("4.7")
 
+[autoload]
+
+Style="*res://style.gd"
+
 [rendering]
 
 textures/vram_compression/import_etc2_astc=true
