@@ -7,7 +7,8 @@ shader_type spatial;
 // Day: a 1.5 m x 1.2 m window (sill 1.0 m, 3 m pitch, 3 m floors) is a bluish-grey glass. Ground floor:
 // half of the buildings have a dark shop band instead. Night: a share of the windows of each building
 // (30-60%, by seed) is lit, warm or cold by seed, after a delay of 0..25 min after the street lamps.
-// Windows fade to the plain facade past ~200-260 m (no moire). No textures.
+// Windows fade to the plain facade past ~200-260 m (no moire). The facade is matte (no metallic,
+// roughness 1, low specular) so the low-poly facets read as flat paint. No textures.
 global uniform float lamp_on_time;
 global uniform float lamp_state;
 global uniform float lamp_now;
@@ -71,7 +72,9 @@ void fragment() {
 	facade = mix(facade, glass_color, win * glass_mix);
 	facade = mix(facade, COLOR.rgb * 0.45, band * 0.9);
 	ALBEDO = facade;
-	ROUGHNESS = 0.6;
+	METALLIC = 0.0;
+	SPECULAR = 0.15;
+	ROUGHNESS = 1.0;
 
 	// Night: the building lights up after its delay, and only some of its windows.
 	float since = lamp_now - lamp_on_time - seed * delay_max_s;
