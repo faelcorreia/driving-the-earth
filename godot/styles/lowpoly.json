@@ -1,0 +1,36 @@
+{
+  "id": "lowpoly",
+  "world": {
+    "textures": false,
+    "flat_shading": true,
+    "bevel_m": 0.22,
+    "bevel_segments": 1,
+    "shadow_softness": 1.0,
+    "palette": {
+      "grass": "#79A65A",
+      "cement": "#B9B4AA",
+      "sidewalk": "#CFC9BC",
+      "park": "#5F8C4B",
+      "water": "#5C93A6",
+      "road": "#3B3F46",
+      "buildings": ["#E4D5B7", "#D78E68", "#A9C3D0", "#C7A87D"],
+      "lamp": "#FFC24A",
+      "car": "#D9483B"
+    }
+  },
+  "light": {
+    "sun_high": "#FFF3DA",
+    "sun_low": "#FFB27A",
+    "sky_day": "#78B7E8",
+    "sky_horizon": "#E8F1F5",
+    "shadow_tint": "#8FA6C8"
+  },
+  "ui": {
+    "panel": "#F4EFE4",
+    "ink": "#2E2A26",
+    "accent": "#D9744A",
+    "border": "#8C7F6B",
+    "border_width": 2,
+    "corner_radius": 18
+  }
+}

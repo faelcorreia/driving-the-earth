@@ -1,7 +1,8 @@
 //! Tile geometry layer: terrain grid, road ribbons and junctions of one tile, as plain meshes.
 //! Pure Rust, with unit tests: no Godot types here (no `godot` import anywhere in this module).
-//! May import: `tileformat` (data contract) and `tilebake` (shared profile math). Nothing else in
-//! `gdext`. `world` and `render` use it; it must not use them.
+//! May import: `tileformat` (data contract), `tilebake` (shared profile math) and `style` (the
+//! active theme palette). Nothing else in `gdext`. `world` and `render` use it; it must not use
+//! them.
 
 mod building;
 mod field;
@@ -22,7 +23,6 @@ use tileformat::Tile;
 use building::building_mesh;
 use field::{Field, Surface};
 use ground::terrain_colors;
-pub use ground::GRASS_RGB;
 use junction::extend_junction_ends;
 use mesh::{normalize, world};
 pub use mesh::{MeshData, TileGeometry};

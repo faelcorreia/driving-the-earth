@@ -79,8 +79,6 @@ const UP: [f32; 3] = [0.0, 1.0, 0.0];
 const ROAD_LIFT_M: f32 = 0.5;
 /// Spacing of the road points kept for the strips, in meters.
 const ROAD_STEP_M: f64 = 40.0;
-/// Road color, the same as the detailed roads (`earth_world.rs`).
-const ROAD_RGB: (f32, f32, f32) = (0.22, 0.22, 0.24);
 
 /// Terrain of one ring. Cells inside `inner_half_m` are left out (the inner ring has them) and
 /// so are cells whose center lies in a tile of `loaded`. `height(x, y)` gives the height at local
@@ -482,7 +480,8 @@ impl TerrainLod {
             }
         });
         let mut road_material = StandardMaterial3D::new_gd();
-        road_material.set_albedo(Color::from_rgb(ROAD_RGB.0, ROAD_RGB.1, ROAD_RGB.2));
+        let road = crate::style::road_rgb();
+        road_material.set_albedo(Color::from_rgb(road[0], road[1], road[2]));
         TerrainLod {
             jobs: Some(jobs),
             results,

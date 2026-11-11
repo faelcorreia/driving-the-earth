@@ -5,23 +5,13 @@
 //! so the color changes smoothly from one vertex to the next. No outline: the sharp edge between
 //! classes waits for the constrained triangulation.
 use tileformat::units::{GROUND_CELL_M, GROUND_N};
-use tileformat::{Tile, GROUND_CONCRETE, GROUND_PARK, GROUND_SIDEWALK, GROUND_WATER};
+use tileformat::Tile;
 
-/// Grass and dirt, sRGB (the terrain color before the ground cover).
-pub const GRASS_RGB: [f32; 3] = [0.42, 0.55, 0.36];
-const CEMENT_RGB: [f32; 3] = [0.50, 0.50, 0.51];
-const SIDEWALK_RGB: [f32; 3] = [0.62, 0.62, 0.62];
-const PARK_RGB: [f32; 3] = [0.30, 0.45, 0.28];
-const WATER_RGB: [f32; 3] = [0.25, 0.38, 0.48];
+use crate::style;
 
+/// Color of a ground class, from the active theme palette (item 118).
 fn class_rgb(class: u8) -> [f32; 3] {
-    match class {
-        GROUND_CONCRETE => CEMENT_RGB,
-        GROUND_SIDEWALK => SIDEWALK_RGB,
-        GROUND_PARK => PARK_RGB,
-        GROUND_WATER => WATER_RGB,
-        _ => GRASS_RGB,
-    }
+    style::ground_rgb(class)
 }
 
 /// One RGBA color per terrain vertex of an `n` x `n` grid with side `cell_m` (row-major, `i` is y,
@@ -60,7 +50,7 @@ pub fn terrain_colors(tile: &Tile, n: usize, cell_m: f64) -> Vec<[f32; 4]> {
 mod tests {
     use super::*;
     use crate::geometry::tests::{grid, tile};
-    use tileformat::GROUND_GRASS;
+    use tileformat::{GROUND_CONCRETE, GROUND_GRASS};
 
     #[test]
     fn no_ground_means_no_colors() {
@@ -76,10 +66,12 @@ mod tests {
         t.ground[20 * GROUND_N + 20] = GROUND_CONCRETE;
         let c = terrain_colors(&t, 26, 10.0);
         let at = |i: usize, j: usize| c[i * 26 + j];
-        assert_eq!(at(0, 0), [GRASS_RGB[0], GRASS_RGB[1], GRASS_RGB[2], 1.0]);
+        let grass = style::ground_rgb(GROUND_GRASS);
+        let cement = style::ground_rgb(GROUND_CONCRETE);
+        assert_eq!(at(0, 0), [grass[0], grass[1], grass[2], 1.0]);
         // Vertex (10, 10) m: its window holds the cell (20, 20); the mean is 1/4 cement.
         let mix = |g: f32, c: f32| (3.0 * g + c) / 4.0;
-        assert!((at(10, 10)[0] - mix(GRASS_RGB[0], CEMENT_RGB[0])).abs() < 1e-6);
-        assert!((at(20, 20)[0] - GRASS_RGB[0]).abs() < 1e-6);
+        assert!((at(10, 10)[0] - mix(grass[0], cement[0])).abs() < 1e-6);
+        assert!((at(20, 20)[0] - grass[0]).abs() < 1e-6);
     }
 }
