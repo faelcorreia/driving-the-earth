@@ -16,7 +16,8 @@ use godot::classes::input::MouseMode;
 use godot::classes::node::ProcessMode;
 use godot::classes::{
     Button, Control, FileAccess, IControl, Input, InputEvent, InputEventMouseButton,
-    InputEventMouseMotion, Node3D, Os, ProjectSettings, RenderingServer, ThemeDb,
+    InputEventMouseMotion, Node3D, Os, ProjectSettings, RenderingServer, StyleBox, StyleBoxFlat,
+    ThemeDb,
 };
 use godot::global::{HorizontalAlignment, MouseButton};
 use godot::prelude::*;
@@ -24,6 +25,7 @@ use tilebake::dem::MapGrid;
 
 use super::world_map_detail::{Loader, RETRY_AFTER};
 use crate::home_store::{load as load_home, save as save_home};
+use crate::style;
 use crate::ui_text::{language, text, Lang};
 use worldmap::asset::{decode, WorldData};
 use worldmap::cities::{label_width_px, place, reserve, Placed};
@@ -70,7 +72,9 @@ const LABEL: Color = Color::from_rgb(0.12, 0.12, 0.12);
 const LABEL_OUTLINE: Color = Color::from_rgb(0.97, 0.97, 0.95);
 const MARKER: Color = Color::from_rgb(0.85, 0.12, 0.12);
 const CAR: Color = Color::from_rgb(0.85, 0.12, 0.12);
-const HUD: Color = Color::from_rgb(0.10, 0.10, 0.10);
+/// Opacity of the rounded panel behind the map hints and the status line. It is translucent so a
+/// little of the map shows through, but opaque enough for the ink text to stay readable.
+const PANEL_ALPHA: f32 = 0.86;
 
 /// Dot radius by city tier (0 the largest).
 const DOT_RADIUS: [f32; 4] = [4.0, 3.0, 2.5, 2.0];
@@ -204,6 +208,8 @@ pub struct WorldMapView {
     wanted_left: usize,
     /// Names, cities and texts, drawn above the roads (see `paint_top`).
     overlay: Option<Gd<Control>>,
+    /// Rounded panel behind the hint and the status, built from the active UI theme.
+    panel_style: Option<Gd<StyleBox>>,
     /// Road items per displayed tile (F17b).
     roads: HashMap<TileId, TileRoads>,
     /// Tiles drawn for the current view.
@@ -243,6 +249,7 @@ impl IControl for WorldMapView {
             view_key: None,
             wanted_left: 0,
             overlay: None,
+            panel_style: None,
             roads: HashMap::new(),
             shown: Vec::new(),
             bench: None,
@@ -294,11 +301,54 @@ impl IControl for WorldMapView {
         overlay.connect("draw", &draw_handler);
         self.base_mut().add_child(&overlay);
         self.overlay = Some(overlay);
+        let ui = style::ui_look();
+        let mut panel = StyleBoxFlat::new_gd();
+        panel.set_bg_color(Color::from_rgba(
+            ui.panel[0],
+            ui.panel[1],
+            ui.panel[2],
+            PANEL_ALPHA,
+        ));
+        panel.set_border_color(rgb(ui.border));
+        panel.set_border_width_all(ui.border_width);
+        panel.set_corner_radius_all(ui.corner_radius);
+        self.panel_style = Some(panel.upcast::<StyleBox>());
         let mut button = Button::new_alloc();
         button.set_text(&self.t("home.confirm"));
         button.set_custom_minimum_size(Vector2::new(160.0, 40.0));
         button.set_size(Vector2::new(160.0, 40.0));
         button.set_z_index(3);
+        // The map lives under a CanvasLayer, so the root window theme does not reach this button.
+        let ink = rgb(ui.ink);
+        let accent = rgb(ui.accent);
+        let border = rgb(ui.border);
+        for (state, bg, line) in [
+            ("normal", rgb(ui.panel), border),
+            ("hover", with_alpha(accent, 0.16), accent),
+            ("pressed", with_alpha(accent, 0.28), accent),
+            ("focus", with_alpha(rgb(ui.panel), 0.0), accent),
+            (
+                "disabled",
+                with_alpha(rgb(ui.panel), 0.55),
+                with_alpha(border, 0.45),
+            ),
+        ] {
+            let border_width = if state == "focus" {
+                ui.border_width.max(2)
+            } else {
+                ui.border_width
+            };
+            button.add_theme_stylebox_override(state, &ui_box(&ui, bg, line, border_width, 4.0));
+        }
+        for state in [
+            "font_color",
+            "font_hover_color",
+            "font_focus_color",
+            "font_pressed_color",
+        ] {
+            button.add_theme_color_override(state, ink);
+        }
+        button.add_theme_color_override("font_disabled_color", with_alpha(ink, 0.55));
         self.base_mut().add_child(&button);
         let handler = self.to_gd().callable("on_confirm");
         button.connect("pressed", &handler);
@@ -518,7 +568,13 @@ impl WorldMapView {
             let (wait_ms, timed_out) = (b.wait_ms, b.timed_out);
             godot_print!(
                 "WORLDMAP_BENCH frames={} wait_ms={wait_ms:.0} timed_out={timed_out} draw_avg_ms={avg:.3} draw_p95_ms={p95:.3} draw_max_ms={max:.3} overlay_avg_ms={ov_avg:.3} overlay_p95_ms={ov_p95:.3} overlay_max_ms={ov_max:.3} tiles={} resident={} missing={} roads={} labels={} items={}",
-                b.draw_ms.len(), c.tiles, c.resident, c.missing, c.roads, c.labels, c.items
+                b.draw_ms.len(),
+                c.tiles,
+                c.resident,
+                c.missing,
+                c.roads,
+                c.labels,
+                c.items
             );
             self.base().get_tree().quit();
             return;
@@ -681,43 +737,73 @@ impl WorldMapView {
             "home.hint"
         });
         let attribution = self.t("home.attribution");
-        overlay
-            .draw_string_ex(
-                &font,
-                Vector2::new(16.0, 24.0),
-                &GString::from(hint.as_str()),
-            )
-            .font_size(14)
-            .modulate(HUD)
+
+        // Text and rounded panels come from the active UI theme; the map cartography keeps its
+        // own colors. The panel is translucent, so the map still shows through around the edges.
+        let ui = style::ui_look();
+        let ink = rgb(ui.ink);
+        let accent = rgb(ui.accent);
+        let hint_text = GString::from(hint.as_str());
+        let hint_size = font.get_string_size_ex(&hint_text).font_size(14).done();
+        let status_text = GString::from(status.as_str());
+        let status_size = font.get_string_size_ex(&status_text).font_size(16).done();
+        let attribution_text = GString::from(attribution.as_str());
+        let attribution_size = font
+            .get_string_size_ex(&attribution_text)
+            .font_size(12)
             .done();
-        if let Some(msg) = offline_msg {
+        let mut top_width = hint_size.x;
+        let mut top_height = 38.0;
+        if let Some(msg) = offline_msg.as_deref() {
+            let msg_text = GString::from(msg);
+            let msg_size = font.get_string_size_ex(&msg_text).font_size(12).done();
+            top_width = top_width.max(msg_size.x);
+            top_height = 58.0;
+        }
+        let top_rect = Rect2::new(
+            Vector2::new(8.0, 8.0),
+            Vector2::new(top_width + 24.0, top_height),
+        );
+        let bottom_rect = Rect2::new(
+            Vector2::new(8.0, size.y - 76.0),
+            Vector2::new(status_size.x.max(attribution_size.x) + 24.0, 68.0),
+        );
+        if let Some(panel) = self.panel_style.as_ref() {
+            overlay.draw_style_box(panel, top_rect);
+            overlay.draw_style_box(panel, bottom_rect);
+        }
+        // A short accent rule marks each panel; small texts stay ink, where the contrast is high.
+        for rect in [top_rect, bottom_rect] {
+            overlay.draw_rect(
+                Rect2::new(
+                    Vector2::new(14.0, rect.position.y + 8.0),
+                    Vector2::new(4.0, rect.size.y - 16.0),
+                ),
+                accent,
+            );
+        }
+        overlay
+            .draw_string_ex(&font, Vector2::new(24.0, 24.0), &hint_text)
+            .font_size(14)
+            .modulate(ink)
+            .done();
+        if let Some(msg) = offline_msg.as_deref() {
+            let msg_text = GString::from(msg);
             overlay
-                .draw_string_ex(
-                    &font,
-                    Vector2::new(16.0, 46.0),
-                    &GString::from(msg.as_str()),
-                )
+                .draw_string_ex(&font, Vector2::new(24.0, 46.0), &msg_text)
                 .font_size(12)
-                .modulate(HUD)
+                .modulate(ink)
                 .done();
         }
         overlay
-            .draw_string_ex(
-                &font,
-                Vector2::new(16.0, size.y - 60.0),
-                &GString::from(status.as_str()),
-            )
+            .draw_string_ex(&font, Vector2::new(24.0, size.y - 60.0), &status_text)
             .font_size(16)
-            .modulate(HUD)
+            .modulate(ink)
             .done();
         overlay
-            .draw_string_ex(
-                &font,
-                Vector2::new(16.0, size.y - 16.0),
-                &GString::from(attribution.as_str()),
-            )
+            .draw_string_ex(&font, Vector2::new(24.0, size.y - 16.0), &attribution_text)
             .font_size(12)
-            .modulate(HUD)
+            .modulate(ink)
             .done();
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         if let Some(b) = self.bench.as_mut() {
@@ -797,6 +883,33 @@ impl WorldMapView {
             .replace("{lat}", &format!("{:.4}", home.lat))
             .replace("{lon}", &format!("{:.4}", home.lon))
     }
+}
+
+/// Theme color as a Godot color.
+fn rgb(c: style::Rgb) -> Color {
+    Color::from_rgb(c[0], c[1], c[2])
+}
+
+/// The same color with another alpha (transparency only; the hue still comes from the theme).
+fn with_alpha(c: Color, alpha: f32) -> Color {
+    Color::from_rgba(c.r, c.g, c.b, alpha)
+}
+
+/// Rounded box with the theme border and corner radius; `padding` is layout, not a theme field.
+fn ui_box(
+    ui: &style::UiLook,
+    bg: Color,
+    line: Color,
+    border: i32,
+    padding: f32,
+) -> Gd<StyleBoxFlat> {
+    let mut boxed = StyleBoxFlat::new_gd();
+    boxed.set_bg_color(bg);
+    boxed.set_border_color(line);
+    boxed.set_border_width_all(border);
+    boxed.set_corner_radius_all(ui.corner_radius);
+    boxed.set_content_margin_all(padding);
+    boxed
 }
 
 fn load_world() -> Option<WorldData> {
@@ -1209,4 +1322,66 @@ fn draw_names(
         counts.labels += 1;
     }
     counts
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::style::{builtin, Rgb, Style};
+
+    /// WCAG relative luminance of one sRGB channel.
+    fn linear(channel: f32) -> f32 {
+        let channel = channel.clamp(0.0, 1.0);
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// WCAG contrast ratio between two sRGB colors (1.0..=21.0).
+    fn contrast(a: Rgb, b: Rgb) -> f32 {
+        let luminance =
+            |c: Rgb| 0.2126 * linear(c[0]) + 0.7152 * linear(c[1]) + 0.0722 * linear(c[2]);
+        let (la, lb) = (luminance(a), luminance(b));
+        let (high, low) = (la.max(lb), la.min(lb));
+        (high + 0.05) / (low + 0.05)
+    }
+
+    #[test]
+    fn ui_palette_stays_readable() {
+        // Both presets share the UI look; use the built-in values (no JSON read in the UI code).
+        for (id, ui) in [
+            ("lowpoly", Style::default().ui),
+            ("realistic", builtin("realistic").ui),
+        ] {
+            // Body text, labels and buttons use ink: far above WCAG AA for normal text.
+            let ink_on_panel = contrast(ui.ink, ui.panel);
+            assert!(
+                ink_on_panel >= 4.5,
+                "{id}: ink on panel is {ink_on_panel:.2}:1, below 4.5:1"
+            );
+
+            // Accent is a fill, border, focus and shadow color; it never carries body text on the
+            // panel. At this ratio it is visible as a rule, a focus ring and a thin shadow, but
+            // not readable as a paragraph, so every label stays ink.
+            let accent_on_panel = contrast(ui.accent, ui.panel);
+            assert!(
+                accent_on_panel >= 2.5,
+                "{id}: accent on panel is {accent_on_panel:.2}:1, too faint even as decoration"
+            );
+
+            // No pure white or pure black enters the UI.
+            for (name, color) in [
+                ("panel", ui.panel),
+                ("ink", ui.ink),
+                ("accent", ui.accent),
+                ("border", ui.border),
+            ] {
+                assert!(
+                    color.iter().all(|channel| *channel > 0.0 && *channel < 1.0),
+                    "{id}: {name} is pure black or pure white"
+                );
+            }
+        }
+    }
 }

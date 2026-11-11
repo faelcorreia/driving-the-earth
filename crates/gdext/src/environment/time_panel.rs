@@ -9,7 +9,7 @@ use godot::classes::control::{LayoutPreset, SizeFlags};
 use godot::classes::text_server::AutowrapMode;
 use godot::classes::{
     Button, CanvasLayer, GridContainer, HBoxContainer, Label, MarginContainer, OptionButton, Os,
-    PanelContainer, VBoxContainer,
+    PanelContainer, StyleBoxFlat, Theme, VBoxContainer,
 };
 use godot::global::HorizontalAlignment;
 use godot::obj::InstanceId;
@@ -18,6 +18,7 @@ use godot::prelude::*;
 use super::clock::EnvironmentClock;
 use super::sky;
 use super::time_ui::{self, Field, Picked, Speed};
+use crate::style;
 use crate::ui_text::{self, Lang};
 
 /// Período de atualização do texto do painel quando aberto, em segundos reais.
@@ -35,6 +36,8 @@ const PANEL_PADDING_PX: i32 = 10;
 const CONTENT_WIDTH_PX: f32 = PANEL_WIDTH_PX - 2.0 * PANEL_PADDING_PX as f32;
 /// Largura mínima do valor de um campo, em pixels, para o número não pular ao mudar.
 const VALUE_WIDTH_PX: f32 = 48.0;
+/// Inner padding of a themed button, in pixels (layout, not a theme field).
+const BUTTON_PADDING_PX: f32 = 4.0;
 
 /// Um campo de data ou hora: botões de menos e de mais e o valor no meio.
 struct Stepper {
@@ -78,6 +81,8 @@ impl TimePanel {
         panel.set_offset(Side::RIGHT, -PANEL_MARGIN_PX);
         panel.set_offset(Side::TOP, PANEL_MARGIN_PX);
         panel.set_custom_minimum_size(Vector2::new(PANEL_WIDTH_PX, 0.0));
+        let ui = style::ui_look();
+        panel.set_theme(&ui_theme(&ui));
 
         let mut column = VBoxContainer::new_alloc();
         let title = Self::label(&text("time.title", lang));
@@ -381,6 +386,124 @@ impl TimePanel {
         label.set_custom_minimum_size(Vector2::new(CONTENT_WIDTH_PX, 0.0));
         label
     }
+}
+
+/// Theme color as a Godot color.
+fn rgb(c: style::Rgb) -> Color {
+    Color::from_rgb(c[0], c[1], c[2])
+}
+
+/// The same color with another alpha (transparency only, so it still comes from the theme).
+fn with_alpha(c: Color, alpha: f32) -> Color {
+    Color::from_rgba(c.r, c.g, c.b, alpha)
+}
+
+/// Rounded box with the theme border and corner radius; `padding` is layout, not a theme field.
+fn ui_box(
+    ui: &style::UiLook,
+    bg: Color,
+    line: Color,
+    border: i32,
+    padding: f32,
+) -> Gd<StyleBoxFlat> {
+    let mut boxed = StyleBoxFlat::new_gd();
+    boxed.set_bg_color(bg);
+    boxed.set_border_color(line);
+    boxed.set_border_width_all(border);
+    boxed.set_corner_radius_all(ui.corner_radius);
+    boxed.set_content_margin_all(padding);
+    boxed
+}
+
+/// Theme of the time panel: ink text, panel surfaces, accent focus and a distinct disabled state.
+fn ui_theme(ui: &style::UiLook) -> Gd<Theme> {
+    let panel = rgb(ui.panel);
+    let ink = rgb(ui.ink);
+    let accent = rgb(ui.accent);
+    let border = rgb(ui.border);
+    let width = ui.border_width;
+    let focus_width = width.max(2);
+    let mut theme = Theme::new_gd();
+    theme.set_color("font_color", "Label", ink);
+
+    // OptionButton is a Button subclass but has its own theme type; style both.
+    for kind in ["Button", "OptionButton"] {
+        theme.set_color("font_color", kind, ink);
+        theme.set_color("font_hover_color", kind, ink);
+        theme.set_color("font_focus_color", kind, ink);
+        theme.set_color("font_pressed_color", kind, ink);
+        theme.set_color("font_disabled_color", kind, with_alpha(ink, 0.55));
+        theme.set_color("icon_normal_color", kind, ink);
+        theme.set_color("icon_hover_color", kind, ink);
+        theme.set_color("icon_focus_color", kind, ink);
+        theme.set_color("icon_pressed_color", kind, ink);
+        theme.set_color("icon_disabled_color", kind, with_alpha(ink, 0.55));
+        theme.set_stylebox(
+            "normal",
+            kind,
+            &ui_box(ui, panel, border, width, BUTTON_PADDING_PX),
+        );
+        theme.set_stylebox(
+            "hover",
+            kind,
+            &ui_box(
+                ui,
+                with_alpha(accent, 0.16),
+                accent,
+                width,
+                BUTTON_PADDING_PX,
+            ),
+        );
+        theme.set_stylebox(
+            "pressed",
+            kind,
+            &ui_box(
+                ui,
+                with_alpha(accent, 0.28),
+                accent,
+                width,
+                BUTTON_PADDING_PX,
+            ),
+        );
+        theme.set_stylebox(
+            "focus",
+            kind,
+            &ui_box(
+                ui,
+                with_alpha(panel, 0.0),
+                accent,
+                focus_width,
+                BUTTON_PADDING_PX,
+            ),
+        );
+        theme.set_stylebox(
+            "disabled",
+            kind,
+            &ui_box(
+                ui,
+                with_alpha(panel, 0.55),
+                with_alpha(border, 0.45),
+                width,
+                BUTTON_PADDING_PX,
+            ),
+        );
+    }
+
+    for kind in ["Panel", "PanelContainer"] {
+        theme.set_stylebox("panel", kind, &ui_box(ui, panel, border, width, 0.0));
+    }
+
+    // The speed selector opens a PopupMenu; it must not fall back to the engine's white theme.
+    theme.set_color("font_color", "PopupMenu", ink);
+    theme.set_color("font_hover_color", "PopupMenu", ink);
+    theme.set_color("font_disabled_color", "PopupMenu", with_alpha(ink, 0.55));
+    theme.set_stylebox("panel", "PopupMenu", &ui_box(ui, panel, border, width, 0.0));
+    theme.set_stylebox(
+        "hover",
+        "PopupMenu",
+        &ui_box(ui, with_alpha(accent, 0.22), accent, width, 0.0),
+    );
+    theme
 }
 
 /// Nome da borda no tema (`margin_left` etc.).

@@ -8,6 +8,7 @@ config/features=PackedStringArray("4.7")
 [autoload]
 
 Style="*res://style.gd"
+UiTheme="*res://ui_theme.gd"
 
 [rendering]
 
