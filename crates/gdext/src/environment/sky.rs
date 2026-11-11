@@ -326,8 +326,8 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
     let pale = srgb_to_linear(anchors.sky_horizon);
     // Deep zenith: the theme's day blue with the low channels pulled down. The top of the sky
     // stays saturated instead of fading into the horizon's pale gray.
-    let deep = clamp01([0.53 * day[0], 0.65 * day[1], 1.09 * day[2]]);
-    let apex = clamp01([deep[0] * 1.08, deep[1] * 1.06, deep[2] * 1.08]);
+    let deep = clamp01([0.58 * day[0], 0.70 * day[1], 1.12 * day[2]]);
+    let apex = clamp01([deep[0] * 1.06, deep[1] * 1.05, deep[2] * 1.06]);
     let warm_white: Rgb = [1.0, 0.96, 0.90];
     [
         Moment {
@@ -346,9 +346,9 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             name: "blue hour",
             description: "Deep blues with a coral afterglow on the sunset side; the first lamps and windows come on.",
             key_alt_deg: -6.0,
-            zenith: [0.025, 0.045, 0.130],
-            mid: [0.090, 0.125, 0.280],
-            horizon: [0.160, 0.170, 0.300],
+            zenith: [0.045, 0.080, 0.190],
+            mid: [0.180, 0.200, 0.360],
+            horizon: [0.240, 0.250, 0.380],
             sun: [0.35, 0.20, 0.28],
             glow: [0.95, 0.38, 0.30],
             glow_hi: [0.95, 0.70, 0.45],
@@ -358,9 +358,9 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             name: "sunrise / sunset",
             description: "Peach-orange sun, soft contrast and long shadows (cool at dawn, warm at dusk); the zenith is still petrol blue.",
             key_alt_deg: -0.5,
-            zenith: [0.045, 0.150, 0.300],
-            mid: [0.260, 0.250, 0.420],
-            horizon: [0.300, 0.340, 0.520],
+            zenith: [0.080, 0.210, 0.360],
+            mid: [0.490, 0.445, 0.580],
+            horizon: [0.480, 0.435, 0.570],
             sun: lerp3(anchors.sun_low, [1.0, 0.42, 0.24], 0.35),
             glow: [1.0, 0.42, 0.15],
             glow_hi: [1.0, 0.70, 0.35],
@@ -370,9 +370,9 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             name: "golden hour",
             description: "Orange/coral glow, long warm shadows and a pale blue zenith; the sun is warm white with a golden edge.",
             key_alt_deg: 6.0,
-            zenith: [0.075, 0.220, 0.550],
-            mid: [0.300, 0.360, 0.620],
-            horizon: [0.600, 0.620, 0.750],
+            zenith: [0.090, 0.230, 0.540],
+            mid: [0.500, 0.480, 0.640],
+            horizon: [0.620, 0.580, 0.680],
             sun: lerp3(anchors.sun_low, anchors.sun_high, 0.45),
             glow: [1.0, 0.52, 0.20],
             glow_hi: [1.0, 0.82, 0.45],
@@ -382,9 +382,9 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             name: "morning",
             description: "Warm white sun, a clear saturated blue sky and crisp shadows; contrast is already high.",
             key_alt_deg: 14.0,
-            zenith: clamp01([0.48 * day[0], 0.59 * day[1], 0.89 * day[2]]),
-            mid: lerp3(day, pale, 0.18),
-            horizon: lerp3(pale, day, 0.10),
+            zenith: clamp01([0.52 * day[0], 0.63 * day[1], 0.91 * day[2]]),
+            mid: lerp3(day, pale, 0.24),
+            horizon: lerp3(pale, day, 0.08),
             sun: lerp3(anchors.sun_low, anchors.sun_high, 0.80),
             glow: [1.0, 0.72, 0.50],
             glow_hi: [1.0, 0.92, 0.75],
@@ -395,8 +395,8 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             description: "Neutral-warm white sun, deep blue zenith and a pale hazy horizon; high contrast without clipping, short blue-violet shadows.",
             key_alt_deg: 45.0,
             zenith: deep,
-            mid: lerp3(day, pale, 0.28),
-            horizon: lerp3(pale, warm_white, 0.12),
+            mid: lerp3(day, pale, 0.32),
+            horizon: lerp3(pale, warm_white, 0.17),
             sun: anchors.sun_high,
             glow: [1.0, 0.80, 0.62],
             glow_hi: [1.0, 0.95, 0.85],
@@ -407,8 +407,8 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             description: "The sun overhead: the table keeps brightening instead of clamping at 6 degrees; the zenith is at its deepest.",
             key_alt_deg: 90.0,
             zenith: apex,
-            mid: lerp3(day, pale, 0.30),
-            horizon: lerp3(pale, warm_white, 0.15),
+            mid: lerp3(day, pale, 0.35),
+            horizon: lerp3(pale, warm_white, 0.20),
             sun: anchors.sun_high,
             glow: [1.0, 0.82, 0.66],
             glow_hi: [1.0, 0.96, 0.88],
@@ -527,6 +527,10 @@ pub fn sun_tint_at(sun_alt_deg: f64, afternoon: f32) -> Rgb {
 /// Share of the sun energy left at the horizon; the air-mass term supplies the rest.
 const SUN_HORIZON_ENERGY: f64 = 0.45;
 
+/// Direct sun energy at the zenith (Godot's default is ~1). Below the old 1.6 so the pale
+/// concrete fits the ACES shoulder at the higher exposure of the low-sun fill.
+pub const SUN_MAX_ENERGY: f64 = 1.20;
+
 /// Direct sun energy: zero at civil twilight, a steep sunrise ramp, then the air-mass term keeps
 /// rising all the way to the zenith (it is not clamped at `SUN_FULL_DEG`).
 pub fn sun_energy(sun_alt_deg: f64, max: f64) -> f64 {
@@ -537,6 +541,70 @@ pub fn sun_energy(sun_alt_deg: f64, max: f64) -> f64 {
         0.0
     };
     max * twilight * (SUN_HORIZON_ENERGY + (1.0 - SUN_HORIZON_ENERGY) * air_mass)
+}
+
+/// Ambient fill energy at night, when the sun is below civil twilight.
+pub const AMBIENT_NIGHT: f64 = 0.58;
+/// Ambient fill energy at low sun (below ~10 deg): sunrise/sunset must stay readable.
+pub const AMBIENT_LOW: f64 = 1.20;
+/// Ambient fill energy with the sun high (above ~45 deg): the direct sun keeps the contrast and
+/// the blue-violet shadows, so the fill stays low on purpose.
+pub const AMBIENT_DAY: f64 = 0.62;
+
+/// Ambient light energy by sun altitude. It is not one `sqrt(light)` ramp: the low sun needs a lot
+/// of fill (the direct light is weak and warm), the high sun very little (that is what keeps the
+/// noon from flattening into the hospital gray), and the night a floor that keeps the lamps and
+/// the city readable.
+pub fn ambient_energy(sun_alt_deg: f64) -> f64 {
+    let alt = sun_alt_deg as f32;
+    let day = smooth(-6.0, 2.0, alt) as f64;
+    let low = 1.0 - smooth(10.0, 45.0, alt) as f64;
+    let fill = AMBIENT_DAY + (AMBIENT_LOW - AMBIENT_DAY) * low;
+    AMBIENT_NIGHT + (fill - AMBIENT_NIGHT) * day
+}
+
+/// Tonemapper exposure with a full day sky (the night stays at 1 in `clock.rs`).
+pub const DAY_TONEMAP_EXPOSURE: f32 = 0.62;
+/// Extra exposure dip as the sun climbs to the zenith, where the pale concrete has no highlight
+/// headroom left.
+pub const HIGH_SUN_EXPOSURE_DIP: f32 = 0.17;
+/// Extra exposure loss at a clear high sun, where the direct sun on the pale concrete is
+/// strongest. The loss fades out below 45 deg, where there is no clipping and the sunset and the
+/// morning must stay bright.
+pub const CLEAR_SKY_EXPOSURE_LOSS: f32 = 0.55;
+
+/// Day tonemapper exposure for a sun altitude and cloud cover, 0..1. A clear sky at high sun gets
+/// less exposure than an overcast one because its sun is much stronger; `scene_key` checks that
+/// the resulting image is still brighter, which is the target (a clear noon must not read darker).
+pub fn day_exposure(sun_alt_deg: f64, cloud_cover: f64) -> f32 {
+    let high_sun = ((sun_alt_deg as f32 - 45.0) / 40.0).clamp(0.0, 1.0);
+    let clear = (1.0 - cloud_cover.clamp(0.0, 1.0) as f32).powi(2);
+    let clear_loss = CLEAR_SKY_EXPOSURE_LOSS * high_sun * clear;
+    (DAY_TONEMAP_EXPOSURE - HIGH_SUN_EXPOSURE_DIP * high_sun) * (1.0 - clear_loss)
+}
+
+/// Relative brightness of the lit scene (sun + ambient fill) after the exposure: the sun term is
+/// the direct light on a horizontal surface, the ambient term a share of the sky fill. Used by the
+/// tests to keep a clear noon brighter than an overcast one.
+// Used by the lightness regression tests; the frame path sets the exposure directly.
+#[allow(dead_code)]
+pub fn scene_key(sun_alt_deg: f64, cloud_cover: f64) -> f64 {
+    let sun = sun_energy(sun_alt_deg, SUN_MAX_ENERGY) * cloud_light_factor(cloud_cover);
+    let ambient = ambient_energy(sun_alt_deg) * 0.65;
+    day_exposure(sun_alt_deg, cloud_cover) as f64 * (sun + ambient)
+}
+
+/// Extra sky brightness with a clear sky at high sun, 0..1 of the gap: the cloud veil already
+/// grays an overcast sky, and this keeps a clear noon from reading darker than the overcast one
+/// after the clear-sky exposure loss.
+pub const SKY_CLEAR_GAIN: f32 = 0.75;
+
+/// Sky brightness gain by sun altitude and cloud cover. It is 1 at night, below 45 deg and under
+/// full overcast, so only the clear high-sun sky is lifted.
+pub fn sky_gain(sun_alt_deg: f64, cloud_cover: f64) -> f32 {
+    let high_sun = ((sun_alt_deg as f32 - 45.0) / 40.0).clamp(0.0, 1.0);
+    let clear = (1.0 - cloud_cover.clamp(0.0, 1.0) as f32).powi(2);
+    1.0 + SKY_CLEAR_GAIN * high_sun * clear
 }
 
 /// Horizon color on the side opposite the sun, linear RGB (also the base of the depth fog).
@@ -633,6 +701,8 @@ pub struct SkyLook {
     pub shadow_tint: Rgb,
     /// Ambient fill of the shaded faces, sRGB (see `ambient_tint`).
     pub ambient: Rgb,
+    /// Sky brightness gain of the clear high-sun sky (the shader's `sky_gain` uniform).
+    pub sky_gain: f32,
 }
 
 /// Parâmetros do céu para uma altura do sol, luz global 0..1, estado da lua, weight of the
@@ -653,7 +723,10 @@ pub fn sky_look(
         horizon: colors.horizon,
         glow: colors.glow,
         glow_hi: colors.glow_hi,
-        glow_strength: smooth(-10.0, -5.0, alt) * (1.0 - smooth(2.0, 8.0, alt)),
+        // The warm band reaches a little past the golden hour, so a 06:10 / 15:30 sun still
+        // paints the horizon on its side (peach at sunrise, coral at sunset) while the top stays
+        // blue; it is gone by 26 deg.
+        glow_strength: smooth(-10.0, -5.0, alt) * (1.0 - smooth(8.0, 26.0, alt)),
         halo_strength: 0.6 * smooth(-12.0, -4.0, alt) * (1.0 - 0.6 * smooth(8.0, 30.0, alt)),
         sun_color: colors.sun,
         sun_disk: smooth(-1.5, 0.0, alt),
@@ -665,6 +738,7 @@ pub fn sky_look(
         cloud_cover: cloud_cover.clamp(0.0, 1.0),
         shadow_tint: anchors.shadow_tint,
         ambient: ambient_tint(colors.mid, anchors.shadow_tint, colors.ambient_warmth),
+        sky_gain: sky_gain(sun_alt_deg, cloud_cover.clamp(0.0, 1.0) as f64),
     }
 }
 
@@ -697,7 +771,7 @@ pub fn sky_color(look: &SkyLook, sun_dir: [f32; 3], eye: [f32; 3]) -> Rgb {
     let lift = ((0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) * CLOUD_LIFT_GAIN).clamp(0.0, 1.0);
     let cloud = look.cloud_tint.map(|v| v * lift);
     let veil = (look.cloud_cover * (0.55 + 0.25 * (1.0 - h))).clamp(0.0, 0.95);
-    lerp3(c, cloud, veil)
+    lerp3(c, cloud, veil).map(|v| v * look.sky_gain)
 }
 
 fn norm2(v: [f32; 2]) -> [f32; 2] {
@@ -1162,8 +1236,10 @@ mod tests {
             cloudy_top[0] / cloudy_top[2] > clear_top[0] / clear_top[2] + 0.1,
             "the cloud veil does not warm the zenith: {clear_top:?} -> {cloudy_top:?}"
         );
-        assert!(luma(cloudy_top) > luma(clear_top));
-        assert!(cloudy_top.iter().all(|v| *v <= 1.0));
+        // The cloud veil desaturates the zenith; the clear high-sun gain may make it brighter,
+        // so brightness is not the gray test here.
+        assert!(saturation(cloudy_top) < saturation(clear_top));
+        assert!(cloudy_top.iter().all(|v| *v < 1.5));
 
         // Full overcast at the horizon is gray, not the pale blue of a clear sky.
         let full = sky_look(60.0, 1.0, &no_moon(), 0.0, 1.0);
@@ -1192,14 +1268,82 @@ mod tests {
     }
 
     #[test]
+    fn low_sun_has_more_ambient_fill_than_high_sun() {
+        let low = ambient_energy(10.0);
+        let high = ambient_energy(60.0);
+        assert!(
+            low > high + 0.1,
+            "low-sun fill {low} is not above the high-sun fill {high}"
+        );
+        assert!(ambient_energy(1.0) > ambient_energy(30.0));
+        assert!(ambient_energy(13.0) > 0.9);
+        assert!(ambient_energy(-40.0) >= 0.4);
+        assert!((ambient_energy(60.0) - AMBIENT_DAY).abs() < 1e-9);
+        // Above the low-sun shoulder the fill comes down toward the high-sun value.
+        assert!(ambient_energy(10.0) > ambient_energy(20.0));
+        assert!(ambient_energy(20.0) > ambient_energy(45.0));
+        // It ramps up from the night floor to the low-sun shoulder with no dip.
+        let mut prev = -1.0;
+        let mut alt = -20.0;
+        while alt <= 10.0 {
+            let energy = ambient_energy(alt);
+            assert!(energy >= prev - 1e-9, "ambient fill drops at {alt} deg");
+            prev = energy;
+            alt += 0.5;
+        }
+    }
+
+    #[test]
+    fn clear_noon_is_brighter_than_overcast() {
+        let clear = scene_key(73.0, 0.0);
+        let overcast = scene_key(73.0, 0.7);
+        assert!(
+            clear > overcast,
+            "clear noon key {clear} is not above the overcast key {overcast}"
+        );
+        // The raw exposure is lower for a clear high sun on purpose (the pale concrete would
+        // clip); the scene key above is the regression that matters: the final image must not be
+        // darker than the overcast one.
+        assert!(day_exposure(73.0, 0.0) < day_exposure(73.0, 0.7));
+        assert!(sky_gain(73.0, 0.0) > sky_gain(73.0, 0.7));
+        assert_eq!(sky_gain(10.0, 0.0), 1.0);
+        assert_eq!(sky_gain(-40.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn low_sun_rows_are_not_darker_than_the_first_cut() {
+        let table = moment_table(&crate::style::light_look());
+        let row = |name: &str| {
+            *table
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("row '{name}' missing"))
+        };
+        // First-cut item 121: sunset rows were 0.045/0.15/0.30 (zenith), 0.26/0.25/0.42 (mid) and
+        // 0.30/0.34/0.52 (horizon); those made 18:00 mean 53. The tuned rows must stay above them
+        // so the sunset does not fall back into a dark twilight.
+        let sunset = row("sunrise / sunset");
+        assert!(luma(sunset.zenith) >= 0.18);
+        assert!(luma(sunset.mid) >= 0.43);
+        assert!(luma(sunset.horizon) >= 0.42);
+        let golden = row("golden hour");
+        assert!(luma(golden.mid) >= 0.48);
+        let morning = row("morning");
+        assert!(luma(morning.zenith) >= luma(sunset.zenith));
+        assert!(luma(morning.horizon) >= 0.7);
+    }
+
+    #[test]
     fn sky_shader_mirrors_the_cloud_and_haze_parameters() {
         const SHADER: &str = include_str!("../../../../godot/shaders/sky.gdshader");
         for needle in [
             "uniform vec3 cloud_tint",
             "uniform float cloud_cover",
+            "uniform float sky_gain",
             "const float CLOUD_LIFT_GAIN = 2.5;",
             "float veil = clamp(cloud_cover * (0.55 + 0.25 * (1.0 - e.y)), 0.0, 0.95);",
             "col = mix(col, cloud_tint * cloud_lift, veil);",
+            "COLOR = col * sky_gain;",
             "const float WARM_HAZE = 0.35;",
         ] {
             assert!(
@@ -1247,10 +1391,17 @@ mod tests {
                     ] {
                         assert!(x.is_finite() && (0.0..=1.0).contains(&x), "alt {alt}: {x}");
                     }
+                    assert!(
+                        look.sky_gain.is_finite() && (1.0..=2.0).contains(&look.sky_gain),
+                        "alt {alt}: sky gain {}",
+                        look.sky_gain
+                    );
                     for eye in eyes {
                         let c = sky_color(&look, sun_dir, eye);
+                        // The clear high-sun gain can push the sky above 1; ACES handles it, so
+                        // only finiteness and a sane ceiling are required here.
                         assert!(
-                            c.iter().all(|v| v.is_finite() && (0.0..=1.5).contains(v)),
+                            c.iter().all(|v| v.is_finite() && (0.0..=2.0).contains(v)),
                             "alt {alt}: {c:?}"
                         );
                     }

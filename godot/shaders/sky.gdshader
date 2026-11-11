@@ -27,6 +27,9 @@ uniform float moon_visibility = 0.0;
 uniform float cloud_cover = 0.0;
 // Warm gray of a fully overcast sky (`sky::cloud_tint`), linear RGB.
 uniform vec3 cloud_tint = vec3(0.55, 0.55, 0.52);
+// Clear high-sun sky brightness (`sky::sky_gain`): the clear noon must not read darker than the
+// overcast one after the clear-sky exposure loss.
+uniform float sky_gain = 1.0;
 
 // Raio angular do disco do sol e da lua (~0,27 grau, 0,0047 rad) em 1 - cos(θ), ~θ²/2.
 const float DISK_R2 = 1.08e-5;
@@ -105,5 +108,5 @@ void sky() {
 	float cloud_lift = clamp(dot(col, vec3(0.2126, 0.7152, 0.0722)) * CLOUD_LIFT_GAIN, 0.0, 1.0);
 	float veil = clamp(cloud_cover * (0.55 + 0.25 * (1.0 - e.y)), 0.0, 0.95);
 	col = mix(col, cloud_tint * cloud_lift, veil);
-	COLOR = col;
+	COLOR = col * sky_gain;
 }
