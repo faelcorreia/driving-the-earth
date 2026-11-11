@@ -163,6 +163,11 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Turning on the lights",
         "Acendendo as luzes",
     ),
+    (
+        "loading.world_map",
+        "Preparing the world map",
+        "Preparando o mapa-múndi",
+    ),
     ("loading.ready", "Ready", "Pronto"),
     (
         "loading.hint",

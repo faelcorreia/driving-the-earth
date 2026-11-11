@@ -82,8 +82,10 @@ enum LoadingStage {
     PlacingCar,
     /// `Environment` clock and the pool of real lamp lights.
     Environment,
-    /// Loader thread, distant lights, terrain LOD and the world map view.
+    /// Loader thread, distant lights and terrain LOD; the car enters the tree here.
     StartingStream,
+    /// The world map view, whose world data load is the heaviest step left.
+    WorldMap,
     /// Screen closed; the normal streaming `process` runs.
     Ready,
 }
@@ -96,7 +98,8 @@ fn next_stage(stage: LoadingStage) -> LoadingStage {
         LoadingStage::BuildingTiles => LoadingStage::PlacingCar,
         LoadingStage::PlacingCar => LoadingStage::Environment,
         LoadingStage::Environment => LoadingStage::StartingStream,
-        LoadingStage::StartingStream | LoadingStage::Ready => LoadingStage::Ready,
+        LoadingStage::StartingStream => LoadingStage::WorldMap,
+        LoadingStage::WorldMap | LoadingStage::Ready => LoadingStage::Ready,
     }
 }
 
@@ -112,6 +115,7 @@ fn stage_progress(stage: LoadingStage, built: usize, total: usize) -> f64 {
         LoadingStage::PlacingCar => 0.60,
         LoadingStage::Environment => 0.72,
         LoadingStage::StartingStream => 0.86,
+        LoadingStage::WorldMap => 0.94,
         LoadingStage::Ready => 1.0,
     }
 }
@@ -125,6 +129,7 @@ fn stage_key(stage: LoadingStage) -> &'static str {
         LoadingStage::PlacingCar => "loading.placing_car",
         LoadingStage::Environment => "loading.environment",
         LoadingStage::StartingStream | LoadingStage::Ready => "loading.ready",
+        LoadingStage::WorldMap => "loading.world_map",
     }
 }
 
@@ -137,6 +142,7 @@ fn stage_label(stage: LoadingStage) -> &'static str {
         LoadingStage::PlacingCar => "placing car",
         LoadingStage::Environment => "environment",
         LoadingStage::StartingStream => "starting stream",
+        LoadingStage::WorldMap => "world map",
         LoadingStage::Ready => "ready",
     }
 }
@@ -592,6 +598,7 @@ impl EarthWorld {
             LoadingStage::PlacingCar => self.stage_placing_car(),
             LoadingStage::Environment => self.stage_environment(),
             LoadingStage::StartingStream => self.stage_starting_stream(),
+            LoadingStage::WorldMap => self.stage_world_map(),
             LoadingStage::Ready => {}
         }
     }
@@ -611,10 +618,11 @@ impl EarthWorld {
         self.set_loading(stage_key(stage), progress);
     }
 
-    /// The map is open and the car is in the tree: it can drive from now on. The screen closes
-    /// itself here (or after `--loading-hold`, for a capture).
+    /// The map is open and the car is in the tree: it can drive from now on. The world map stage
+    /// already showed its own line while its heavy load ran; the screen now closes itself (or
+    /// after `--loading-hold`, for a capture).
     fn enter_ready(&mut self) {
-        self.begin_stage(next_stage(LoadingStage::StartingStream));
+        self.begin_stage(next_stage(LoadingStage::WorldMap));
         if let Some(started) = self.loading_started {
             godot_print!(
                 "loading: first playable frame at {:.1} ms",
@@ -624,8 +632,8 @@ impl EarthWorld {
         self.pending_index = None;
         self.pending_cache = None;
         self.pending_tiles.clear();
-        // "Ready" is shown by `StartingStream`; the real closing happens on this first playable
-        // frame, unless a capture asked to hold the screen (`--loading-hold`).
+        // The screen closes on this first playable frame, unless a capture asked to hold the
+        // last stage (`--loading-hold`).
         if self.loading_hold_s > 0.0 {
             self.loading_hold_until =
                 Some(Instant::now() + Duration::from_secs_f64(self.loading_hold_s));
@@ -834,7 +842,7 @@ impl EarthWorld {
         self.begin_stage(next_stage(LoadingStage::Environment));
     }
 
-    /// Stage 6: the loader thread, distant lights, terrain LOD and the world map view.
+    /// Stage 6: the loader thread, distant lights, terrain LOD and the car in the tree.
     fn stage_starting_stream(&mut self) {
         let (Some(index), Some(cache_root)) = (self.pending_index.clone(), self.pending_cache.clone())
         else {
@@ -864,6 +872,12 @@ impl EarthWorld {
         if let Some(car) = self.car.clone() {
             self.base_mut().add_child(&car);
         }
+        self.begin_stage(next_stage(LoadingStage::StartingStream));
+    }
+
+    /// Stage 7: the world map view, whose world data load is the heaviest step left. Its line is
+    /// set by `begin_stage` before this call, so the card can draw it while the load blocks.
+    fn stage_world_map(&mut self) {
         let key = self.pending_picker_key.clone();
         self.add_map_view(key.as_deref());
         self.enter_ready();
@@ -1255,6 +1269,7 @@ mod tests {
             LoadingStage::PlacingCar,
             LoadingStage::Environment,
             LoadingStage::StartingStream,
+            LoadingStage::WorldMap,
             LoadingStage::Ready,
         ];
         for pair in order.windows(2) {

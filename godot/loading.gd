@@ -15,6 +15,7 @@ const FALLBACK := {
 	"loading.building_tiles": "Building the first blocks",
 	"loading.placing_car": "Placing the car",
 	"loading.environment": "Turning on the lights",
+	"loading.world_map": "Preparing the world map",
 	"loading.ready": "Ready",
 	"loading.hint": "The first blocks load around the car.",
 	"loading.error": "Could not load this map",
