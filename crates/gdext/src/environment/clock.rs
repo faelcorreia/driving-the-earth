@@ -24,9 +24,6 @@ use super::time_ui::{self, FAST_SPEED, Field, Shortcut, Speed};
 const DEBUG_STEP_S: f64 = 15.0 * 60.0;
 /// Período do log de hora e luz, em segundos reais.
 const LOG_PERIOD_S: f64 = 5.0;
-/// Energia da luz direta do sol ao meio-dia (Godot usa ~1 como padrão). With the deeper sky and
-/// the darker ambient of item 121 this stays bright without clipping the pale surfaces.
-const SUN_MAX_ENERGY: f64 = 1.45;
 /// Energia da luz da lua na fase cheia e alta.
 const MOON_MAX_ENERGY: f64 = 0.25;
 /// Cor da luz da lua, azulada.
@@ -42,24 +39,6 @@ const SHADOW_FADE_START: f32 = 0.9;
 /// Penumbra (Godot's `shadow_blur`) from the theme's `world.shadow_softness`: crisp at 0, soft at 2.
 const SHADOW_BLUR_MIN: f32 = 0.4;
 const SHADOW_BLUR_PER_SOFTNESS: f32 = 1.2;
-/// Ambiente mínimo com o sol embaixo do horizonte, fração da energia ambiente.
-const AMBIENT_MIN: f64 = 0.3;
-/// Ambient energy with a full sun. Lower than 1 on purpose: with a dimmer ambient the direct sun
-/// carves readable shadows instead of washing the scene into the "hospital" gray of item 117.
-const AMBIENT_DAY: f64 = 0.62;
-/// Exposição do tonemapper (ACES) com o céu limpo de dia: abaixo de 1 o meio-dia deixa de estourar.
-/// A noite fica em 1 (`apply_visuals` mistura pela luz do céu sem nuvens), para não escurecer.
-const DAY_TONEMAP_EXPOSURE: f32 = 0.62;
-/// Extra exposure dip as the sun climbs to the zenith, where the pale sidewalk and concrete
-/// have no highlight headroom left. The dip is small enough that the noon still reads bright,
-/// but it removes the clipping the flat exposure of item 117 could not.
-const HIGH_SUN_EXPOSURE_DIP: f32 = 0.20;
-/// Extra exposure loss with a clear sky at high sun, where the direct sun on the pale concrete is
-/// strongest (0 at full overcast, `CLEAR_SKY_EXPOSURE_LOSS` at a clear noon). Without it a clear
-/// noon clips 14% of the frame; with it the noon fits the ACES shoulder and the zenith keeps its
-/// saturation. The loss fades out at low sun, where there is no clipping and the sunset must stay
-/// readable.
-const CLEAR_SKY_EXPOSURE_LOSS: f32 = 0.70;
 /// Multiplicador do clima (futuro); 1 = céu limpo.
 const WEATHER_FACTOR: f64 = 1.0;
 /// Limiar de luz dos postes: acendem ao cair abaixo de `LAMP_ON_BELOW`, apagam acima de `LAMP_OFF_ABOVE`.
@@ -77,7 +56,7 @@ const FOG_DEPTH_CURVE: f32 = 2.0;
 /// a noite sem lua era breu total: o céu escuro dá quase zero de luz nas faces sem sol.
 /// Some por completo com o sol (`light` 1) e fica inteiro no escuro (`light` 0). Smaller than
 /// before because `sky::ambient_tint` already lifts the night mid color out of near-black.
-const NIGHT_AMBIENT_RGB: (f32, f32, f32) = (0.22, 0.24, 0.34);
+const NIGHT_AMBIENT_RGB: (f32, f32, f32) = (0.28, 0.31, 0.44);
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
@@ -431,8 +410,8 @@ impl EnvironmentClock {
             Self::orient(light, sun_dir);
             let tint = look.sun_color;
             light.set_color(Color::from_rgb(tint[0], tint[1], tint[2]));
-            let sun_energy =
-                sky::sun_energy(alt, SUN_MAX_ENERGY) * sky::cloud_light_factor(self.cloud_cover);
+            let sun_energy = sky::sun_energy(alt, sky::SUN_MAX_ENERGY)
+                * sky::cloud_light_factor(self.cloud_cover);
             light.set_param(Param::ENERGY, sun_energy as f32);
         }
         if let Some(light) = self.moon.as_mut() {
@@ -463,6 +442,7 @@ impl EnvironmentClock {
                 &(self.cloud_cover.clamp(0.0, 1.0) as f32).to_variant(),
             );
             mat.set_shader_parameter("cloud_tint", &rgb_variant(look.cloud_tint));
+            mat.set_shader_parameter("sky_gain", &look.sky_gain.to_variant());
             // A neblina de profundidade (lod.rs) segue o céu na direção do olhar da câmera.
             let fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
             env.set_fog_light_color(Color::from_rgb(fog[0], fog[1], fog[2]));
@@ -480,19 +460,11 @@ impl EnvironmentClock {
                 amb[2] + NIGHT_AMBIENT_RGB.2 * night,
             ];
             env.set_ambient_light_color(Color::from_rgb(amb[0], amb[1], amb[2]));
-            // Square root: the sky stays the big diffuse source through the sunset and under
-            // cloud, where a linear ramp made the low sun and the overcast noon too dark.
-            let ambient_energy =
-                AMBIENT_MIN + (AMBIENT_DAY - AMBIENT_MIN) * self.light.max(0.0).sqrt();
-            env.set_ambient_light_energy(ambient_energy as f32);
+            // The fill is a curve of the sun altitude, not of the cloud-dimmed light: a low sun
+            // and a morning need a lot of fill, a high sun very little.
+            env.set_ambient_light_energy(sky::ambient_energy(alt) as f32);
             let day = self.clear_light.clamp(0.0, 1.0) as f32;
-            let high_sun = ((alt - 45.0) / 40.0).clamp(0.0, 1.0) as f32;
-            // Squared so the extra loss really belongs to a clear sky: at the default 0.7 cover
-            // it is under 5%, and it fades out below 45 degrees of sun.
-            let clear = (1.0 - self.cloud_cover.clamp(0.0, 1.0) as f32).powi(2);
-            let clear_loss = CLEAR_SKY_EXPOSURE_LOSS * high_sun * clear;
-            let day_exposure =
-                (DAY_TONEMAP_EXPOSURE - HIGH_SUN_EXPOSURE_DIP * high_sun) * (1.0 - clear_loss);
+            let day_exposure = sky::day_exposure(alt, self.cloud_cover);
             env.set_tonemap_exposure(1.0 + (day_exposure - 1.0) * day);
         }
     }
