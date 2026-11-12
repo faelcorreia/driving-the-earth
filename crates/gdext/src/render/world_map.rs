@@ -5,8 +5,10 @@
 //! the embedded world asset (`res://assets/worldmap/world.bin`), read once; only the pieces on
 //! screen are drawn, and coastline points closer than a pixel are dropped. The logic is in the
 //! `worldmap` crate.
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -218,7 +220,8 @@ pub struct WorldMapView {
     /// The car and the node whose frame is the map's (the earth world), set by `start` in the game.
     car: Option<Gd<Node3D>>,
     origin: Option<Gd<Node3D>>,
-    grid: Option<MapGrid>,
+    /// Grid of the map in use, shared with the earth world (it changes when the map is switched).
+    grid: Option<Rc<Cell<Option<MapGrid>>>>,
     /// The map is open (M). Only then is it shown, processed and the game paused.
     open: bool,
     /// Mouse mode before the map opened, restored when it closes.
@@ -475,7 +478,12 @@ impl IControl for WorldMapView {
 impl WorldMapView {
     /// Hands the map the car, the node whose frame is the map's, and the grid from that frame to
     /// lat/lon. Call before the node enters the tree (the game's M map).
-    pub(crate) fn start(&mut self, car: Gd<Node3D>, origin: Gd<Node3D>, grid: MapGrid) {
+    pub(crate) fn start(
+        &mut self,
+        car: Gd<Node3D>,
+        origin: Gd<Node3D>,
+        grid: Rc<Cell<Option<MapGrid>>>,
+    ) {
         self.car = Some(car);
         self.origin = Some(origin);
         self.grid = Some(grid);
@@ -530,7 +538,7 @@ impl WorldMapView {
     fn car_fix(&self) -> Option<(f64, f64, [f64; 2])> {
         let car = self.car.as_ref()?;
         let origin = self.origin.as_ref()?;
-        let grid = self.grid?;
+        let grid = self.grid.as_ref()?.get()?;
         let local = origin.to_local(car.get_global_position());
         let (lat, lon) = grid.latlon(local.x as f64, -local.z as f64);
         // The car drives along its -Z axis; in the map (x east, y north = -z) that is (-z.x, z.z),
@@ -700,8 +708,9 @@ impl WorldMapView {
         self.redraw();
     }
 
-    /// Moves the car to the chosen place (F17c). `None` when there is no car; `Some(false)` when
-    /// the place is not inside the loaded map (or has no road), so the car did not move.
+    /// Moves the car to the chosen place (F17c, item 106: or switches to another baked map that
+    /// holds it). `None` when there is no car; `Some(false)` when no baked map holds a road there,
+    /// so the car did not move.
     fn move_car(&self, home: Home) -> Option<bool> {
         let (Some(_), Some(origin)) = (self.car.as_ref(), self.origin.as_ref()) else {
             return None;
@@ -709,7 +718,7 @@ impl WorldMapView {
         let args = [home.lat.to_variant(), home.lon.to_variant()];
         let moved = origin
             .clone()
-            .call("move_car_to_latlon", &args)
+            .call("travel_to_latlon", &args)
             .try_to::<bool>()
             .unwrap_or(false);
         Some(moved)
