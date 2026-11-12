@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -706,8 +708,10 @@ pub fn bake_tiles_with(cache_root: &Path, id: &str, hooks: &mut Hooks) -> io::Re
         elapsed: Duration::ZERO,
     };
     let tile_list = covering_tiles(meta.radius_m, meta.tile_size_m);
-    for (i, &(x, y)) in tile_list.iter().enumerate() {
-        hooks.check()?;
+    // Each tile is independent once the roads, buildings, areas and terrain above are read. Tiles
+    // are baked on all cores: scoped threads take the next tile from a counter and write its file.
+    // This thread alone touches `hooks` (cancellation and progress), as each tile comes back.
+    let bake_tile = |&(x, y): &(i32, i32)| -> io::Result<(usize, usize, usize)> {
         // Only the ways whose bounding box touches the tile: the others clip to nothing.
         let tile_roads: Vec<Polyline> = road_index
             .get(&(x, y))
@@ -718,7 +722,8 @@ pub fn bake_tiles_with(cache_root: &Path, id: &str, hooks: &mut Hooks) -> io::Re
             .map(|ids| ids.iter().map(|&i| buildings[i].clone()).collect())
             .unwrap_or_default();
         let final_heights = heights
-            .remove(&(x, y))
+            .get(&(x, y))
+            .cloned()
             .ok_or_else(|| invalid_data("tile without terrain"))?;
         let (mut tile, r, b) =
             build_tile_from(final_heights, &grid, &tile_roads, &tile_buildings, x, y)?;
@@ -747,15 +752,60 @@ pub fn bake_tiles_with(cache_root: &Path, id: &str, hooks: &mut Hooks) -> io::Re
             areas: win_areas,
             water: win_water,
         });
-        summary.generated_buildings += out.buildings.len();
+        let generated = out.buildings.len();
         tile.buildings.extend(out.buildings);
         tile.ground = out.ground;
         tileformat::write_tile(cache_root, id, &tile)?;
-        summary.tiles += 1;
-        summary.road_pieces += r;
-        summary.building_pieces += b;
-        hooks.report(STAGE_TILES, i + 1, tile_list.len());
-    }
+        Ok((r, b, generated))
+    };
+    let total = tile_list.len();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(total);
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel::<io::Result<(usize, usize, usize)>>();
+    std::thread::scope(|s| -> io::Result<()> {
+        for _ in 0..workers {
+            let (tx, next, stop, bake_tile, tile_list) =
+                (tx.clone(), &next, &stop, &bake_tile, &tile_list);
+            s.spawn(move || loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(tile) = tile_list.get(i) else {
+                    break;
+                };
+                if tx.send(bake_tile(tile)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+        for done in 1..=total {
+            let received = match hooks.check().and_then(|()| rx.recv().map_err(io::Error::other)) {
+                Ok(received) => received,
+                Err(e) => {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(e);
+                }
+            };
+            let (r, b, g) = match received {
+                Ok(counts) => counts,
+                Err(e) => {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(e);
+                }
+            };
+            summary.tiles += 1;
+            summary.road_pieces += r;
+            summary.building_pieces += b;
+            summary.generated_buildings += g;
+            hooks.report(STAGE_TILES, done, total);
+        }
+        Ok(())
+    })?;
 
     hooks.check()?;
     hooks.report(STAGE_ROADS, 0, 1);
