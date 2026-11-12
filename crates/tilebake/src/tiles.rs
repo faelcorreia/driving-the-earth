@@ -727,7 +727,9 @@ pub fn bake_tiles_with(cache_root: &Path, id: &str, hooks: &mut Hooks) -> io::Re
             .ok_or_else(|| invalid_data("tile without terrain"))?;
         let (mut tile, r, b) =
             build_tile_from(final_heights, &grid, &tile_roads, &tile_buildings, x, y)?;
-        tile.signs = sign_index.remove(&(x, y)).unwrap_or_default();
+        // Read-only: a tile never shares its signs with another one, and the map is small, so
+        // every worker copies its own list instead of mutating a shared one.
+        tile.signs = sign_index.get(&(x, y)).cloned().unwrap_or_default();
         // Lots and ground from the 3 x 3 window around the tile: a lot is the same whichever tile sees it.
         let win_roads: Vec<(usize, &Polyline)> = window_ids(&road_index, x, y)
             .into_iter()
