@@ -59,13 +59,13 @@ const FOG_DEPTH_CURVE: f32 = 2.0;
 const NIGHT_AMBIENT_RGB: (f32, f32, f32) = (0.28, 0.31, 0.44);
 /// Lowpoly atmosphere (`light.atmosphere`): fog density, sky share of the fog, warm haze color
 /// (#E8B49C, sRGB) and its share of the fog color, glow and SSAO strengths.
-const ATMOSPHERE_FOG_DENSITY: f64 = 0.008;
-const ATMOSPHERE_FOG_SKY_AFFECT: f64 = 0.2;
+const ATMOSPHERE_FOG_DENSITY: f32 = 0.008;
+const ATMOSPHERE_FOG_SKY_AFFECT: f32 = 0.2;
 const ATMOSPHERE_HAZE_RGB: [f32; 3] = [0.910, 0.706, 0.612];
 const ATMOSPHERE_HAZE_MIX: f32 = 0.45;
-const ATMOSPHERE_GLOW_INTENSITY: f64 = 0.35;
-const ATMOSPHERE_GLOW_BLOOM: f64 = 0.05;
-const ATMOSPHERE_SSAO_INTENSITY: f64 = 0.5;
+const ATMOSPHERE_GLOW_INTENSITY: f32 = 0.35;
+const ATMOSPHERE_GLOW_BLOOM: f32 = 0.05;
+const ATMOSPHERE_SSAO_INTENSITY: f32 = 0.5;
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
