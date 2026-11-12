@@ -5,9 +5,10 @@
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{
     ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, ConvexPolygonShape3D, HeightMapShape3D,
-    Material, MeshInstance3D, Node3D, PackedScene, Shader, ShaderMaterial, StandardMaterial3D,
-    StaticBody3D,
+    Material, MeshInstance3D, Node3D, PackedScene, RenderingServer, Shader, ShaderMaterial,
+    StandardMaterial3D, StaticBody3D,
 };
+use godot::classes::rendering_server::GlobalShaderParameterType;
 use godot::obj::Inherits;
 use godot::prelude::*;
 
@@ -53,9 +54,32 @@ pub(crate) fn spawn_car(position: Vector3, yaw: f32) -> Option<Gd<Node3D>> {
     Some(car)
 }
 
+/// Shader globals of the street lamps' clock, read by `building.gdshader` for the night windows.
+const LAMP_GLOBALS: [&str; 3] = ["lamp_on_time", "lamp_state", "lamp_now"];
+
+/// Registers the lamp globals before any building material compiles. The clock (`EnvironmentClock`)
+/// registers them too, but in the loading stage `Environment`, after the spawn tiles are built: a
+/// shader compiled before that reads no global, so its windows never light. Names already known
+/// are left alone, with their values.
+fn register_lamp_globals() {
+    let mut rs = RenderingServer::singleton();
+    let known = rs.global_shader_parameter_get_list();
+    for name in LAMP_GLOBALS {
+        let wanted = StringName::from(name);
+        if !known.iter_shared().any(|n| n == wanted) {
+            rs.global_shader_parameter_add(
+                &wanted,
+                GlobalShaderParameterType::FLOAT,
+                &Variant::from(-1.0f32),
+            );
+        }
+    }
+}
+
 /// Material of the buildings: vertex colour, windows by mask in the shader (`building.gdshader`).
 /// None when the shader cannot be loaded; the buildings then keep the plain vertex-colour material.
 pub(crate) fn building_material() -> Option<Gd<ShaderMaterial>> {
+    register_lamp_globals();
     let shader: Gd<Shader> = try_load("res://shaders/building.gdshader").ok()?;
     let mut mat = ShaderMaterial::new_gd();
     mat.set_shader(&shader);
