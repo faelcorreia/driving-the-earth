@@ -48,20 +48,20 @@ pub struct Palette {
 impl Default for Palette {
     fn default() -> Self {
         Self {
-            grass: builtin_rgb("#79A65A"),
-            cement: builtin_rgb("#B9B4AA"),
-            sidewalk: builtin_rgb("#CFC9BC"),
-            park: builtin_rgb("#5F8C4B"),
-            water: builtin_rgb("#5C93A6"),
-            road: builtin_rgb("#3B3F46"),
+            grass: builtin_rgb("#8CA65A"),
+            cement: builtin_rgb("#B7AB99"),
+            sidewalk: builtin_rgb("#F2E2C4"),
+            park: builtin_rgb("#6E8F5C"),
+            water: builtin_rgb("#3C6B73"),
+            road: builtin_rgb("#4F4B57"),
             buildings: [
-                builtin_rgb("#E4D5B7"),
-                builtin_rgb("#D78E68"),
-                builtin_rgb("#A9C3D0"),
-                builtin_rgb("#C7A87D"),
+                builtin_rgb("#F2E2C4"),
+                builtin_rgb("#C56A4A"),
+                builtin_rgb("#D9A866"),
+                builtin_rgb("#E3B9A0"),
             ],
-            lamp: builtin_rgb("#FFC24A"),
-            car: builtin_rgb("#D9483B"),
+            lamp: builtin_rgb("#E9B44C"),
+            car: builtin_rgb("#C56A4A"),
         }
     }
 }
@@ -90,7 +90,7 @@ impl Default for WorldLook {
     }
 }
 
-/// Anchor colors of the sky and of the sun/moon table.
+/// Anchor colors of the sky and of the sun/moon table, plus the atmosphere switches.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightLook {
     pub sun_high: Rgb,
@@ -98,16 +98,22 @@ pub struct LightLook {
     pub sky_day: Rgb,
     pub sky_horizon: Rgb,
     pub shadow_tint: Rgb,
+    /// Cold fill mixed into the shaded faces (`light.fill`). `None`: off.
+    pub fill: Option<Rgb>,
+    /// Warm haze, soft glow and soft SSAO (`light.atmosphere`). `false`: off.
+    pub atmosphere: bool,
 }
 
 impl Default for LightLook {
     fn default() -> Self {
         Self {
             sun_high: builtin_rgb("#FFF3DA"),
-            sun_low: builtin_rgb("#FFB27A"),
-            sky_day: builtin_rgb("#78B7E8"),
-            sky_horizon: builtin_rgb("#E8F1F5"),
-            shadow_tint: builtin_rgb("#8FA6C8"),
+            sun_low: builtin_rgb("#E8875A"),
+            sky_day: builtin_rgb("#8EA3CF"),
+            sky_horizon: builtin_rgb("#F6D5C0"),
+            shadow_tint: builtin_rgb("#6B5A78"),
+            fill: None,
+            atmosphere: false,
         }
     }
 }
@@ -206,6 +212,12 @@ pub fn parse(text: &str, id: &str) -> Result<Style, String> {
             sky_day: color(light, "sky_day", style.light.sky_day),
             sky_horizon: color(light, "sky_horizon", style.light.sky_horizon),
             shadow_tint: color(light, "shadow_tint", style.light.shadow_tint),
+            fill: light
+                .get("fill")
+                .and_then(serde_json::Value::as_str)
+                .and_then(parse_hex_color)
+                .or(style.light.fill),
+            atmosphere: flag(light, "atmosphere", style.light.atmosphere),
         };
     }
 
@@ -443,18 +455,29 @@ mod tests {
         assert!(!realistic.world.flat_shading);
         assert_eq!(realistic.world.bevel_m, 0.06);
         assert_eq!(realistic.world.bevel_segments, 2);
-        // Only the flat shading, the bevel and the palette differ from the default theme.
-        assert_eq!(realistic.light, lowpoly.light);
+        // Realistic keeps the atmosphere and fill off; only lowpoly turns them on.
+        assert_eq!(realistic.light.fill, None);
+        assert!(!realistic.light.atmosphere);
+        assert_eq!(lowpoly.light.fill, Some(builtin_rgb("#7C8CD9")));
+        assert!(lowpoly.light.atmosphere);
         assert_eq!(realistic.ui, lowpoly.ui);
         assert_ne!(realistic.world.palette, lowpoly.world.palette);
     }
 
     #[test]
     fn built_in_defaults_equal_the_lowpoly_preset() {
-        assert_eq!(
-            parse(LOWPOLY, DEFAULT_ID).expect("lowpoly.json parses"),
-            Style::default()
-        );
+        // The defaults are the lowpoly palette and anchors; the fill and the atmosphere are
+        // switches that only lowpoly.json turns on.
+        let mut lowpoly = parse(LOWPOLY, DEFAULT_ID).expect("lowpoly.json parses");
+        assert_eq!(lowpoly.world, Style::default().world);
+        assert_eq!(lowpoly.ui, Style::default().ui);
+        assert_eq!(lowpoly.light.fill, Some(builtin_rgb("#7C8CD9")));
+        assert!(lowpoly.light.atmosphere);
+        lowpoly.light.fill = None;
+        lowpoly.light.atmosphere = false;
+        assert_eq!(lowpoly.light, Style::default().light);
+        assert_eq!(Style::default().light.fill, None);
+        assert!(!Style::default().light.atmosphere);
         assert_eq!(
             parse(REALISTIC, "realistic")
                 .expect("realistic.json parses")

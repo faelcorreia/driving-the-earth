@@ -657,16 +657,24 @@ const AMBIENT_WARM: Rgb = [0.60, 0.50, 0.45];
 /// mid color, kept saturated, blended toward the theme's `shadow_tint` and pushed toward blue and
 /// a touch of red, so shadows read blue-violet instead of neutral gray. `warm` 0..1 moves the fill
 /// toward a warm gray for the golden hour, whose shadows are long and warm.
-pub fn ambient_tint(mid: Rgb, shadow_tint: Rgb, warm: f32) -> Rgb {
+pub fn ambient_tint(mid: Rgb, shadow_tint: Rgb, warm: f32, fill: Option<Rgb>) -> Rgb {
     let sky = linear_to_srgb(mid);
     let violet = [
         (shadow_tint[0] * 1.06).clamp(0.0, 1.0),
         (shadow_tint[1] * 0.75).clamp(0.0, 1.0),
         (shadow_tint[2] * 1.12).clamp(0.0, 1.0),
     ];
-    let fill = lerp3(sky, violet, AMBIENT_SHADOW_MIX);
-    lerp3(fill, AMBIENT_WARM, warm.clamp(0.0, 1.0))
+    let mut tint = lerp3(sky, violet, AMBIENT_SHADOW_MIX);
+    // The cold fill of the theme (`light.fill`) pulls the shaded faces toward its blue, so the
+    // shadows of the lowpoly theme read cool and lilac instead of a dark gray-brown.
+    if let Some(cold) = fill {
+        tint = lerp3(tint, cold, AMBIENT_FILL_MIX);
+    }
+    lerp3(tint, AMBIENT_WARM, warm.clamp(0.0, 1.0))
 }
+
+/// Share of the theme's cold fill mixed into the ambient fill, 0..1.
+const AMBIENT_FILL_MIX: f32 = 0.30;
 
 /// Parâmetros do céu para o shader (`godot/shaders/sky.gdshader`) e para a neblina, pela altura
 /// do sol, pela luz global e pela lua. Direções (sol, lua) ficam fora: vêm de `horizontal`.
@@ -737,7 +745,12 @@ pub fn sky_look(
         cloud_tint: cloud_tint(&anchors),
         cloud_cover: cloud_cover.clamp(0.0, 1.0),
         shadow_tint: anchors.shadow_tint,
-        ambient: ambient_tint(colors.mid, anchors.shadow_tint, colors.ambient_warmth),
+        ambient: ambient_tint(
+            colors.mid,
+            anchors.shadow_tint,
+            colors.ambient_warmth,
+            anchors.fill,
+        ),
         sky_gain: sky_gain(sun_alt_deg, cloud_cover.clamp(0.0, 1.0) as f64),
     }
 }

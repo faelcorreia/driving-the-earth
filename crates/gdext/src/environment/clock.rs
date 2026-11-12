@@ -57,6 +57,15 @@ const FOG_DEPTH_CURVE: f32 = 2.0;
 /// Some por completo com o sol (`light` 1) e fica inteiro no escuro (`light` 0). Smaller than
 /// before because `sky::ambient_tint` already lifts the night mid color out of near-black.
 const NIGHT_AMBIENT_RGB: (f32, f32, f32) = (0.28, 0.31, 0.44);
+/// Lowpoly atmosphere (`light.atmosphere`): fog density, sky share of the fog, warm haze color
+/// (#E8B49C, sRGB) and its share of the fog color, glow and SSAO strengths.
+const ATMOSPHERE_FOG_DENSITY: f64 = 0.008;
+const ATMOSPHERE_FOG_SKY_AFFECT: f64 = 0.2;
+const ATMOSPHERE_HAZE_RGB: [f32; 3] = [0.910, 0.706, 0.612];
+const ATMOSPHERE_HAZE_MIX: f32 = 0.45;
+const ATMOSPHERE_GLOW_INTENSITY: f64 = 0.35;
+const ATMOSPHERE_GLOW_BLOOM: f64 = 0.05;
+const ATMOSPHERE_SSAO_INTENSITY: f64 = 0.5;
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
@@ -361,6 +370,17 @@ impl EnvironmentClock {
         // na direção do olhar (ver `apply_visuals`), então a costura no horizonte fica coerente.
         env.set_fog_sky_affect(0.0);
         env.set_fog_depth_curve(FOG_DEPTH_CURVE);
+        // Lowpoly atmosphere (`light.atmosphere`): a warm haze that lets the sky show through a
+        // little, a soft glow and a soft SSAO. Off in the other themes, which keep the defaults.
+        if crate::style::light_look().atmosphere {
+            env.set_fog_density(ATMOSPHERE_FOG_DENSITY);
+            env.set_fog_sky_affect(ATMOSPHERE_FOG_SKY_AFFECT);
+            env.set_glow_enabled(true);
+            env.set_glow_intensity(ATMOSPHERE_GLOW_INTENSITY);
+            env.set_glow_bloom(ATMOSPHERE_GLOW_BLOOM);
+            env.set_ssao_enabled(true);
+            env.set_ssao_intensity(ATMOSPHERE_SSAO_INTENSITY);
+        }
         world_env.set_environment(&env);
         self.env = Some(env);
         self.sky_mat = Some(sky_mat);
@@ -444,7 +464,12 @@ impl EnvironmentClock {
             mat.set_shader_parameter("cloud_tint", &rgb_variant(look.cloud_tint));
             mat.set_shader_parameter("sky_gain", &look.sky_gain.to_variant());
             // A neblina de profundidade (lod.rs) segue o céu na direção do olhar da câmera.
-            let fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
+            let mut fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
+            if crate::style::light_look().atmosphere {
+                // The warm haze: the sky color pulled toward the peach of the atmosphere.
+                fog = [0, 1, 2]
+                    .map(|i| fog[i] + (ATMOSPHERE_HAZE_RGB[i] - fog[i]) * ATMOSPHERE_HAZE_MIX);
+            }
             env.set_fog_light_color(Color::from_rgb(fog[0], fog[1], fog[2]));
             RenderingServer::singleton()
                 .global_shader_parameter_set(HAZE_GLOBAL, &rgb_variant(fog));
