@@ -29,7 +29,7 @@ use godot::classes::geometry_instance_3d::ShadowCastingSetting;
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{
     ArrayMesh, Camera3D, Environment, GeometryInstance3D, Material, MeshInstance3D, Node, Node3D,
-    StandardMaterial3D, WorldEnvironment,
+    WorldEnvironment,
 };
 use godot::prelude::*;
 use tilebake::dem::{height_at_any, read_smoothed_dem, MapGrid, Raster};
@@ -412,8 +412,10 @@ pub struct TerrainLod {
     /// The loader stopped after an error; no more requests.
     failed: bool,
     builds: u32,
-    material: Gd<StandardMaterial3D>,
-    road_material: Gd<StandardMaterial3D>,
+    /// Materials of the rings, shared with the near tiles (the toon light of lowpoly, the plain
+    /// standard material otherwise). Same single surface per ring either way.
+    material: Gd<Material>,
+    road_material: Gd<Material>,
 }
 
 impl TerrainLod {
@@ -423,7 +425,8 @@ impl TerrainLod {
         cache_root: &Path,
         id: &str,
         meta: &MapMeta,
-        material: Gd<StandardMaterial3D>,
+        material: Gd<Material>,
+        road_material: Gd<Material>,
     ) -> Self {
         let dir = cache_root.join(id).join("raw").join("copernicus");
         let roads_file = roads_path(cache_root, id);
@@ -484,9 +487,6 @@ impl TerrainLod {
                 }
             }
         });
-        let mut road_material = StandardMaterial3D::new_gd();
-        let road = crate::style::road_rgb();
-        road_material.set_albedo(Color::from_rgb(road[0], road[1], road[2]));
         TerrainLod {
             jobs: Some(jobs),
             results,
@@ -616,8 +616,8 @@ fn load_rasters(dir: &Path, cancel: &AtomicBool) -> io::Result<Vec<Raster>> {
 /// tiles carry it.
 fn build_node(
     surfaces: &[Surface],
-    material: &Gd<StandardMaterial3D>,
-    road_material: &Gd<StandardMaterial3D>,
+    material: &Gd<Material>,
+    road_material: &Gd<Material>,
 ) -> Gd<MeshInstance3D> {
     let mut mesh = ArrayMesh::new_gd();
     // One bulk copy per packed array: per-element pushes into Godot arrays cost a call each.
@@ -633,7 +633,7 @@ fn build_node(
         mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
         let own = if data.road { road_material } else { material };
         let index = mesh.get_surface_count() - 1;
-        mesh.surface_set_material(index, &own.clone().upcast::<Material>());
+        mesh.surface_set_material(index, own);
     }
     let mut node = MeshInstance3D::new_alloc();
     node.set_mesh(&mesh);
