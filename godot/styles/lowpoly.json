@@ -7,23 +7,25 @@
     "bevel_segments": 1,
     "shadow_softness": 1.0,
     "palette": {
-      "grass": "#79A65A",
-      "cement": "#B9B4AA",
-      "sidewalk": "#CFC9BC",
-      "park": "#5F8C4B",
-      "water": "#5C93A6",
-      "road": "#3B3F46",
-      "buildings": ["#E4D5B7", "#D78E68", "#A9C3D0", "#C7A87D"],
-      "lamp": "#FFC24A",
-      "car": "#D9483B"
+      "grass": "#8CA65A",
+      "cement": "#B7AB99",
+      "sidewalk": "#F2E2C4",
+      "park": "#6E8F5C",
+      "water": "#3C6B73",
+      "road": "#4F4B57",
+      "buildings": ["#F2E2C4", "#C56A4A", "#D9A866", "#E3B9A0"],
+      "lamp": "#E9B44C",
+      "car": "#C56A4A"
     }
   },
   "light": {
     "sun_high": "#FFF3DA",
-    "sun_low": "#FFB27A",
-    "sky_day": "#78B7E8",
-    "sky_horizon": "#E8F1F5",
-    "shadow_tint": "#8FA6C8"
+    "sun_low": "#E8875A",
+    "sky_day": "#8EA3CF",
+    "sky_horizon": "#F6D5C0",
+    "shadow_tint": "#6B5A78",
+    "fill": "#7C8CD9",
+    "atmosphere": true
   },
   "ui": {
     "panel": "#F4EFE4",

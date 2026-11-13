@@ -9,6 +9,11 @@ extends RefCounted
 ##
 ## Only the visible meshes and their colors are touched. The node names, transforms, collision
 ## shapes and wheel properties stay as they are in `car.tscn`.
+##
+## Light (backlog 125): in the low-poly family the body and the wheels use `toon_world.gdshader`,
+## the same soft two-band light as terrain, roads and buildings (vertex color, no texture, no
+## specular). The glass and the lamps keep their own materials: they are glass and light sources,
+## not painted body panels. The real base class got no vertex: the meshes are the same.
 
 ## Lower body half width, m. Kept inside the 1.55 m collision box so the wheels stay proud of it.
 const BODY_HALF_WIDTH := 0.755
@@ -40,10 +45,15 @@ const BODY_PROFILE := [
 ## The cabin shell sinks this far into the body, so the two meshes never share a plane.
 const CABIN_BASE_SINK_M := 0.03
 
+## Shader of the low-poly toon light (backlog 125), shared with the world materials.
+const TOON_SHADER := preload("res://shaders/toon_world.gdshader")
+
 ## Theme values resolved once, so the mesh build reads the Style autoload only here.
 class Look:
 	var style_id := "lowpoly"
 	var flat := true
+	## The low-poly family gets the banded toon light; realistic keeps the standard shading.
+	var toon := true
 	var bevel := 0.055
 	var corner := 0.10
 	var segments := 1
@@ -138,8 +148,8 @@ func apply(car: Node3D, cabin_profile: PackedVector2Array, cabin_half_width: flo
 	_build_headlamps(headlamp_builder)
 	var headlamp_mesh := headlamp_builder.commit()
 
-	var body_mat := _body_material()
-	var wheel_mat := _wheel_material()
+	var body_mat := _body_material(look)
+	var wheel_mat := _wheel_material(look)
 	var glass_mat := _glass_material(look)
 	var headlamp_mat := _headlamp_material(look)
 
@@ -195,6 +205,8 @@ func _read_look() -> Look:
 		return look
 	look.style_id = str(style.call("id"))
 	look.flat = bool(style.call("flag", "world", "flat_shading", true))
+	# Same switch as the world materials (`render/mod.rs`): `flat_shading` marks the low-poly family.
+	look.toon = look.flat
 	var bevel_m := float(style.call("number", "world", "bevel_m", 0.22))
 	look.segments = clampi(int(round(float(style.call("number", "world", "bevel_segments", 1.0)))), 1, 3)
 	# Theme bevels are in world meters (buildings use 0.06..0.22 m). A 1.5 m car uses a fraction.
@@ -513,7 +525,10 @@ func _hint(a: Vector3, b: Vector3, c: Vector3, center: Vector3) -> Vector3:
 
 # --- materials ----------------------------------------------------------------------------------
 
-func _body_material() -> StandardMaterial3D:
+func _body_material(look: Look) -> Material:
+	if look.toon:
+		# Painted body: matte bands, and a slightly stronger rim than the world so the car reads.
+		return _toon_material(0.22)
 	var mat := StandardMaterial3D.new()
 	mat.vertex_color_use_as_albedo = true
 	mat.roughness = 0.48
@@ -522,12 +537,23 @@ func _body_material() -> StandardMaterial3D:
 	return mat
 
 
-func _wheel_material() -> StandardMaterial3D:
+func _wheel_material(look: Look) -> Material:
+	if look.toon:
+		return _toon_material(0.10)
 	var mat := StandardMaterial3D.new()
 	mat.vertex_color_use_as_albedo = true
 	mat.roughness = 0.78
 	mat.metallic = 0.0
 	mat.metallic_specular = 0.25
+	return mat
+
+
+## Toon light with the vertex color of the mesh; `rim` is the strength on the sun side.
+func _toon_material(rim: float) -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = TOON_SHADER
+	mat.set_shader_parameter("use_vertex_color", true)
+	mat.set_shader_parameter("rim_strength", rim)
 	return mat
 
 

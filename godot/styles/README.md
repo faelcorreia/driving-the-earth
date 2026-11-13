@@ -27,27 +27,33 @@ Theme name. It should match the file name (`lowpoly.json` has `"id": "lowpoly"`)
 | `bevel_m` | number (m) | `0.22` | Size of the chamfer on vertical corners, in meters. Clamped to `0..1`. |
 | `bevel_segments` | integer | `1` | Segments of each chamfer. Clamped to `1..3`. |
 | `shadow_softness` | number | `1.0` | Shadow penumbra. Clamped to `0..2`. |
-| `palette.grass` | `#RRGGBB` | `#79A65A` | Terrain color where there is no ground cover. |
-| `palette.cement` | `#RRGGBB` | `#B9B4AA` | Ground class `concrete`. |
-| `palette.sidewalk` | `#RRGGBB` | `#CFC9BC` | Ground class `sidewalk`. |
-| `palette.park` | `#RRGGBB` | `#5F8C4B` | Ground class `park`. |
-| `palette.water` | `#RRGGBB` | `#5C93A6` | Ground class `water`. |
-| `palette.road` | `#RRGGBB` | `#3B3F46` | Asphalt of the road ribbons and of the distant roads. |
-| `palette.buildings` | array of 4 `#RRGGBB` | cream, brick, blue, sand | Facade and roof colors, picked per building. |
-| `palette.lamp` | `#RRGGBB` | `#FFC24A` | Street lamp head and glow. |
-| `palette.car` | `#RRGGBB` | `#D9483B` | Car body. |
+| `palette.grass` | `#RRGGBB` | `#8CA65A` | Terrain color where there is no ground cover (grama). |
+| `palette.cement` | `#RRGGBB` | `#B7AB99` | Ground class `concrete` (pedra). |
+| `palette.sidewalk` | `#RRGGBB` | `#F2E2C4` | Ground class `sidewalk` (creme). |
+| `palette.park` | `#RRGGBB` | `#6E8F5C` | Ground class `park` (verde). |
+| `palette.water` | `#RRGGBB` | `#3C6B73` | Ground class `water` (petróleo). |
+| `palette.road` | `#RRGGBB` | `#4F4B57` | Asphalt of the road ribbons and of the distant roads. Blue-gray, never below `#4A4650`. |
+| `palette.buildings` | array of 4 `#RRGGBB` | creme, terracota, ocre, pêssego | Wall and roof colors, picked per building. Warm tones only. |
+| `palette.lamp` | `#RRGGBB` | `#E9B44C` | Street lamp head and glow. |
+| `palette.car` | `#RRGGBB` | `#C56A4A` | Car body. |
+
+The lowpoly palette has 12 color slots (the `palette` block), under the 14-slot limit of the
+family. No theme should use pure `#000000` or `#FFFFFF`.
 
 ### `light`
 
-Colors used by the sky and by the sun/moon table. They are anchors, not a full lighting setup.
+Colors used by the sky, by the sun/moon table and by the shaded faces. They are anchors, not a
+full lighting setup.
 
 | Field | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `sun_high` | `#RRGGBB` | `#FFF3DA` | Sun color near the zenith (midday). |
-| `sun_low` | `#RRGGBB` | `#FFB27A` | Sun color near the horizon (sunrise and sunset). |
-| `sky_day` | `#RRGGBB` | `#78B7E8` | Day sky above the horizon. |
-| `sky_horizon` | `#RRGGBB` | `#E8F1F5` | Sky color at the horizon. |
-| `shadow_tint` | `#RRGGBB` | `#8FA6C8` | Color mixed into the shadows. |
+| `sun_low` | `#RRGGBB` | `#E8875A` | Sun color near the horizon (sunrise and sunset): coral. |
+| `sky_day` | `#RRGGBB` | `#8EA3CF` | Day sky above the horizon: muted lilac-blue. |
+| `sky_horizon` | `#RRGGBB` | `#F6D5C0` | Sky color at the horizon: pale peach. |
+| `shadow_tint` | `#RRGGBB` | `#6B5A78` | Color mixed into the shadows (lilac, never gray or black). |
+| `fill` | `#RRGGBB` or absent | absent (off) | Cold fill mixed into the shaded faces (`#7C8CD9` in lowpoly). Absent: no fill, the look of the older themes. |
+| `atmosphere` | bool | `false` | `true`: warm haze in the `Environment` fog, soft glow, soft SSAO and a little extra daylight ambient fill (the low sun stays above the no-black floor). `false`: off, as before. |
 
 ### `ui`
 

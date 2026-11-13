@@ -29,7 +29,7 @@ use godot::classes::geometry_instance_3d::ShadowCastingSetting;
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{
     ArrayMesh, Camera3D, Environment, GeometryInstance3D, Material, MeshInstance3D, Node, Node3D,
-    StandardMaterial3D, WorldEnvironment,
+    WorldEnvironment,
 };
 use godot::prelude::*;
 use tilebake::dem::{height_at_any, read_smoothed_dem, MapGrid, Raster};
@@ -69,6 +69,11 @@ const SKIRT_M: f32 = 30.0;
 /// Fog: none up to `FOG_BEGIN_M`, opaque from `FOG_END_M` (hides the far edge of the rings).
 pub(crate) const FOG_BEGIN_M: f32 = 5000.0;
 pub(crate) const FOG_END_M: f32 = 10000.0;
+/// Atmosphere themes (`light.atmosphere`) start the depth fog closer, so the warm haze shows on
+/// the mid-distance hills: in `FogMode::DEPTH` the density value is set but the visible falloff
+/// comes from these two distances. The old themes keep `FOG_BEGIN_M`/`FOG_END_M` unchanged.
+pub(crate) const ATMOSPHERE_FOG_BEGIN_M: f32 = 3000.0;
+pub(crate) const ATMOSPHERE_FOG_END_M: f32 = 9000.0;
 /// Camera far plane, so the rings are not cut off before the fog takes them.
 const FAR_M: f32 = 12000.0;
 /// Fog color, the horizon color of the sky.
@@ -407,8 +412,10 @@ pub struct TerrainLod {
     /// The loader stopped after an error; no more requests.
     failed: bool,
     builds: u32,
-    material: Gd<StandardMaterial3D>,
-    road_material: Gd<StandardMaterial3D>,
+    /// Materials of the rings, shared with the near tiles (the toon light of lowpoly, the plain
+    /// standard material otherwise). Same single surface per ring either way.
+    material: Gd<Material>,
+    road_material: Gd<Material>,
 }
 
 impl TerrainLod {
@@ -418,7 +425,8 @@ impl TerrainLod {
         cache_root: &Path,
         id: &str,
         meta: &MapMeta,
-        material: Gd<StandardMaterial3D>,
+        material: Gd<Material>,
+        road_material: Gd<Material>,
     ) -> Self {
         let dir = cache_root.join(id).join("raw").join("copernicus");
         let roads_file = roads_path(cache_root, id);
@@ -479,9 +487,6 @@ impl TerrainLod {
                 }
             }
         });
-        let mut road_material = StandardMaterial3D::new_gd();
-        let road = crate::style::road_rgb();
-        road_material.set_albedo(Color::from_rgb(road[0], road[1], road[2]));
         TerrainLod {
             jobs: Some(jobs),
             results,
@@ -611,8 +616,8 @@ fn load_rasters(dir: &Path, cancel: &AtomicBool) -> io::Result<Vec<Raster>> {
 /// tiles carry it.
 fn build_node(
     surfaces: &[Surface],
-    material: &Gd<StandardMaterial3D>,
-    road_material: &Gd<StandardMaterial3D>,
+    material: &Gd<Material>,
+    road_material: &Gd<Material>,
 ) -> Gd<MeshInstance3D> {
     let mut mesh = ArrayMesh::new_gd();
     // One bulk copy per packed array: per-element pushes into Godot arrays cost a call each.
@@ -628,7 +633,7 @@ fn build_node(
         mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
         let own = if data.road { road_material } else { material };
         let index = mesh.get_surface_count() - 1;
-        mesh.surface_set_material(index, &own.clone().upcast::<Material>());
+        mesh.surface_set_material(index, own);
     }
     let mut node = MeshInstance3D::new_alloc();
     node.set_mesh(&mesh);
@@ -650,10 +655,19 @@ pub fn configure_view(parent: Option<Gd<Node>>, car: &Gd<Node3D>) {
         .and_then(|w| w.get_environment());
     match environment {
         Some(mut env) => {
+            let atmosphere = crate::style::light_look().atmosphere;
             env.set_fog_enabled(true);
             env.set_fog_mode(FogMode::DEPTH);
-            env.set_fog_depth_begin(FOG_BEGIN_M);
-            env.set_fog_depth_end(FOG_END_M);
+            env.set_fog_depth_begin(if atmosphere {
+                ATMOSPHERE_FOG_BEGIN_M
+            } else {
+                FOG_BEGIN_M
+            });
+            env.set_fog_depth_end(if atmosphere {
+                ATMOSPHERE_FOG_END_M
+            } else {
+                FOG_END_M
+            });
             env.set_fog_light_color(Color::from_rgb(FOG_COLOR.0, FOG_COLOR.1, FOG_COLOR.2));
         }
         None => {

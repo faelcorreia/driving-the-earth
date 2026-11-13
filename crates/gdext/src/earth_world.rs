@@ -4,9 +4,11 @@
 //! map, spawn search, one spawn tile per frame, car, environment and stream. Then the tiles
 //! within `view_radius_m` of the car are built in the background and instantiated on the main
 //! thread, a few per frame, and tiles that fall beyond the radius plus a margin are freed.
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -14,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use godot::classes::file_access::ModeFlags;
 use godot::classes::{
-    CanvasLayer, FileAccess, INode3D, MeshInstance3D, Node3D, PackedScene, ProjectSettings,
-    RigidBody3D, ShaderMaterial, StandardMaterial3D, Os,
+    CanvasLayer, FileAccess, INode3D, Material, MeshInstance3D, Node3D, PackedScene,
+    ProjectSettings, RigidBody3D, ShaderMaterial, Os,
 };
 use godot::prelude::*;
 use worldmap::home::Home;
@@ -29,14 +31,14 @@ use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::world_map::WorldMapView;
 use crate::render::{
-    building_body, building_material, material, road_material, solid_body, spawn_car, terrain_body,
-    terrain_material,
+    building_body, building_material, road_material, solid_body, spawn_car, terrain_body,
+    terrain_material, vertex_material,
 };
 use crate::style;
 use crate::ui_text::{language, text as ui_text, Lang};
 use crate::world::far_lights::{spawn_load, FarLoad};
 use crate::world::lod::{self, TerrainLod};
-use crate::world::spawn::{find_spawn, find_spawn_near, inside_loaded_map};
+use crate::world::spawn::{find_spawn, find_spawn_near, inside_loaded_map, SpawnPose};
 use crate::world::streaming::{distance_to_tile, is_stale, tiles_in_range};
 use crate::world::{open_map, MapIndex};
 use tilebake::dem::MapGrid;
@@ -192,11 +194,13 @@ pub struct EarthWorld {
 
     index: Option<Arc<MapIndex>>,
     car: Option<Gd<Node3D>>,
-    terrain_mat: Option<Gd<StandardMaterial3D>>,
-    road_mat: Option<Gd<StandardMaterial3D>>,
+    /// Materials of the low-poly toon light in `lowpoly`, plain standard materials otherwise
+    /// (backlog 125): the same single surface either way, so no extra draw call.
+    terrain_mat: Option<Gd<Material>>,
+    road_mat: Option<Gd<Material>>,
     /// White albedo: meshes with per-vertex colors (buildings, terrain with ground cover) show
     /// their colors as they are.
-    vertex_mat: Option<Gd<StandardMaterial3D>>,
+    vertex_mat: Option<Gd<Material>>,
     /// Material of the buildings: vertex colors, windows by mask (None: `vertex_mat` is used).
     building_mat: Option<Gd<ShaderMaterial>>,
     /// Loaded tiles, each one a container node with the terrain and road bodies.
@@ -254,6 +258,13 @@ pub struct EarthWorld {
     pending_built: usize,
     pending_total: usize,
 
+    /// Cache root and id of the map in use, kept for a switch to another baked map (item 106).
+    active_cache: Option<PathBuf>,
+    active_id: String,
+    /// Grid of the map in use. Shared with the world map view, which reads it to place the car on
+    /// its picture; a switch of map sets it again.
+    map_grid: Rc<Cell<Option<MapGrid>>>,
+
     /// Worst `process` call and worst tile instantiation since the last log line, seconds.
     worst_frame: f64,
     worst_build: f64,
@@ -277,6 +288,31 @@ impl EarthWorld {
             "confirm move: lat {lat:.6} lon {lon:.6} inside_loaded_map {inside} road_found {road} result {result}"
         );
         result == "moved"
+    }
+
+    /// Puts the car at (`lat`, `lon`) (item 106). Inside the loaded map it is the same move as
+    /// `move_car_to_latlon`. Outside it, the first other complete map of the cache that holds the
+    /// point and has a road there replaces the loaded map, and the car goes to that road. False when
+    /// no baked map holds a road at the point: the car stays where it was.
+    #[func]
+    fn travel_to_latlon(&mut self, lat: f64, lon: f64) -> bool {
+        let (inside, road, result) = self.move_car_checked(lat, lon);
+        if inside {
+            godot_print!(
+                "confirm move: lat {lat:.6} lon {lon:.6} inside_loaded_map {inside} road_found {road} result {result}"
+            );
+            return result == "moved";
+        }
+        let (Some(cache), Some(_)) = (self.active_cache.clone(), self.car.clone()) else {
+            godot_print!("confirm move: lat {lat:.6} lon {lon:.6} no map or car to switch from");
+            return false;
+        };
+        let Some((id, index, pose)) = self.find_other_map(&cache, lat, lon) else {
+            godot_print!("confirm move: lat {lat:.6} lon {lon:.6} inside_loaded_map false, no other baked map holds a road there");
+            return false;
+        };
+        godot_print!("confirm move: lat {lat:.6} lon {lon:.6} switching the loaded map to '{id}'");
+        self.switch_map(cache, id, index, pose)
     }
 
     /// The steps of a car move, without the log line: (inside the loaded map, road found, result).
@@ -680,6 +716,8 @@ impl EarthWorld {
             index.coords().len(),
             self.view_radius_m
         );
+        self.active_cache = Some(cache_root.clone());
+        self.active_id = id.clone();
         self.pending_cache = Some(cache_root);
         self.pending_map_id = id;
         self.pending_index = Some(Arc::new(index));
@@ -703,7 +741,7 @@ impl EarthWorld {
         self.start_gps(&cache_root.display().to_string(), &id);
         self.terrain_mat = Some(terrain_material());
         self.road_mat = Some(road_material());
-        self.vertex_mat = Some(material((1.0, 1.0, 1.0)));
+        self.vertex_mat = Some(vertex_material());
         self.building_mat = building_material();
         if self.building_mat.is_none() {
             godot_warn!("building shader not loaded: buildings have no windows");
@@ -857,13 +895,15 @@ impl EarthWorld {
         }
         let car = self.car.clone();
         let material = self.terrain_mat.clone();
-        if let (Some(car), Some(material)) = (car, material) {
+        let road_mat = self.road_mat.clone();
+        if let (Some(car), Some(material), Some(road_mat)) = (car, material, road_mat) {
             lod::configure_view(self.base().get_parent(), &car);
             self.lod = Some(TerrainLod::start(
                 &cache_root,
                 &id,
                 &index.meta,
                 material,
+                road_mat,
             ));
         }
         self.start_loader(index);
@@ -987,11 +1027,13 @@ impl EarthWorld {
 
     /// Loads the map in use into the world's `Gps` node (item 112). The node reads the map in a
     /// thread of its own, so the frame does not wait for it. Without the node there is no guide.
+    /// Any destination of the previous map is dropped (its local meters belong to another map).
     fn start_gps(&self, cache_root: &str, id: &str) {
         let Some(mut gps) = self.base().get_node_or_null("Gps") else {
             godot_warn!("no Gps node under the world: no route guide");
             return;
         };
+        gps.call("clear", &[]);
         gps.call(
             "load_map",
             &[
@@ -1018,11 +1060,167 @@ impl EarthWorld {
         }
     }
 
+    /// The other complete map of `cache` that holds (`lat`, `lon`) and has a road near that point:
+    /// its id, index and spawn pose. Folders that are not maps are skipped without a message.
+    ///
+    /// When two baked maps overlap, the smallest one wins (then the id, for determinism): a small
+    /// map around the chosen place is more specific than a large map that happens to reach it. It
+    /// also keeps the road search cheap: the big map is only opened when the small one has no road.
+    fn find_other_map(
+        &self,
+        cache: &Path,
+        lat: f64,
+        lon: f64,
+    ) -> Option<(String, MapIndex, SpawnPose)> {
+        let entries = std::fs::read_dir(cache).ok()?;
+        let mut ids: Vec<String> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|id| *id != self.active_id)
+            .collect();
+        ids.sort();
+        // Reading the metadata and listing the tiles is cheap: find the maps that hold the point
+        // before reading any road.
+        let mut holding: Vec<(f64, String, MapIndex, [f64; 2])> = Vec::new();
+        for id in ids {
+            let Ok(index) = open_map(cache, &id) else {
+                continue;
+            };
+            let grid = MapGrid::from_meta(&index.meta);
+            let Some(local) = inside_loaded_map(&grid, index.meta.radius_m, lat, lon, |t| {
+                index.has_tile(t.0, t.1)
+            }) else {
+                continue;
+            };
+            holding.push((index.meta.radius_m, id, index, local));
+        }
+        holding.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, id, index, local) in holding {
+            match find_spawn_near(&index, local, self.view_radius_m as f64) {
+                Ok(Some(pose)) => return Some((id, index, pose)),
+                Ok(None) => continue,
+                Err(e) => {
+                    godot_error!("cannot read map '{id}' for the car move: {e}");
+                    continue;
+                }
+            }
+        }
+        None
+    }
+
+    /// Replaces the loaded map by `index` (folder `id` under `cache`) and puts the car at `pose`
+    /// (item 106). The streams of the old map are dropped and the new ones start as at the opening:
+    /// loader, distant lights, terrain LOD and GPS. The spawn tiles are built here, as in a car move.
+    /// False when the spawn point has no terrain (nothing changes then).
+    fn switch_map(
+        &mut self,
+        cache: PathBuf,
+        id: String,
+        index: MapIndex,
+        pose: SpawnPose,
+    ) -> bool {
+        let tile_m = index.meta.tile_size_m;
+        let spawn_tile = (
+            (pose.x / tile_m).floor() as i32,
+            (pose.y / tile_m).floor() as i32,
+        );
+        let height = match index.neighborhood(spawn_tile.0, spawn_tile.1) {
+            Ok(near) => near.height_at(pose.x, pose.y),
+            Err(e) => {
+                godot_error!("cannot read tiles at the new road of '{id}': {e}");
+                return false;
+            }
+        };
+        let Some(height) = height else {
+            godot_print!("map '{id}' has no terrain at the new road, the car stays");
+            return false;
+        };
+        let index = Arc::new(index);
+        let grid = MapGrid::from_meta(&index.meta);
+        let previous = self.active_id.clone();
+        let started = Instant::now();
+        self.clear_streams();
+        write_last_map(&id);
+        self.active_cache = Some(cache.clone());
+        self.active_id = id.clone();
+        self.map_grid.set(Some(grid));
+        self.start_gps(&cache.display().to_string(), &id);
+        if self.far_lights_enabled {
+            let path = cache.join(&id).join("far_lights.bin");
+            self.far_loader = Some(spawn_load(path, self.far_lights_max.max(0) as usize));
+        }
+        if let (Some(material), Some(road_mat)) =
+            (self.terrain_mat.clone(), self.road_mat.clone())
+        {
+            self.lod = Some(TerrainLod::start(
+                &cache,
+                &id,
+                &index.meta,
+                material,
+                road_mat,
+            ));
+        }
+        self.start_loader(index.clone());
+        if let Some(mut car) = self.car.clone() {
+            car.set_position(Vector3::new(
+                pose.x as f32,
+                height + SPAWN_LIFT_M,
+                -(pose.y as f32),
+            ));
+            car.set_rotation(Vector3::new(0.0, pose.yaw, 0.0));
+            if let Ok(mut body) = car.try_cast::<RigidBody3D>() {
+                body.set_linear_velocity(Vector3::ZERO);
+                body.set_angular_velocity(Vector3::ZERO);
+            }
+        }
+        for ty in spawn_tile.1 - 1..=spawn_tile.1 + 1 {
+            for tx in spawn_tile.0 - 1..=spawn_tile.0 + 1 {
+                self.load_now(&index, (tx, ty));
+            }
+        }
+        godot_print!(
+            "map switched from '{previous}' to '{id}' ({} tiles) in {:.0} ms",
+            index.coords().len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        true
+    }
+
+    /// Drops everything streamed from the map in use: its tile nodes, terrain LOD, distant lights,
+    /// pending geometry and loader (the loader thread ends with its request sender). The car, the
+    /// environment and the real lamp lights stay. The nodes are freed now, not queued: the switch
+    /// happens with the game paused, and the new map may reuse the same tile names and coordinates.
+    fn clear_streams(&mut self) {
+        for (_, node) in self.loaded.drain() {
+            node.free();
+        }
+        if let Some(node) = self.lod_node.take() {
+            node.free();
+        }
+        if let Some(far) = self.far.take() {
+            far.node().free();
+        }
+        self.lod = None;
+        self.far_loader = None;
+        self.requests = None;
+        self.results = None;
+        self.index = None;
+        self.lamp_posts.clear();
+        self.built_cell.clear();
+        self.requested.clear();
+        self.failed.clear();
+        self.done.clear();
+        self.lamps_lit = 0;
+        self.lamps_total = 0;
+    }
+
     /// Starts the loader thread. It builds tile geometry for each request, in order, and
     /// stops when this node (and with it the request sender) is freed.
     fn start_loader(&mut self, index: Arc<MapIndex>) {
         let (req_tx, req_rx) = mpsc::channel::<((i32, i32), f64)>();
         let (res_tx, res_rx) = mpsc::channel();
+        self.map_grid.set(Some(MapGrid::from_meta(&index.meta)));
         let worker_index = index.clone();
         thread::spawn(move || {
             for ((x, y), cell) in req_rx {
@@ -1168,17 +1366,14 @@ impl EarthWorld {
     /// frame give it the car's place in lat/lon, when there is a loaded map. `open_with` opens it
     /// at once with that message (the player has no home yet, or it is outside the map).
     fn add_map_view(&mut self, open_with: Option<&str>) {
-        let grid = self
-            .index
-            .as_ref()
-            .map(|index| MapGrid::from_meta(&index.meta));
+        let has_index = self.index.is_some();
         let car = self.car.clone();
         let origin = self.to_gd().upcast::<Node3D>();
         let mut layer = CanvasLayer::new_alloc();
         layer.set_layer(MAP_CANVAS_LAYER);
         let mut map = WorldMapView::new_alloc();
-        if let (Some(car), Some(grid)) = (car, grid) {
-            map.bind_mut().start(car, origin, grid);
+        if let (Some(car), true) = (car, has_index) {
+            map.bind_mut().start(car, origin, self.map_grid.clone());
         }
         layer.add_child(&map);
         self.base_mut().add_child(&layer);

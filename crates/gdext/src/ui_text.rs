@@ -32,8 +32,8 @@ pub fn text(key: &str, lang: Lang) -> &str {
 const TABLE: &[(&str, &str, &str)] = &[
     (
         "worldmap.hint",
-        "M or Esc closes  |  wheel: zoom  |  drag: move  |  click: place home  |  Confirm saves",
-        "M ou Esc fecha  |  roda: zoom  |  arrastar: mover  |  clique: marcar casa  |  Confirmar salva",
+        "M or Esc closes  |  wheel: zoom  |  drag: move  |  click: choose a place  |  Confirm: go",
+        "M ou Esc fecha  |  roda: zoom  |  arrastar: mover  |  clique: escolher um lugar  |  Confirmar: ir",
     ),
     ("time.title", "Game time", "Hora do jogo"),
     (
@@ -186,6 +186,11 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     ("style.active", "Style: {id}", "Estilo: {id}"),
     ("intro.title", "Driving the Earth", "Driving the Earth"),
+    (
+        "intro.hint",
+        "Any key, click or button skips  |  starts on its own in 3 s",
+        "Qualquer tecla, clique ou botão pula  |  começa sozinho em 3 s",
+    ),
 ];
 
 #[cfg(test)]

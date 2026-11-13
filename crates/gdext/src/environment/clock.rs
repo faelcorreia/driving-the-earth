@@ -10,11 +10,13 @@ use godot::classes::input::MouseMode;
 use godot::classes::light_3d::Param;
 use godot::classes::rendering_server::GlobalShaderParameterType;
 use godot::classes::{
-    Camera3D, DirectionalLight3D, Environment, INode, Input, InputEvent, Node, Os, Shader,
-    ShaderMaterial, Sky, WorldEnvironment,
+    Camera3D, DirectionalLight3D, Environment, INode, Input, InputEvent, InputEventKey, Node, Os,
+    Shader, ShaderMaterial, Sky, WorldEnvironment,
 };
+use godot::global::Key;
 use godot::prelude::*;
 
+use super::fog::{self, FogDepth};
 use super::sky::{self, Crossing, LightThreshold, ThresholdBank};
 use crate::ui_text;
 use super::time_panel::TimePanel;
@@ -39,8 +41,6 @@ const SHADOW_FADE_START: f32 = 0.9;
 /// Penumbra (Godot's `shadow_blur`) from the theme's `world.shadow_softness`: crisp at 0, soft at 2.
 const SHADOW_BLUR_MIN: f32 = 0.4;
 const SHADOW_BLUR_PER_SOFTNESS: f32 = 1.2;
-/// Multiplicador do clima (futuro); 1 = céu limpo.
-const WEATHER_FACTOR: f64 = 1.0;
 /// Limiar de luz dos postes: acendem ao cair abaixo de `LAMP_ON_BELOW`, apagam acima de `LAMP_OFF_ABOVE`.
 const LAMP_ON_BELOW: f64 = 0.40;
 const LAMP_OFF_ABOVE: f64 = 0.50;
@@ -57,6 +57,18 @@ const FOG_DEPTH_CURVE: f32 = 2.0;
 /// Some por completo com o sol (`light` 1) e fica inteiro no escuro (`light` 0). Smaller than
 /// before because `sky::ambient_tint` already lifts the night mid color out of near-black.
 const NIGHT_AMBIENT_RGB: (f32, f32, f32) = (0.28, 0.31, 0.44);
+/// Lowpoly atmosphere (`light.atmosphere`): fog density, sky share of the fog, glow and SSAO
+/// strengths. The warm haze color and its share of the fog live in `sky` (item 124).
+const ATMOSPHERE_FOG_DENSITY: f32 = 0.008;
+const ATMOSPHERE_FOG_SKY_AFFECT: f32 = 0.2;
+const ATMOSPHERE_GLOW_INTENSITY: f32 = 0.35;
+const ATMOSPHERE_GLOW_BLOOM: f32 = 0.05;
+const ATMOSPHERE_SSAO_INTENSITY: f32 = 0.5;
+/// Extra ambient fill while the sun is up, only for atmosphere themes: the low sun would
+/// otherwise leave the shaded faces below the no-black floor of item 124 (`#2E2632`). It is a
+/// +25% fill, the same share as a 0.30-energy fill light against the ambient. Night keeps the
+/// item 121 values, so the lamps and the dark sky are unchanged.
+const ATMOSPHERE_AMBIENT_GAIN: f64 = 1.25;
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
@@ -106,6 +118,14 @@ pub struct EnvironmentClock {
     #[init(val = 0.7)]
     #[export]
     cloud_cover: f64,
+    /// Weather fog intensity, 0 (clear air) to 1 (thick fog), a perceptual slider: half of it is
+    /// already a strong haze. The fog follows the cloud cover above: the effective strength is the
+    /// slider times the cover (see `fog::effective`), so a clear sky never fogs and an overcast one
+    /// does. There is no fog UI yet: this variable, the `F` debug key and the capture's
+    /// `--fog-density` are the only controls. 0 keeps the scene as it was before item 65.
+    #[init(val = 0.0)]
+    #[export]
+    fog_density: f64,
 
     /// Instante do mundo, segundos Unix (UTC).
     sim_unix: f64,
@@ -113,6 +133,10 @@ pub struct EnvironmentClock {
     light: f64,
     /// Luz do céu sem nuvens, 0..1 do último quadro (base do piso de luz noturna).
     clear_light: f64,
+    /// Effective weather fog of the last frame, 0..1: the density times the cloud cover.
+    weather_fog: f32,
+    /// Depth fog of the last frame, for the log.
+    fog_depth: FogDepth,
     sun_alt_deg: f64,
     world_env: Option<Gd<WorldEnvironment>>,
     /// Sol antigo da cena, liberado ao criar o novo.
@@ -361,6 +385,17 @@ impl EnvironmentClock {
         // na direção do olhar (ver `apply_visuals`), então a costura no horizonte fica coerente.
         env.set_fog_sky_affect(0.0);
         env.set_fog_depth_curve(FOG_DEPTH_CURVE);
+        // Lowpoly atmosphere (`light.atmosphere`): a warm haze that lets the sky show through a
+        // little, a soft glow and a soft SSAO. Off in the other themes, which keep the defaults.
+        if crate::style::light_look().atmosphere {
+            env.set_fog_density(ATMOSPHERE_FOG_DENSITY);
+            env.set_fog_sky_affect(ATMOSPHERE_FOG_SKY_AFFECT);
+            env.set_glow_enabled(true);
+            env.set_glow_intensity(ATMOSPHERE_GLOW_INTENSITY);
+            env.set_glow_bloom(ATMOSPHERE_GLOW_BLOOM);
+            env.set_ssao_enabled(true);
+            env.set_ssao_intensity(ATMOSPHERE_SSAO_INTENSITY);
+        }
         world_env.set_environment(&env);
         self.env = Some(env);
         self.sky_mat = Some(sky_mat);
@@ -398,20 +433,50 @@ impl EnvironmentClock {
             .unwrap_or(Vector3::new(0.0, 0.0, -1.0))
     }
 
-    fn apply_visuals(&mut self, sun: sky::Horizontal, moon: sky::MoonState, eye: Vector3) {
+    /// Clear-weather depth fog of the active theme: the item 124 warm haze starts at 3 km, the
+    /// older themes keep the 5..10 km reach. `world::lod::configure_view` writes the same values
+    /// when the map opens; the clock rewrites them every frame because the weather fog moves them
+    /// (`FogMode::DEPTH` ignores `fog_density`, as item 124 measured).
+    fn clear_fog_depth(&self) -> FogDepth {
+        let atmosphere = crate::style::light_look().atmosphere;
+        FogDepth {
+            begin_m: if atmosphere {
+                crate::world::lod::ATMOSPHERE_FOG_BEGIN_M
+            } else {
+                crate::world::lod::FOG_BEGIN_M
+            },
+            end_m: if atmosphere {
+                crate::world::lod::ATMOSPHERE_FOG_END_M
+            } else {
+                crate::world::lod::FOG_END_M
+            },
+            curve: FOG_DEPTH_CURVE,
+        }
+    }
+
+    fn apply_visuals(
+        &mut self,
+        sun: sky::Horizontal,
+        moon: sky::MoonState,
+        eye: Vector3,
+        weather_fog: f32,
+    ) {
         let alt = sun.altitude_deg;
         let sun_dir = Self::direction_to(sun.azimuth_deg, alt);
         let moon_dir = Self::direction_to(moon.position.azimuth_deg, moon.position.altitude_deg);
         // The afternoon is a direction, not an altitude: the west sun at the same height gets a
         // warmer table row and a slightly warmer color than the morning sun.
         let afternoon = sky::afternoon_warmth(sky::sun_hour_angle_deg(self.sim_unix));
+        let atmosphere = crate::style::light_look().atmosphere;
         let look = sky::sky_look(alt, self.light, &moon, afternoon, self.cloud_cover as f32);
+        let clear_depth = self.clear_fog_depth();
         if let Some(light) = self.sun.as_mut() {
             Self::orient(light, sun_dir);
             let tint = look.sun_color;
             light.set_color(Color::from_rgb(tint[0], tint[1], tint[2]));
             let sun_energy = sky::sun_energy(alt, sky::SUN_MAX_ENERGY)
-                * sky::cloud_light_factor(self.cloud_cover);
+                * sky::cloud_light_factor(self.cloud_cover)
+                * f64::from(fog::sun_factor(weather_fog));
             light.set_param(Param::ENERGY, sun_energy as f32);
         }
         if let Some(light) = self.moon.as_mut() {
@@ -444,10 +509,38 @@ impl EnvironmentClock {
             mat.set_shader_parameter("cloud_tint", &rgb_variant(look.cloud_tint));
             mat.set_shader_parameter("sky_gain", &look.sky_gain.to_variant());
             // A neblina de profundidade (lod.rs) segue o céu na direção do olhar da câmera.
-            let fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
+            let mut fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
+            if atmosphere {
+                // The warm haze: the sky color pulled toward the peach of the atmosphere.
+                fog = [0, 1, 2].map(|i| {
+                    fog[i] + (sky::ATMOSPHERE_HAZE_RGB[i] - fog[i]) * sky::ATMOSPHERE_HAZE_MIX
+                });
+            }
+            // Weather fog (item 65): as it thickens, the far world goes into the overcast haze
+            // color instead of the clear-air sky color, and the sky follows it, so the horizon
+            // keeps meeting the fogged hills. At 0 both are the item 124 values, untouched.
+            if weather_fog > 0.0 {
+                let haze = sky::haze_color(&look, atmosphere);
+                fog = [0, 1, 2].map(|i| fog[i] + (haze[i] - fog[i]) * weather_fog);
+            }
             env.set_fog_light_color(Color::from_rgb(fog[0], fog[1], fog[2]));
             RenderingServer::singleton()
                 .global_shader_parameter_set(HAZE_GLOBAL, &rgb_variant(fog));
+            // The depth fog falloff and the sky share of it: the clear-weather values of the
+            // theme at density 0, closing in as the weather fog rises.
+            let depth = FogDepth::faded(clear_depth, weather_fog);
+            env.set_fog_depth_begin(depth.begin_m);
+            env.set_fog_depth_end(depth.end_m);
+            env.set_fog_depth_curve(depth.curve);
+            self.fog_depth = depth;
+            let clear_sky_affect = if atmosphere {
+                ATMOSPHERE_FOG_SKY_AFFECT
+            } else {
+                0.0
+            };
+            env.set_fog_sky_affect(
+                clear_sky_affect + (fog::SKY_AFFECT_FULL - clear_sky_affect) * weather_fog,
+            );
             // The ambient fill is the saturated sky mid color tinted toward the theme shadow
             // (blue-violet at noon, warm gray at the golden hour): shaded faces are never
             // averaged into neutral gray.
@@ -461,8 +554,16 @@ impl EnvironmentClock {
             ];
             env.set_ambient_light_color(Color::from_rgb(amb[0], amb[1], amb[2]));
             // The fill is a curve of the sun altitude, not of the cloud-dimmed light: a low sun
-            // and a morning need a lot of fill, a high sun very little.
-            env.set_ambient_light_energy(sky::ambient_energy(alt) as f32);
+            // and a morning need a lot of fill, a high sun very little. The atmosphere theme
+            // adds a little more while the sun is up (never at night), and the weather fog lifts
+            // all of it: the scattered sun lightens the shaded faces instead of leaving a dark
+            // scene under a gray sky.
+            let mut ambient_energy =
+                sky::ambient_energy(alt) * f64::from(fog::ambient_factor(weather_fog));
+            if atmosphere && alt > sky::SUN_DARK_DEG {
+                ambient_energy *= ATMOSPHERE_AMBIENT_GAIN;
+            }
+            env.set_ambient_light_energy(ambient_energy as f32);
             let day = self.clear_light.clamp(0.0, 1.0) as f32;
             let day_exposure = sky::day_exposure(alt, self.cloud_cover);
             env.set_tonemap_exposure(1.0 + (day_exposure - 1.0) * day);
@@ -582,6 +683,18 @@ impl INode for EnvironmentClock {
             on_below: LAMP_ON_BELOW,
             off_above: LAMP_OFF_ABOVE,
         });
+        // Captures set the weather fog without a UI: `--fog-density <0..1>`, as `--style` does
+        // for the theme. A value outside 0..1 is clamped.
+        let args: Vec<String> = Os::singleton()
+            .get_cmdline_user_args()
+            .as_slice()
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+        if let Some(density) = fog::density_from_args(&args) {
+            self.fog_density = density;
+            godot_print!("environment: weather fog {density:.2} from the command line");
+        }
         godot_print!(
             "environment: start {} (local), speed {}x, real_time {}",
             self.local_clock(),
@@ -599,14 +712,17 @@ impl INode for EnvironmentClock {
         let sun = sky::sun(self.sim_unix);
         let moon = sky::moon(self.sim_unix);
         self.sun_alt_deg = sun.altitude_deg;
-        self.clear_light = sky::light_level(sun.altitude_deg, &moon, WEATHER_FACTOR);
+        // The weather fog is the cloud cover (item 25) scaled by the fog density.
+        let weather_fog = fog::effective(self.fog_density, self.cloud_cover);
+        self.weather_fog = weather_fog;
+        self.clear_light = sky::light_level(sun.altitude_deg, &moon, 1.0);
         self.light = sky::light_level(
             sun.altitude_deg,
             &moon,
-            WEATHER_FACTOR * sky::cloud_light_factor(self.cloud_cover),
+            sky::cloud_light_factor(self.cloud_cover) * f64::from(fog::light_factor(weather_fog)),
         );
         let eye = self.camera_forward();
-        self.apply_visuals(sun, moon, eye);
+        self.apply_visuals(sun, moon, eye, weather_fog);
         let (sim, speed) = (self.sim_unix, self.speed);
         if self.panel.as_mut().is_some_and(|p| p.tick(delta)) {
             if let Some(panel) = self.panel.as_mut() {
@@ -656,7 +772,7 @@ impl INode for EnvironmentClock {
         if self.log_timer >= LOG_PERIOD_S {
             self.log_timer = 0.0;
             godot_print!(
-                "environment: local {} sun_alt {:.2} deg light {:.3} street_lamps {}",
+                "environment: local {} sun_alt {:.2} deg light {:.3} street_lamps {} fog {:.2} depth {:.0}..{:.0} m vis {:.0} m",
                 self.local_clock(),
                 self.sun_alt_deg,
                 self.light,
@@ -664,7 +780,11 @@ impl INode for EnvironmentClock {
                     "on"
                 } else {
                     "off"
-                }
+                },
+                self.weather_fog,
+                self.fog_depth.begin_m,
+                self.fog_depth.end_m,
+                self.fog_depth.visibility_m()
             );
         }
     }
@@ -700,6 +820,18 @@ impl INode for EnvironmentClock {
     }
 
     fn unhandled_input(&mut self, event: Gd<InputEvent>) {
+        // Debug (item 65, no UI): `F` cycles the weather fog through 0, 0.5 and 1.
+        if let Ok(key) = event.clone().try_cast::<InputEventKey>() {
+            if key.is_pressed() && !key.is_echo() && key.get_physical_keycode() == Key::F {
+                self.fog_density = fog::next_step(self.fog_density);
+                godot_print!(
+                    "environment: weather fog {:.2} (cloud cover {:.2}, density {:.2})",
+                    fog::effective(self.fog_density, self.cloud_cover),
+                    self.cloud_cover,
+                    self.fog_density
+                );
+            }
+        }
         if event.is_action_pressed("env_time_back") {
             self.sim_unix -= DEBUG_STEP_S;
         } else if event.is_action_pressed("env_time_forward") {

@@ -1,7 +1,10 @@
 //! Junction geometry: extends road ends so ribbons meet at crossings and overlap across tile
 //! borders. Pure Rust (no Godot types). Imports `geometry::vec2` and `tileformat`/`tilebake` data.
+use std::collections::BTreeMap;
+
 use tileformat::{road_width_m, Polyline, Tile};
 
+use super::road::Ribbon;
 use super::vec2::{dist, dist_to_segment, unit, unit_normal};
 
 /// How far from another road's band an end still counts as a junction, in meters.
@@ -155,6 +158,71 @@ fn seam_corner_half(end: [f64; 2], d: [f64; 2], around: &[&Tile]) -> Option<f64>
         }
     }
     best
+}
+
+/// Gives every ribbon meeting at a shared node one height at that node, so the junction reads as
+/// a single surface and no ribbon steps over the other where they cross.
+///
+/// The highest ribbon's center height at the node is the floor: every lower ribbon is raised to
+/// it, easing the extra lift back over the neighboring stations (`Ribbon::raise_at`). Repeated a
+/// few times because a raise can reach the next node along a road. Only lifts go up, so no
+/// ribbon sinks into the terrain. Nodes are matched with the bake's key (`field::NODE_KEY_M`), so
+/// only places the profile reconciliation already treats as one node are joined. The map is
+/// ordered, so the result is the same on every run (tile geometry stays reproducible).
+pub(super) fn reconcile_lift(ribbons: &mut [(usize, Ribbon)]) {
+    /// Two ribbon stations within half of this are the same node (`field::NODE_KEY_M`).
+    const NODE_KEY_M: f64 = 0.1;
+    /// Passes over the nodes: a raise can reach the next node along a road, so a few settle it.
+    const PASSES: usize = 4;
+    /// A larger gap between the two surfaces at a matched node is a grade separation (or bad
+    /// data), not a junction: welding it would build a ramp into the sky, so it is left alone.
+    const WELD_MAX_M: f32 = 0.5;
+    let mut nodes: BTreeMap<(i64, i64), Vec<(usize, usize)>> = BTreeMap::new();
+    for (slot, (_, ribbon)) in ribbons.iter().enumerate() {
+        for &s in ribbon.node_stations() {
+            let c = ribbon.centers()[s];
+            let key = (
+                (c[0] / NODE_KEY_M).round() as i64,
+                (c[1] / NODE_KEY_M).round() as i64,
+            );
+            nodes.entry(key).or_default().push((slot, s));
+        }
+    }
+    for _ in 0..PASSES {
+        let mut raised = false;
+        for entries in nodes.values() {
+            if entries.len() < 2 {
+                continue;
+            }
+            let height = |slot: usize, s: usize| {
+                let r = &ribbons[slot].1;
+                r.center_height(s) + r.extra_at(s)
+            };
+            let top = entries
+                .iter()
+                .map(|&(slot, s)| height(slot, s))
+                .fold(f32::MIN, f32::max);
+            let bottom = entries
+                .iter()
+                .map(|&(slot, s)| height(slot, s))
+                .fold(f32::MAX, f32::min);
+            if top - bottom > WELD_MAX_M {
+                continue;
+            }
+            for &(slot, s) in entries {
+                let r = &ribbons[slot].1;
+                let need = top - (r.center_height(s) + r.extra_at(s));
+                if need > 1e-6 {
+                    let value = r.extra_at(s) + need;
+                    ribbons[slot].1.raise_at(s, value);
+                    raised = true;
+                }
+            }
+        }
+        if !raised {
+            break;
+        }
+    }
 }
 
 /// The last point before `end` in `pts` that differs from it (or `end` if none).

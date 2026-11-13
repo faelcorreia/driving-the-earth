@@ -3,13 +3,15 @@
 //! Only `render` and `world` (and `earth_world`, the orchestrator) use the Godot API.
 
 use godot::classes::mesh::{ArrayType, PrimitiveType};
+use godot::classes::rendering_server::GlobalShaderParameterType;
 use godot::classes::{
     ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, ConvexPolygonShape3D, HeightMapShape3D,
-    Material, MeshInstance3D, Node3D, PackedScene, Shader, ShaderMaterial, StandardMaterial3D,
-    StaticBody3D,
+    Material, MeshInstance3D, Node3D, PackedScene, RenderingServer, Shader, ShaderMaterial,
+    StandardMaterial3D, StaticBody3D,
 };
 use godot::obj::Inherits;
 use godot::prelude::*;
+use std::sync::Once;
 
 pub(crate) mod far_lights;
 pub(crate) mod lamps;
@@ -33,15 +35,55 @@ pub(crate) fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
 }
 
 /// Material of terrain without per-vertex ground cover: the grass color of the active theme.
-pub(crate) fn terrain_material() -> Gd<StandardMaterial3D> {
+pub(crate) fn terrain_material() -> Gd<Material> {
     let grass = style::world_palette().grass;
-    material((grass[0], grass[1], grass[2]))
+    let color = (grass[0], grass[1], grass[2]);
+    toon_or_standard(color)
 }
 
 /// Material of the road ribbons: the asphalt color of the active theme.
-pub(crate) fn road_material() -> Gd<StandardMaterial3D> {
+pub(crate) fn road_material() -> Gd<Material> {
     let road = style::road_rgb();
-    material((road[0], road[1], road[2]))
+    toon_or_standard((road[0], road[1], road[2]))
+}
+
+/// White albedo: meshes with per-vertex colors (terrain with ground cover, buildings with no
+/// shader) show their colors as they are.
+pub(crate) fn vertex_material() -> Gd<Material> {
+    toon_or_standard((1.0, 1.0, 1.0))
+}
+
+/// Toon light of the low-poly world (backlog 125) is on for the `lowpoly` family only.
+fn toon_enabled() -> bool {
+    style::world_look().flat_shading
+}
+
+/// Toon light of the low-poly world (backlog 125), or `None` in any other theme.
+///
+/// `realistic` (`world.flat_shading` false) keeps the plain `StandardMaterial3D` shading: the
+/// theme family is the switch, there is no second knob to keep in sync. A shader material is the
+/// same single surface as the standard one (same mesh, same draw call) and the extra work is per
+/// pixel, not per vertex.
+fn toon_material(color: (f32, f32, f32)) -> Option<Gd<ShaderMaterial>> {
+    if !toon_enabled() {
+        return None;
+    }
+    let shader: Gd<Shader> = try_load("res://shaders/toon_world.gdshader").ok()?;
+    let mut mat = ShaderMaterial::new_gd();
+    mat.set_shader(&shader);
+    mat.set_shader_parameter(
+        "albedo",
+        &Color::from_rgb(color.0, color.1, color.2).to_variant(),
+    );
+    Some(mat)
+}
+
+/// `toon_material` when the theme wants it, the plain standard material otherwise.
+fn toon_or_standard(color: (f32, f32, f32)) -> Gd<Material> {
+    match toon_material(color) {
+        Some(mat) => mat.upcast(),
+        None => material(color).upcast(),
+    }
 }
 
 /// Instantiates the car at `position`, turned by `yaw` about +Y.
@@ -53,12 +95,40 @@ pub(crate) fn spawn_car(position: Vector3, yaw: f32) -> Option<Gd<Node3D>> {
     Some(car)
 }
 
+/// Shader globals of the street lamps' clock, read by `building.gdshader` for the night windows.
+const LAMP_GLOBALS: [&str; 3] = ["lamp_on_time", "lamp_state", "lamp_now"];
+
+/// Registers the lamp globals before any building material compiles.
+///
+/// `EnvironmentClock` registers the same names in its `ready`, but that runs in the loading stage
+/// `Environment`, after the spawn tiles are built (backlog 123). The building shader is therefore
+/// compiled first with no global registered: Godot warns that it "will not display correctly" and
+/// the windows depend on the material picking the names up later. Registering them here makes the
+/// binding right from the first compile. Godot logs an error when the clock adds the names a second
+/// time and keeps this registration and the values the clock sets afterwards, so add them only once.
+fn register_lamp_globals() {
+    static ADDED: Once = Once::new();
+    ADDED.call_once(|| {
+        let mut rs = RenderingServer::singleton();
+        for name in LAMP_GLOBALS {
+            rs.global_shader_parameter_add(
+                &StringName::from(name),
+                GlobalShaderParameterType::FLOAT,
+                &Variant::from(-1.0f32),
+            );
+        }
+    });
+}
+
 /// Material of the buildings: vertex colour, windows by mask in the shader (`building.gdshader`).
 /// None when the shader cannot be loaded; the buildings then keep the plain vertex-colour material.
 pub(crate) fn building_material() -> Option<Gd<ShaderMaterial>> {
+    register_lamp_globals();
     let shader: Gd<Shader> = try_load("res://shaders/building.gdshader").ok()?;
     let mut mat = ShaderMaterial::new_gd();
     mat.set_shader(&shader);
+    // The mask and the night emission are the same in every theme; only the light model changes.
+    mat.set_shader_parameter("toon_light", &Variant::from(toon_enabled()));
     Some(mat)
 }
 
