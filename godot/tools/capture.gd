@@ -15,6 +15,9 @@ extends SceneTree
 ## pole = luz acesa mais próxima do carro, near = 6 m à frente dela, between = 17,5 m à frente
 ## dela, na direção do carro). --car-under-pole 1 põe o carro sob essa luz antes das fotos de cima.
 ## --cloud-cover 0.5 (0 a 1, ausente = o padrão do Environment): sets the clock's cloud_cover.
+## --warmup 1 (default, 0 disables): with a night --start, step back to a daytime hour and run the
+## clock up to --start again, so the street lamps (and the building windows after them) turn on at
+## the real dusk instead of at the instant the clock is placed.
 ##
 ## Para cada horário: o relógio anda em tempo acelerado até o horário e para (speed 0). Então
 ## salva PNGs:
@@ -32,6 +35,8 @@ const SERRA_POINT_M := Vector2(778.8, -6614.4)
 const SERRA_ALT_M := 1379.6
 ## Physics frames the car gets to drop onto the streamed road after a --point teleport.
 const POINT_SETTLE_FRAMES := 600
+## Speed of the clock while it goes back over the day up to the requested night start.
+const WARMUP_SPEED := 1800.0
 
 
 func _initialize() -> void:
@@ -55,6 +60,7 @@ func _parse_args() -> Dictionary:
 		"car_under_pole": "0",
 		"point": "spawn",
 		"cloud_cover": "",
+		"warmup": "1",
 	}
 	var args := OS.get_cmdline_user_args()
 	var i := 0
@@ -124,6 +130,43 @@ func _min_to_hm(minutes: float) -> String:
 	return "%02d:%02d" % [t / 60, t % 60]
 
 
+## Puts the lamp clock in the state it has in play at the requested start. A clock placed at night
+## primes the street lamps right there, so their staggered turn-on (0-6 min) and the building
+## windows, which follow them by up to 25 min, would only be partial at 21:30. Stepping back to a
+## daytime hour and fast-forwarding to the start makes the crossing happen at dusk, as it does for
+## a player who drove from the afternoon. `--warmup 0` keeps the old behaviour.
+func _warm_up_lamp_clock(clock: Node, ymd: PackedStringArray, opts: Dictionary) -> void:
+	if opts["warmup"] != "1":
+		return
+	var start_hour := _hm_to_min(opts["start"]) / 60.0
+	var target_unix: float = clock.call("game_unix")
+	var hour := start_hour
+	var daylight := false
+	for i in 24:
+		await process_frame
+		if float(clock.call("sun_altitude_deg")) > 5.0:
+			daylight = true
+			break
+		# An hour before is the previous day when it crosses midnight; local_to_unix handles it.
+		hour -= 1.0
+		clock.call("set_local_time", ymd[0].to_int(), ymd[1].to_int(), ymd[2].to_int(), hour)
+	if not daylight:
+		clock.call("set_local_time", ymd[0].to_int(), ymd[1].to_int(), ymd[2].to_int(), start_hour)
+		print("capture: no daylight within 24 h of %s, lamp clock not warmed" % opts["start"])
+		return
+	if is_equal_approx(hour, start_hour):
+		return
+	print("capture: lamp clock warming from %s to %s" % [_min_to_hm(hour * 60.0), opts["start"]])
+	clock.set("speed", WARMUP_SPEED)
+	while float(clock.call("game_unix")) < target_unix:
+		await process_frame
+	clock.set("speed", 0.0)
+	# The fast-forward may overshoot by up to one simulated frame: put the clock exactly on --start
+	# again; the lamp crossing and its state stay from the warm-up.
+	clock.call("set_local_time", ymd[0].to_int(), ymd[1].to_int(), ymd[2].to_int(), start_hour)
+	await process_frame
+
+
 ## Dia civil de hoje em Brasília (UTC-3, sem horário de verão desde 2019), YYYY-MM-DD.
 func _today_brt() -> String:
 	var d := Time.get_datetime_dict_from_unix_time(int(Time.get_unix_time_from_system()) - 3 * 3600)
@@ -189,6 +232,7 @@ func run() -> void:
 	while waited < settle:
 		await process_frame
 		waited += root.get_process_delta_time()
+	await _warm_up_lamp_clock(clock, ymd, opts)
 
 	var car_cam := world.find_child("Camera", true, false) as Camera3D
 	var driver := world.find_child("DriverCamera", true, false) as Camera3D

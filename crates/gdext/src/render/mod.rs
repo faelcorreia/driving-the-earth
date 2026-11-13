@@ -3,14 +3,15 @@
 //! Only `render` and `world` (and `earth_world`, the orchestrator) use the Godot API.
 
 use godot::classes::mesh::{ArrayType, PrimitiveType};
+use godot::classes::rendering_server::GlobalShaderParameterType;
 use godot::classes::{
     ArrayMesh, CollisionShape3D, ConcavePolygonShape3D, ConvexPolygonShape3D, HeightMapShape3D,
     Material, MeshInstance3D, Node3D, PackedScene, RenderingServer, Shader, ShaderMaterial,
     StandardMaterial3D, StaticBody3D,
 };
-use godot::classes::rendering_server::GlobalShaderParameterType;
 use godot::obj::Inherits;
 use godot::prelude::*;
+use std::sync::Once;
 
 pub(crate) mod far_lights;
 pub(crate) mod lamps;
@@ -57,23 +58,26 @@ pub(crate) fn spawn_car(position: Vector3, yaw: f32) -> Option<Gd<Node3D>> {
 /// Shader globals of the street lamps' clock, read by `building.gdshader` for the night windows.
 const LAMP_GLOBALS: [&str; 3] = ["lamp_on_time", "lamp_state", "lamp_now"];
 
-/// Registers the lamp globals before any building material compiles. The clock (`EnvironmentClock`)
-/// registers them too, but in the loading stage `Environment`, after the spawn tiles are built: a
-/// shader compiled before that reads no global, so its windows never light. Names already known
-/// are left alone, with their values.
+/// Registers the lamp globals before any building material compiles.
+///
+/// `EnvironmentClock` registers the same names in its `ready`, but that runs in the loading stage
+/// `Environment`, after the spawn tiles are built (backlog 123). The building shader is therefore
+/// compiled first with no global registered: Godot warns that it "will not display correctly" and
+/// the windows depend on the material picking the names up later. Registering them here makes the
+/// binding right from the first compile. Godot logs an error when the clock adds the names a second
+/// time and keeps this registration and the values the clock sets afterwards, so add them only once.
 fn register_lamp_globals() {
-    let mut rs = RenderingServer::singleton();
-    let known = rs.global_shader_parameter_get_list();
-    for name in LAMP_GLOBALS {
-        let wanted = StringName::from(name);
-        if !known.iter_shared().any(|n| n == wanted) {
+    static ADDED: Once = Once::new();
+    ADDED.call_once(|| {
+        let mut rs = RenderingServer::singleton();
+        for name in LAMP_GLOBALS {
             rs.global_shader_parameter_add(
-                &wanted,
+                &StringName::from(name),
                 GlobalShaderParameterType::FLOAT,
                 &Variant::from(-1.0f32),
             );
         }
-    }
+    });
 }
 
 /// Material of the buildings: vertex colour, windows by mask in the shader (`building.gdshader`).
