@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use godot::classes::file_access::ModeFlags;
 use godot::classes::{
-    CanvasLayer, FileAccess, INode3D, MeshInstance3D, Node3D, PackedScene, ProjectSettings,
-    RigidBody3D, ShaderMaterial, StandardMaterial3D, Os,
+    CanvasLayer, FileAccess, INode3D, Material, MeshInstance3D, Node3D, PackedScene,
+    ProjectSettings, RigidBody3D, ShaderMaterial, Os,
 };
 use godot::prelude::*;
 use worldmap::home::Home;
@@ -31,8 +31,8 @@ use crate::render::far_lights::{rss_mb, DistantLights};
 use crate::render::lamps::{head_position, lamp_node, LampLights, LampMaterials, LAMP_POOL};
 use crate::render::world_map::WorldMapView;
 use crate::render::{
-    building_body, building_material, material, road_material, solid_body, spawn_car, terrain_body,
-    terrain_material,
+    building_body, building_material, road_material, solid_body, spawn_car, terrain_body,
+    terrain_material, vertex_material,
 };
 use crate::style;
 use crate::ui_text::{language, text as ui_text, Lang};
@@ -194,11 +194,13 @@ pub struct EarthWorld {
 
     index: Option<Arc<MapIndex>>,
     car: Option<Gd<Node3D>>,
-    terrain_mat: Option<Gd<StandardMaterial3D>>,
-    road_mat: Option<Gd<StandardMaterial3D>>,
+    /// Materials of the low-poly toon light in `lowpoly`, plain standard materials otherwise
+    /// (backlog 125): the same single surface either way, so no extra draw call.
+    terrain_mat: Option<Gd<Material>>,
+    road_mat: Option<Gd<Material>>,
     /// White albedo: meshes with per-vertex colors (buildings, terrain with ground cover) show
     /// their colors as they are.
-    vertex_mat: Option<Gd<StandardMaterial3D>>,
+    vertex_mat: Option<Gd<Material>>,
     /// Material of the buildings: vertex colors, windows by mask (None: `vertex_mat` is used).
     building_mat: Option<Gd<ShaderMaterial>>,
     /// Loaded tiles, each one a container node with the terrain and road bodies.
@@ -739,7 +741,7 @@ impl EarthWorld {
         self.start_gps(&cache_root.display().to_string(), &id);
         self.terrain_mat = Some(terrain_material());
         self.road_mat = Some(road_material());
-        self.vertex_mat = Some(material((1.0, 1.0, 1.0)));
+        self.vertex_mat = Some(vertex_material());
         self.building_mat = building_material();
         if self.building_mat.is_none() {
             godot_warn!("building shader not loaded: buildings have no windows");
@@ -893,13 +895,15 @@ impl EarthWorld {
         }
         let car = self.car.clone();
         let material = self.terrain_mat.clone();
-        if let (Some(car), Some(material)) = (car, material) {
+        let road_mat = self.road_mat.clone();
+        if let (Some(car), Some(material), Some(road_mat)) = (car, material, road_mat) {
             lod::configure_view(self.base().get_parent(), &car);
             self.lod = Some(TerrainLod::start(
                 &cache_root,
                 &id,
                 &index.meta,
                 material,
+                road_mat,
             ));
         }
         self.start_loader(index);
@@ -1132,8 +1136,16 @@ impl EarthWorld {
             let path = cache.join(&id).join("far_lights.bin");
             self.far_loader = Some(spawn_load(path, self.far_lights_max.max(0) as usize));
         }
-        if let Some(material) = self.terrain_mat.clone() {
-            self.lod = Some(TerrainLod::start(&cache, &id, &index.meta, material));
+        if let (Some(material), Some(road_mat)) =
+            (self.terrain_mat.clone(), self.road_mat.clone())
+        {
+            self.lod = Some(TerrainLod::start(
+                &cache,
+                &id,
+                &index.meta,
+                material,
+                road_mat,
+            ));
         }
         self.start_loader(index.clone());
         if let Some(mut car) = self.car.clone() {

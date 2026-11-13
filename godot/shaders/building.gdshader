@@ -1,4 +1,5 @@
 shader_type spatial;
+render_mode diffuse_lambert, specular_disabled;
 
 // Buildings (B1 + L1c): the vertex color is the facade. Windows are a mask on the wall, no geometry.
 // UV (from building.rs): x = perimeter in m (continuous around the ring), y = height above the flat
@@ -8,7 +9,12 @@ shader_type spatial;
 // half of the buildings have a dark shop band instead. Night: a share of the windows of each building
 // (30-60%, by seed) is lit, warm or cold by seed, after a delay of 0..25 min after the street lamps.
 // Windows fade to the plain facade past ~200-260 m (no moire). The facade is matte (no metallic,
-// roughness 1, low specular) so the low-poly facets read as flat paint. No textures.
+// roughness 1, no direct specular in the toon light) so the low-poly facets read as flat paint.
+// No textures.
+// Light (backlog 125): the same soft two-band toon light as `toon_world.gdshader`, with the same
+// warm/lilac bands and the discreet rim on the sun side. It is only in `light()`, so the window,
+// door and shop masks and the night emission are untouched. `toon_light` false keeps the previous
+// plain Lambert shading (the realistic theme), so the mask keeps working without the bands.
 global uniform float lamp_on_time;
 global uniform float lamp_state;
 global uniform float lamp_now;
@@ -26,6 +32,13 @@ uniform float lit_min = 0.3;
 uniform float lit_max = 0.6;
 uniform float delay_max_s = 1500.0;
 uniform float ramp_s = 60.0;
+uniform bool toon_light = true;
+uniform float band_softness = 0.16;
+// Multipliers of the direct light, not colors: warm on the sun side, lilac in the shade band.
+uniform vec3 lit_tint = vec3(1.05, 1.0, 0.94);
+uniform vec3 shade_tint = vec3(0.92, 0.88, 0.97);
+uniform vec3 rim_color : source_color = vec3(1.0, 0.78, 0.55);
+uniform float rim_strength = 0.16;
 
 varying vec2 wall_uv;
 varying float seed;
@@ -73,7 +86,7 @@ void fragment() {
 	facade = mix(facade, COLOR.rgb * 0.45, band * 0.9);
 	ALBEDO = facade;
 	METALLIC = 0.0;
-	SPECULAR = 0.15;
+	SPECULAR = toon_light ? 0.0 : 0.15;
 	ROUGHNESS = 1.0;
 
 	// Night: the building lights up after its delay, and only some of its windows.
@@ -83,4 +96,40 @@ void fragment() {
 	float lit = step(hash(vec2(floor(u / window_pitch), floor_i) + seed * 101.0), share);
 	vec3 tint = fract(seed * 13.7) < 0.5 ? color_warm : color_cold;
 	EMISSION = tint * on_global * emission_gain * (win * lit + band * 0.3);
+}
+
+void light() {
+	if (!toon_light) {
+		// Realistic theme: the plain Lambert term of the previous shader (no bands, no rim).
+		DIFFUSE_LIGHT += clamp(dot(NORMAL, LIGHT), 0.0, 1.0) * ATTENUATION * LIGHT_COLOR / PI;
+	} else {
+		// Soft two bands of direct light, as in `toon_world.gdshader` (same constants, so a wall
+		// and the road beside it share the band edges).
+		float ndl = dot(NORMAL, LIGHT);
+		float wrap = clamp((ndl + 0.35) / 1.35, 0.0, 1.0);
+		float low = smoothstep(0.30 - band_softness, 0.30 + band_softness, wrap);
+		float high = smoothstep(0.72 - band_softness, 0.72 + band_softness, wrap);
+		float bands = low * 0.62 + high * 0.38;
+		if (!LIGHT_IS_DIRECTIONAL) {
+			// A local light (street lamp) keeps its own color, with one soft edge and no rim; see
+			// `toon_world.gdshader` for why its band is near flat.
+			float local_bands = low * 0.98 + high * 0.02;
+			DIFFUSE_LIGHT += local_bands * ATTENUATION * LIGHT_COLOR / PI;
+		} else {
+			// How warm the light is: 1 for the low sun, 0 for the cool moon, in between for the
+			// high sun.
+			float warmth = smoothstep(0.0, 0.25, LIGHT_COLOR.r - LIGHT_COLOR.b);
+			// The warm/lilac tint belongs to the sun: the moon keeps its own (cool) color.
+			vec3 tint = mix(vec3(1.0), mix(shade_tint, lit_tint, bands), warmth);
+			// The shade band keeps a small share of the warm light, tinted lilac, so the side
+			// away from the sun reads as painted shade instead of only ambient. Off for cool lights.
+			vec3 shade = tint * max(bands, warmth * 0.10);
+			DIFFUSE_LIGHT += shade * ATTENUATION * LIGHT_COLOR / PI;
+
+			float fresnel = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
+			float sunward = smoothstep(0.0, 0.35, ndl);
+			float rim = rim_strength * warmth * fresnel * sunward;
+			DIFFUSE_LIGHT += rim_color * rim * ATTENUATION * LIGHT_COLOR / PI;
+		}
+	}
 }

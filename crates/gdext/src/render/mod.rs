@@ -35,15 +35,55 @@ pub(crate) fn material(color: (f32, f32, f32)) -> Gd<StandardMaterial3D> {
 }
 
 /// Material of terrain without per-vertex ground cover: the grass color of the active theme.
-pub(crate) fn terrain_material() -> Gd<StandardMaterial3D> {
+pub(crate) fn terrain_material() -> Gd<Material> {
     let grass = style::world_palette().grass;
-    material((grass[0], grass[1], grass[2]))
+    let color = (grass[0], grass[1], grass[2]);
+    toon_or_standard(color)
 }
 
 /// Material of the road ribbons: the asphalt color of the active theme.
-pub(crate) fn road_material() -> Gd<StandardMaterial3D> {
+pub(crate) fn road_material() -> Gd<Material> {
     let road = style::road_rgb();
-    material((road[0], road[1], road[2]))
+    toon_or_standard((road[0], road[1], road[2]))
+}
+
+/// White albedo: meshes with per-vertex colors (terrain with ground cover, buildings with no
+/// shader) show their colors as they are.
+pub(crate) fn vertex_material() -> Gd<Material> {
+    toon_or_standard((1.0, 1.0, 1.0))
+}
+
+/// Toon light of the low-poly world (backlog 125) is on for the `lowpoly` family only.
+fn toon_enabled() -> bool {
+    style::world_look().flat_shading
+}
+
+/// Toon light of the low-poly world (backlog 125), or `None` in any other theme.
+///
+/// `realistic` (`world.flat_shading` false) keeps the plain `StandardMaterial3D` shading: the
+/// theme family is the switch, there is no second knob to keep in sync. A shader material is the
+/// same single surface as the standard one (same mesh, same draw call) and the extra work is per
+/// pixel, not per vertex.
+fn toon_material(color: (f32, f32, f32)) -> Option<Gd<ShaderMaterial>> {
+    if !toon_enabled() {
+        return None;
+    }
+    let shader: Gd<Shader> = try_load("res://shaders/toon_world.gdshader").ok()?;
+    let mut mat = ShaderMaterial::new_gd();
+    mat.set_shader(&shader);
+    mat.set_shader_parameter(
+        "albedo",
+        &Color::from_rgb(color.0, color.1, color.2).to_variant(),
+    );
+    Some(mat)
+}
+
+/// `toon_material` when the theme wants it, the plain standard material otherwise.
+fn toon_or_standard(color: (f32, f32, f32)) -> Gd<Material> {
+    match toon_material(color) {
+        Some(mat) => mat.upcast(),
+        None => material(color).upcast(),
+    }
 }
 
 /// Instantiates the car at `position`, turned by `yaw` about +Y.
@@ -87,6 +127,8 @@ pub(crate) fn building_material() -> Option<Gd<ShaderMaterial>> {
     let shader: Gd<Shader> = try_load("res://shaders/building.gdshader").ok()?;
     let mut mat = ShaderMaterial::new_gd();
     mat.set_shader(&shader);
+    // The mask and the night emission are the same in every theme; only the light model changes.
+    mat.set_shader_parameter("toon_light", &Variant::from(toon_enabled()));
     Some(mat)
 }
 
