@@ -23,11 +23,11 @@ use tileformat::Tile;
 use building::building_mesh;
 use field::{Field, Surface};
 use ground::terrain_colors;
-use junction::extend_junction_ends;
+use junction::{extend_junction_ends, reconcile_lift};
 use mesh::{normalize, world};
 pub use mesh::{MeshData, TileGeometry};
 pub(crate) use road::ROAD_LIFT_M;
-use road::{push_road, ROAD_ORDER_LIFT_M};
+use road::{Ribbon, ROAD_ORDER_LIFT_M};
 pub use terrain::sample_height;
 pub use tileformat::road_width_m;
 
@@ -94,13 +94,7 @@ pub fn tile_geometry_at(
     let cell = mesh_cell_m;
     let n = (tile_m / cell).round() as usize + 1;
     let (x0, y0) = (tile.x as f64 * tile_m, tile.y as f64 * tile_m);
-    let origin = [x0 - tile_m, y0 - tile_m];
-    let field = Field::new(
-        std::iter::once(tile)
-            .chain(around.iter().copied())
-            .flat_map(|t| t.roads.iter()),
-        origin,
-    );
+    let (field, ends) = field_and_ends(tile, tile_m, around);
     // The collision follows the same profiles on the 2,5 m grid (`collision_heights`). A mesh on that
     // grid already has them in its interior, so the collision reads it; a coarser mesh gets its own
     // surface on the fine grid, from a copy of the field made before the surface takes it.
@@ -140,12 +134,22 @@ pub fn tile_geometry_at(
 
     terrain.colors = terrain_colors(tile, n, cell);
 
+    // Build every ribbon before writing any: a junction gives all the roads that meet at a node
+    // one lift there (`reconcile_lift`), which needs their stations side by side.
+    let mut ribbons: Vec<(usize, Ribbon)> = tile
+        .roads
+        .iter()
+        .zip(&ends)
+        .enumerate()
+        .filter_map(|(idx, (road, pts))| {
+            let half = road_width_m(&road.highway) / 2.0;
+            Ribbon::new(&surface, ground, pts, half).map(|r| (idx, r))
+        })
+        .collect();
+    reconcile_lift(&mut ribbons);
     let mut roads = MeshData::default();
-    let ends = extend_junction_ends(&tile.roads, around, tile_m);
-    for (idx, (road, pts)) in tile.roads.iter().zip(&ends).enumerate() {
-        let half = road_width_m(&road.highway) / 2.0;
-        let lift = ROAD_LIFT_M + (idx % 8) as f32 * ROAD_ORDER_LIFT_M;
-        push_road(&mut roads, &surface, ground, pts, half, lift);
+    for (idx, ribbon) in &ribbons {
+        ribbon.push(&mut roads, road_lift(*idx));
     }
 
     let (buildings, building_prisms) = building_mesh(tile, ground);
@@ -159,6 +163,81 @@ pub fn tile_geometry_at(
         collision,
         mesh_cell_m,
     }
+}
+
+/// The road height field of the tile (its own roads and the neighbors' roads, or the crossing
+/// roads when measuring a junction) and the extended points of the tile's roads. The surface, the
+/// ribbons and the collision are all built from these, so a measurement sees the same field.
+fn field_and_ends<'a>(
+    tile: &Tile,
+    tile_m: f64,
+    around: &[&'a Tile],
+) -> (Field, Vec<Vec<[f64; 2]>>) {
+    let origin = [
+        tile.x as f64 * tile_m - tile_m,
+        tile.y as f64 * tile_m - tile_m,
+    ];
+    let field = Field::new(
+        std::iter::once(tile)
+            .chain(around.iter().copied())
+            .flat_map(|t| t.roads.iter()),
+        origin,
+    );
+    (field, extend_junction_ends(&tile.roads, around, tile_m))
+}
+
+/// Base lift of the ribbon of road `index` (see `ROAD_LIFT_M`/`ROAD_ORDER_LIFT_M`).
+fn road_lift(index: usize) -> f32 {
+    ROAD_LIFT_M + (index % 8) as f32 * ROAD_ORDER_LIFT_M
+}
+
+/// The ribbon mesh of one road of `tile`, drawn on the surface of `tile_geometry_at` (the tile's
+/// own roads and the neighbors' still shape the field) and reconciled with `partners` (the roads
+/// meeting it at the junction being measured). Measurement only: the game draws every road of a
+/// tile as one mesh, so only the junction-step diagnostic needs a ribbon apart.
+#[cfg(test)]
+pub(crate) fn ribbon_of_road(
+    tile: &Tile,
+    tile_m: f64,
+    ground: &dyn Fn(f64, f64) -> f32,
+    around: &[&Tile],
+    index: usize,
+    partners: &[usize],
+) -> MeshData {
+    let (x0, y0) = (tile.x as f64 * tile_m, tile.y as f64 * tile_m);
+    let n = (tile_m / TERRAIN_FINE_CELL_M).round() as usize + 1;
+    let (field, ends) = field_and_ends(tile, tile_m, around);
+    let surface = Surface::new(
+        field,
+        tile,
+        tile_m,
+        ground,
+        [x0, y0],
+        n,
+        TERRAIN_FINE_CELL_M,
+    );
+    let mut indices: Vec<usize> = std::iter::once(index)
+        .chain(partners.iter().copied())
+        .filter(|&i| i < tile.roads.len())
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    let mut ribbons: Vec<(usize, Ribbon)> = indices
+        .into_iter()
+        .filter_map(|idx| {
+            let road = &tile.roads[idx];
+            let half = road_width_m(&road.highway) / 2.0;
+            Ribbon::new(&surface, ground, &ends[idx], half).map(|r| (idx, r))
+        })
+        .collect();
+    reconcile_lift(&mut ribbons);
+    let mut mesh = MeshData::default();
+    for (idx, ribbon) in &ribbons {
+        if *idx == index {
+            ribbon.push(&mut mesh, road_lift(*idx));
+        }
+    }
+    mesh
 }
 
 /// The 2,5 m heightfield of the tile's collision, `TERRAIN_FINE_N` squared, row-major: the recorded
