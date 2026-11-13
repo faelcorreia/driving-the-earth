@@ -27,9 +27,9 @@ anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
 offset_left = -360.0
-offset_top = -110.0
+offset_top = -150.0
 offset_right = 360.0
-offset_bottom = 110.0
+offset_bottom = 150.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
@@ -48,6 +48,22 @@ offset_bottom = -38.0
 grow_horizontal = 2
 grow_vertical = 0
 mouse_filter = 2
+
+[node name="Hint" type="IntroHint" parent="Card"]
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_top = -92.0
+offset_bottom = -54.0
+grow_horizontal = 2
+grow_vertical = 0
+mouse_filter = 2
+theme_override_font_sizes/font_size = 18
+text = "Any key, click or button skips  |  starts on its own in 3 s"
+horizontal_alignment = 1
+vertical_alignment = 1
 
 [node name="Title" type="IntroTitle" parent="."]
 layout_mode = 1

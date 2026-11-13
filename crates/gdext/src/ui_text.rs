@@ -186,6 +186,11 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     ("style.active", "Style: {id}", "Estilo: {id}"),
     ("intro.title", "Driving the Earth", "Driving the Earth"),
+    (
+        "intro.hint",
+        "Any key, click or button skips  |  starts on its own in 3 s",
+        "Qualquer tecla, clique ou botão pula  |  começa sozinho em 3 s",
+    ),
 ];
 
 #[cfg(test)]
