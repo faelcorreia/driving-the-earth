@@ -329,8 +329,12 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
     // table, so their appearance does not change.
     let warm_horizon = warm_horizon(anchors);
     // Deep zenith: the theme's day blue with the low channels pulled down. The top of the sky
-    // stays saturated instead of fading into the horizon's pale gray.
-    let deep = clamp01([0.58 * day[0], 0.70 * day[1], 1.12 * day[2]]);
+    // stays saturated instead of fading into the horizon's pale gray. Item 99: the rendered noon
+    // zenith measured HSV saturation 0.43 after the veil and the ACES tonemap, under the 0.5
+    // floor. Red is cut deeper (0.40 from 0.58) and blue lifted (1.50 from 1.12) instead of
+    // cutting green too: blue carries little of the luminance, so the zenith stays brighter than
+    // the morning one, which the table and the zenith tests require.
+    let deep = clamp01([0.40 * day[0], 0.58 * day[1], 1.50 * day[2]]);
     let apex = clamp01([deep[0] * 1.06, deep[1] * 1.05, deep[2] * 1.06]);
     let warm_white: Rgb = [1.0, 0.96, 0.90];
     [
