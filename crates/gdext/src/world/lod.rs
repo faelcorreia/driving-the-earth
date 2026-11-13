@@ -69,6 +69,11 @@ const SKIRT_M: f32 = 30.0;
 /// Fog: none up to `FOG_BEGIN_M`, opaque from `FOG_END_M` (hides the far edge of the rings).
 pub(crate) const FOG_BEGIN_M: f32 = 5000.0;
 pub(crate) const FOG_END_M: f32 = 10000.0;
+/// Atmosphere themes (`light.atmosphere`) start the depth fog closer, so the warm haze shows on
+/// the mid-distance hills: in `FogMode::DEPTH` the density value is set but the visible falloff
+/// comes from these two distances. The old themes keep `FOG_BEGIN_M`/`FOG_END_M` unchanged.
+pub(crate) const ATMOSPHERE_FOG_BEGIN_M: f32 = 3000.0;
+pub(crate) const ATMOSPHERE_FOG_END_M: f32 = 9000.0;
 /// Camera far plane, so the rings are not cut off before the fog takes them.
 const FAR_M: f32 = 12000.0;
 /// Fog color, the horizon color of the sky.
@@ -650,10 +655,19 @@ pub fn configure_view(parent: Option<Gd<Node>>, car: &Gd<Node3D>) {
         .and_then(|w| w.get_environment());
     match environment {
         Some(mut env) => {
+            let atmosphere = crate::style::light_look().atmosphere;
             env.set_fog_enabled(true);
             env.set_fog_mode(FogMode::DEPTH);
-            env.set_fog_depth_begin(FOG_BEGIN_M);
-            env.set_fog_depth_end(FOG_END_M);
+            env.set_fog_depth_begin(if atmosphere {
+                ATMOSPHERE_FOG_BEGIN_M
+            } else {
+                FOG_BEGIN_M
+            });
+            env.set_fog_depth_end(if atmosphere {
+                ATMOSPHERE_FOG_END_M
+            } else {
+                FOG_END_M
+            });
             env.set_fog_light_color(Color::from_rgb(FOG_COLOR.0, FOG_COLOR.1, FOG_COLOR.2));
         }
         None => {
