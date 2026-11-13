@@ -1,9 +1,11 @@
 //! Vertical profile of a road: the final terrain sampled along the whole way, smoothed in
 //! arc length, capped at a little above the ground, and pinned to one shared height at the
-//! nodes where ways meet (or end). The shared height comes from a smoothed 2-D terrain field
-//! at the node, so every way through a node gets the same value. Each way's profile is then
-//! bent to that value with a fade whose length grows with the change. Horizontal geometry is
-//! never changed.
+//! nodes where ways meet (or end). The cap is measured against the real terrain under each
+//! point (the same surface the game draws), because the along-way smoothing overshoots the
+//! ground on a convex break. The shared height comes from a smoothed 2-D terrain field at the
+//! node, so every way through a node gets the same value. Each way's profile is then bent to
+//! that value with a fade whose length grows with the change. Horizontal geometry is never
+//! changed.
 use std::collections::{HashMap, HashSet};
 
 /// Spacing of the samples along the way (m).
@@ -109,17 +111,27 @@ pub struct SmoothWay {
     pub pts: Vec<[f64; 2]>,
     /// Arc length at each point.
     pub s: Vec<f64>,
-    /// Smoothed terrain at each point (the cap reference: raw DEM noise must not reach the road).
+    /// Smoothed terrain at each point (the floor reference: raw DEM noise must not reach the road).
     pub t: Vec<f64>,
-    /// Smoothed height at each point, capped at the smoothed terrain plus `CAP_ABOVE_M`.
+    /// Real terrain at each point, on the same triangles the game draws (the cap reference).
+    pub raw: Vec<f64>,
+    /// Smoothed height at each point, capped at the real terrain plus `CAP_ABOVE_M`.
     pub z: Vec<f64>,
 }
 
-/// Keeps each height at most `CAP_ABOVE_M` above the terrain of the same point.
-fn cap_to(z: &mut [f64], t: &[f64]) {
-    for (zi, ti) in z.iter_mut().zip(t) {
-        *zi = zi.min(ti + CAP_ABOVE_M);
+/// Keeps each height at most `CAP_ABOVE_M` above the real terrain of the same point.
+fn cap_to(z: &mut [f64], raw: &[f64]) {
+    for (zi, ri) in z.iter_mut().zip(raw) {
+        *zi = zi.min(ri + CAP_ABOVE_M);
     }
+}
+
+/// Keeps a height between `t - FLOOR_BELOW_M` and the ground cap `raw + CAP_ABOVE_M`. When the
+/// floor and the cap do not fit (steep, rough ground), the cap wins: a road may dip below the
+/// smoothed terrain but never float above the surface the game draws.
+fn clamp_to_band(z: f64, t: f64, raw: f64) -> f64 {
+    let hi = raw + CAP_ABOVE_M;
+    z.clamp((t - FLOOR_BELOW_M).min(hi), hi)
 }
 
 /// First pass: the way densified and smoothed in arc length over the final terrain.
@@ -136,10 +148,10 @@ pub fn smooth_way(
     let raw: Vec<f64> = pts.iter().map(|&p| terrain(p)).collect::<Option<_>>()?;
     let t = gauss(&raw, &s, SIGMA_M);
     let mut z = t.clone();
-    cap_to(&mut z, &t);
+    cap_to(&mut z, &raw);
     let mut z = gauss(&z, &s, SIGMA_M);
-    cap_to(&mut z, &t);
-    Some(SmoothWay { pts, s, t, z })
+    cap_to(&mut z, &raw);
+    Some(SmoothWay { pts, s, t, raw, z })
 }
 
 /// Smoothed terrain at `p`: the Gaussian-weighted mean of the terrain on a 2-D grid around
@@ -168,8 +180,9 @@ pub fn field(p: [f64; 2], terrain: &dyn Fn([f64; 2]) -> Option<f64>) -> Option<f
 
 /// Shared height of each pinned node: one value for all the ways that meet there. It is the
 /// smoothed terrain field at the node, kept inside the band that every incident way allows
-/// (`[t - FLOOR_BELOW_M, t + CAP_ABOVE_M]`, `t` = that way's smoothed terrain at the node), so
-/// the cap and the floor hold for all of them at once.
+/// (`[t - FLOOR_BELOW_M, min(t, raw) + CAP_ABOVE_M]`, `t` = that way's smoothed terrain and
+/// `raw` = the real terrain at the node), so the cap and the floor hold for all of them at
+/// once. When the band is empty the cap wins: the node sinks to the tightest upper bound.
 pub fn node_heights(
     ways: &[Option<SmoothWay>],
     pins: &HashSet<(i64, i64)>,
@@ -188,6 +201,7 @@ pub fn node_heights(
             let key = node_key(w.pts[k]);
             if pins.contains(&key) {
                 let t = w.t[k];
+                let raw = w.raw[k];
                 let e = acc.entry(key).or_insert(Node {
                     p: w.pts[k],
                     lo: f64::MIN,
@@ -196,7 +210,7 @@ pub fn node_heights(
                     n: 0,
                 });
                 e.lo = e.lo.max(t - FLOOR_BELOW_M);
-                e.hi = e.hi.min(t + CAP_ABOVE_M);
+                e.hi = e.hi.min(t.min(raw) + CAP_ABOVE_M);
                 e.t_sum += t;
                 e.n += 1;
             }
@@ -208,7 +222,7 @@ pub fn node_heights(
             let h = if nd.lo <= nd.hi {
                 want.clamp(nd.lo, nd.hi)
             } else {
-                0.5 * (nd.lo + nd.hi)
+                nd.hi
             };
             (k, h)
         })
@@ -218,15 +232,16 @@ pub fn node_heights(
 /// Second pass: heights of one way, one value per point of `sw.pts`. Each pinned point takes
 /// the shared node height. The change at a pin fades out with a smoothstep over a length of
 /// `max(RAMP_MIN_M, RAMP_PER_M * |change|)`, never past the neighbouring pin. The result is
-/// kept inside the band of the smoothed terrain (floor and cap); pins are set last and exactly.
+/// kept inside the band of the smoothed terrain (floor) and of the real terrain (cap); pins are
+/// set last and exactly, already inside that band by construction. The cap wins over the floor.
 pub fn pin_way(sw: &SmoothWay, node_h: &HashMap<(i64, i64), f64>) -> Vec<f32> {
     let pins: Vec<(usize, f64)> = (0..sw.pts.len())
         .filter_map(|i| node_h.get(&node_key(sw.pts[i])).map(|&h| (i, h)))
         .collect();
     let mut z = fade_way(sw, node_h);
     if !pins.is_empty() {
-        for (zi, ti) in z.iter_mut().zip(&sw.t) {
-            *zi = zi.clamp(ti - FLOOR_BELOW_M, ti + CAP_ABOVE_M);
+        for (i, zi) in z.iter_mut().enumerate() {
+            *zi = clamp_to_band(*zi, sw.t[i], sw.raw[i]);
         }
         for &(k, h) in &pins {
             z[k] = h;
@@ -317,6 +332,34 @@ pub fn edge_heights(
 /// `orig`, interpolated by its position along that segment.
 pub fn z_for_piece(orig: &[[f64; 2]], z: &[f32], piece: &[[f64; 2]]) -> Vec<f32> {
     piece.iter().map(|&p| z_at(orig, z, p)).collect()
+}
+
+/// Caps the centerline of a clipped piece at `CAP_ABOVE_M` above the terrain the tile draws,
+/// moving the two edges by the same amount so the cross-section is kept. Clipping adds a point
+/// at every tile border by interpolating `z` (`z_for_piece`); on a concave break of the terrain
+/// at the border (each tile grid has its own slope there), that chord can float above the
+/// ground even though both ends are capped. The cap is the same on both sides because
+/// neighbouring tiles share their edge heights.
+pub fn cap_piece(
+    piece: &[[f64; 2]],
+    z: &mut [f32],
+    zl: &mut [f32],
+    zr: &mut [f32],
+    terrain: &dyn Fn([f64; 2]) -> Option<f64>,
+) {
+    for (i, p) in piece.iter().enumerate() {
+        let Some(raw) = terrain(*p) else { continue };
+        let Some(zi) = z.get_mut(i) else { continue };
+        let capped = (*zi as f64).min(raw + CAP_ABOVE_M);
+        let delta = capped - *zi as f64;
+        *zi = capped as f32;
+        if let Some(v) = zl.get_mut(i) {
+            *v = (*v as f64 + delta) as f32;
+        }
+        if let Some(v) = zr.get_mut(i) {
+            *v = (*v as f64 + delta) as f32;
+        }
+    }
 }
 
 /// Height of the polyline `orig` (with heights `z`) nearest to `p`.
@@ -412,6 +455,37 @@ mod tests {
         let flat = smooth_way(&line, &|_| Some(10.0)).unwrap();
         let flat_z = pin_way(&flat, &HashMap::new());
         assert!(flat_z.iter().all(|v| (v - 10.0).abs() < 1e-4));
+    }
+
+    #[test]
+    fn profile_does_not_float_over_a_convex_break() {
+        // 30% descent for 30 m, then flat. Smoothing along the way overshoots the ground just
+        // after the break: capping against the smoothed `t` keeps the road almost 2 m above
+        // the real terrain at the break, which is what the drawn surface shows. The cap must
+        // use the real terrain, so every point stays within CAP_ABOVE_M of it.
+        let ground = |p: [f64; 2]| {
+            Some(if p[0] <= 30.0 {
+                20.0 - 0.30 * p[0]
+            } else {
+                11.0
+            })
+        };
+        let line = [[0.0, 0.0], [100.0, 0.0]];
+        let ways = vec![Some(smooth_way(&line, &ground).unwrap())];
+        let pins = pinned_nodes(&[line.to_vec()]);
+        let h = node_heights(&ways, &pins, &ground);
+        let sw = ways[0].as_ref().unwrap();
+        let z = pin_way(sw, &h);
+        let mut worst = f64::MIN;
+        for (zi, p) in z.iter().zip(&sw.pts) {
+            let above = *zi as f64 - ground(*p).unwrap();
+            worst = worst.max(above);
+            assert!(
+                above <= CAP_ABOVE_M + 1e-4,
+                "{above:.2} m above the ground at {p:?}"
+            );
+        }
+        assert!(worst > 0.0, "the break is never reached: {worst}");
     }
 
     #[test]

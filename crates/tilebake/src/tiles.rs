@@ -262,24 +262,36 @@ pub fn build_tile_from(
     let fine_height =
         tileformat::terrain::fine_heightfield(&height, grid.tile_m).map_err(invalid_data)?;
     let rect = tile_rect(x, y, grid.tile_m);
+    // The drawn terrain of this tile, under any point of the plane.
+    let terrain = |p: [f64; 2]| {
+        Some(tileformat::terrain::sample_local(
+            &height,
+            grid.tile_m,
+            p[0] - x as f64 * grid.tile_m,
+            p[1] - y as f64 * grid.tile_m,
+        ) as f64)
+    };
     let mut tile_roads = Vec::new();
     for road in roads {
         for points in clip_polyline(&road.points, rect) {
-            let z = if road.z.is_empty() {
+            let mut z = if road.z.is_empty() {
                 Vec::new()
             } else {
                 profile::z_for_piece(&road.points, &road.z, &points)
             };
-            let zl = if road.zl.is_empty() {
+            let mut zl = if road.zl.is_empty() {
                 Vec::new()
             } else {
                 profile::z_for_piece(&road.points, &road.zl, &points)
             };
-            let zr = if road.zr.is_empty() {
+            let mut zr = if road.zr.is_empty() {
                 Vec::new()
             } else {
                 profile::z_for_piece(&road.points, &road.zr, &points)
             };
+            // A clipped crossing can interpolate above the cap on a concave border; cap it
+            // against the surface this tile draws and drop the edges with it.
+            profile::cap_piece(&points, &mut z, &mut zl, &mut zr, &terrain);
             tile_roads.push(Polyline {
                 highway: road.highway.clone(),
                 name: road.name.clone(),
@@ -564,7 +576,9 @@ pub fn index_by_tile<T>(
 /// Bakes all the tiles covering the radius from the raw data in `cache_root/<id>/raw/osm/`
 /// (blocks, deduplicated by way id), writes them to `cache_root/<id>/tiles/`, and then sets
 /// `meta.complete = true`. Needs `meta.json` and the blocks; downloads the DEM tile only if it is missing.
-/// Final terrain height at a point: bilinear in the grid of the tile that contains it.
+/// Final terrain height at a point: on the drawn triangles of the grid of the tile that
+/// contains it (`tileformat::terrain::sample_local`, NE-SW diagonal), the same surface the game
+/// draws. Bilinear sampling differs from that mesh on slopes, which would let the road float.
 fn terrain_at(
     heights: &HashMap<(i32, i32), HeightGrid>,
     grid: &MapGrid,
@@ -576,22 +590,8 @@ fn terrain_at(
         (p[1] / tile_m).floor() as i32,
     );
     let h = heights.get(&(tx, ty))?;
-    let n = h.cols as usize;
-    let cell = tile_m / (n - 1) as f64;
-    let fx = ((p[0] - tx as f64 * tile_m) / cell).clamp(0.0, (n - 1) as f64);
-    let fy = ((p[1] - ty as f64 * tile_m) / cell).clamp(0.0, (n - 1) as f64);
-    let (j, i) = (
-        (fx.floor() as usize).min(n - 2),
-        (fy.floor() as usize).min(n - 2),
-    );
-    let (u, v) = (fx - j as f64, fy - i as f64);
-    let at = |r: usize, c: usize| h.values[r * n + c] as f64;
-    Some(
-        at(i, j) * (1.0 - u) * (1.0 - v)
-            + at(i, j + 1) * u * (1.0 - v)
-            + at(i + 1, j) * (1.0 - u) * v
-            + at(i + 1, j + 1) * u * v,
-    )
+    let (lx, ly) = (p[0] - tx as f64 * tile_m, p[1] - ty as f64 * tile_m);
+    Some(tileformat::terrain::sample_local(h, tile_m, lx, ly) as f64)
 }
 
 pub fn bake_tiles(cache_root: &Path, id: &str) -> io::Result<BakeSummary> {
@@ -853,6 +853,94 @@ pub fn write_roads_file(cache_root: &Path, id: &str) -> io::Result<u64> {
 mod tests {
     use super::*;
     use crate::dem::CELL_M;
+
+    #[test]
+    fn terrain_at_samples_the_drawn_triangles() {
+        // The road profile must see the same surface the game draws. Bilinear sampling would
+        // differ from the NE-SW triangles in the interior of every cell on a slope.
+        let grid = MapGrid {
+            lat0: 0.0,
+            lon0: 0.0,
+            tile_m: 250.0,
+            cell_m: CELL_M,
+        };
+        let height = HeightGrid {
+            cols: 26,
+            rows: 26,
+            values: (0..26 * 26)
+                .map(|k| {
+                    let (i, j) = (k / 26, k % 26);
+                    100.0
+                        + 0.7 * j as f32
+                        + 0.3 * i as f32
+                        + if (i + j) % 3 == 0 { 0.5 } else { 0.0 }
+                })
+                .collect(),
+        };
+        let heights = HashMap::from([((0, 0), height.clone())]);
+        for p in [[10.0, 20.0], [123.4, 56.7], [0.0, 0.0], [249.9, 249.9]] {
+            let got = terrain_at(&heights, &grid, p).unwrap();
+            let want = tileformat::terrain::sample_local(&height, 250.0, p[0], p[1]) as f64;
+            assert_eq!(got, want, "{p:?}");
+        }
+        // Just past the border of tile (0,0), the point belongs to tile (1,0) and has no data.
+        assert_eq!(terrain_at(&heights, &grid, [250.1, 10.0]), None);
+    }
+
+    #[test]
+    fn clipped_piece_at_a_tile_border_is_capped_with_its_edges() {
+        // Terrain drops 1 m on the last grid row (the north border of the tile). The way ends
+        // at the cap on both sides of the border, so the interpolated crossing floats 0.5 m
+        // above the border terrain: it must be capped and its edges drop with it.
+        let grid = MapGrid {
+            lat0: 0.0,
+            lon0: 0.0,
+            tile_m: 250.0,
+            cell_m: CELL_M,
+        };
+        let height = HeightGrid {
+            cols: 26,
+            rows: 26,
+            values: (0..26 * 26)
+                .map(|k| if k / 26 == 25 { 99.0 } else { 100.0 })
+                .collect(),
+        };
+        let road = Polyline {
+            highway: "residential".into(),
+            name: String::new(),
+            points: vec![[100.0, 240.0], [100.0, 260.0]],
+            z: vec![100.5, 99.5],
+            zl: vec![100.4, 99.4],
+            zr: vec![100.6, 99.6],
+            lit: None,
+            oneway: None,
+            lanes: None,
+            maxspeed: None,
+            roundabout: false,
+        };
+        let (tile, pieces, _) = build_tile_from(height, &grid, &[road], &[], 0, 0).unwrap();
+        assert_eq!(pieces, 1);
+        let piece = &tile.roads[0];
+        assert_eq!(piece.points, vec![[100.0, 240.0], [100.0, 250.0]]);
+        let raw_at =
+            |p: [f64; 2]| tileformat::terrain::sample_local(&tile.height, 250.0, p[0], p[1]) as f64;
+        for (i, p) in piece.points.iter().enumerate() {
+            assert!(
+                piece.z[i] as f64 <= raw_at(*p) + profile::CAP_ABOVE_M + 1e-6,
+                "point {i} floats: {} vs {}",
+                piece.z[i],
+                raw_at(*p)
+            );
+        }
+        let last = piece.points.len() - 1;
+        assert!((piece.z[last] - 99.5).abs() < 1e-5, "{}", piece.z[last]);
+        assert!(
+            (piece.zl[last] - 99.4).abs() < 1e-5 && (piece.zr[last] - 99.6).abs() < 1e-5,
+            "{} {}",
+            piece.zl[last],
+            piece.zr[last]
+        );
+    }
 
     #[test]
     fn roads_file_collects_the_road_pieces_of_every_tile() {
