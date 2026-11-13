@@ -66,6 +66,11 @@ const ATMOSPHERE_HAZE_MIX: f32 = 0.45;
 const ATMOSPHERE_GLOW_INTENSITY: f32 = 0.35;
 const ATMOSPHERE_GLOW_BLOOM: f32 = 0.05;
 const ATMOSPHERE_SSAO_INTENSITY: f32 = 0.5;
+/// Extra ambient fill while the sun is up, only for atmosphere themes: the low sun would
+/// otherwise leave the shaded faces below the no-black floor of item 124 (`#2E2632`). It is a
+/// +25% fill, the same share as a 0.30-energy fill light against the ambient. Night keeps the
+/// item 121 values, so the lamps and the dark sky are unchanged.
+const ATMOSPHERE_AMBIENT_GAIN: f64 = 1.25;
 
 /// Relógio do mundo e luz ambiente. Criado por `EarthWorld` com o nome "Environment".
 #[derive(GodotClass)]
@@ -425,6 +430,7 @@ impl EnvironmentClock {
         // The afternoon is a direction, not an altitude: the west sun at the same height gets a
         // warmer table row and a slightly warmer color than the morning sun.
         let afternoon = sky::afternoon_warmth(sky::sun_hour_angle_deg(self.sim_unix));
+        let atmosphere = crate::style::light_look().atmosphere;
         let look = sky::sky_look(alt, self.light, &moon, afternoon, self.cloud_cover as f32);
         if let Some(light) = self.sun.as_mut() {
             Self::orient(light, sun_dir);
@@ -465,7 +471,7 @@ impl EnvironmentClock {
             mat.set_shader_parameter("sky_gain", &look.sky_gain.to_variant());
             // A neblina de profundidade (lod.rs) segue o céu na direção do olhar da câmera.
             let mut fog = sky::sky_color(&look, vec_arr(sun_dir), vec_arr(eye));
-            if crate::style::light_look().atmosphere {
+            if atmosphere {
                 // The warm haze: the sky color pulled toward the peach of the atmosphere.
                 fog = [0, 1, 2]
                     .map(|i| fog[i] + (ATMOSPHERE_HAZE_RGB[i] - fog[i]) * ATMOSPHERE_HAZE_MIX);
@@ -486,8 +492,13 @@ impl EnvironmentClock {
             ];
             env.set_ambient_light_color(Color::from_rgb(amb[0], amb[1], amb[2]));
             // The fill is a curve of the sun altitude, not of the cloud-dimmed light: a low sun
-            // and a morning need a lot of fill, a high sun very little.
-            env.set_ambient_light_energy(sky::ambient_energy(alt) as f32);
+            // and a morning need a lot of fill, a high sun very little. The atmosphere theme
+            // adds a little more while the sun is up (never at night).
+            let mut ambient_energy = sky::ambient_energy(alt);
+            if atmosphere && alt > sky::SUN_DARK_DEG {
+                ambient_energy *= ATMOSPHERE_AMBIENT_GAIN;
+            }
+            env.set_ambient_light_energy(ambient_energy as f32);
             let day = self.clear_light.clamp(0.0, 1.0) as f32;
             let day_exposure = sky::day_exposure(alt, self.cloud_cover);
             env.set_tonemap_exposure(1.0 + (day_exposure - 1.0) * day);

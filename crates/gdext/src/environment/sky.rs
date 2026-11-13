@@ -324,6 +324,10 @@ pub struct Moment {
 pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
     let day = srgb_to_linear(anchors.sky_day);
     let pale = srgb_to_linear(anchors.sky_horizon);
+    // The item 124 fixes target the saturated warm horizon of the lowpoly family. The older
+    // themes (the realistic preset) have a pale, almost neutral horizon and keep the previous
+    // table, so their appearance does not change.
+    let warm_horizon = warm_horizon(anchors);
     // Deep zenith: the theme's day blue with the low channels pulled down. The top of the sky
     // stays saturated instead of fading into the horizon's pale gray.
     let deep = clamp01([0.58 * day[0], 0.70 * day[1], 1.12 * day[2]]);
@@ -383,8 +387,20 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             description: "Warm white sun, a clear saturated blue sky and crisp shadows; contrast is already high.",
             key_alt_deg: 14.0,
             zenith: clamp01([0.52 * day[0], 0.63 * day[1], 0.91 * day[2]]),
-            mid: lerp3(day, pale, 0.24),
-            horizon: lerp3(pale, day, 0.08),
+            // The mid band is the day blue lightened toward warm white, not the peach of the
+            // horizon: the morning is bright without tinting the shaded faces.
+            mid: if warm_horizon {
+                lerp3(day, warm_white, 0.26)
+            } else {
+                lerp3(day, pale, 0.24)
+            },
+            // The horizon stays the pale peach of the theme instead of mixing back toward the
+            // darker day blue: the morning is bright, not a second golden hour.
+            horizon: if warm_horizon {
+                lerp3(pale, warm_white, 0.05)
+            } else {
+                lerp3(pale, day, 0.08)
+            },
             sun: lerp3(anchors.sun_low, anchors.sun_high, 0.80),
             glow: [1.0, 0.72, 0.50],
             glow_hi: [1.0, 0.92, 0.75],
@@ -395,8 +411,18 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             description: "Neutral-warm white sun, deep blue zenith and a pale hazy horizon; high contrast without clipping, short blue-violet shadows.",
             key_alt_deg: 45.0,
             zenith: deep,
-            mid: lerp3(day, pale, 0.32),
-            horizon: lerp3(pale, warm_white, 0.17),
+            mid: if warm_horizon {
+                lerp3(day, warm_white, 0.34)
+            } else {
+                lerp3(day, pale, 0.32)
+            },
+            // A pale peach horizon (60% of the theme horizon toward warm white), not a saturated
+            // blue day: the noon is bright without turning the sky into a postcard blue.
+            horizon: if warm_horizon {
+                lerp3(pale, warm_white, 0.60)
+            } else {
+                lerp3(pale, warm_white, 0.17)
+            },
             sun: anchors.sun_high,
             glow: [1.0, 0.80, 0.62],
             glow_hi: [1.0, 0.95, 0.85],
@@ -407,8 +433,16 @@ pub fn moment_table(anchors: &LightLook) -> [Moment; 7] {
             description: "The sun overhead: the table keeps brightening instead of clamping at 6 degrees; the zenith is at its deepest.",
             key_alt_deg: 90.0,
             zenith: apex,
-            mid: lerp3(day, pale, 0.35),
-            horizon: lerp3(pale, warm_white, 0.20),
+            mid: if warm_horizon {
+                lerp3(day, warm_white, 0.40)
+            } else {
+                lerp3(day, pale, 0.35)
+            },
+            horizon: if warm_horizon {
+                lerp3(pale, warm_white, 0.62)
+            } else {
+                lerp3(pale, warm_white, 0.20)
+            },
             sun: anchors.sun_high,
             glow: [1.0, 0.82, 0.66],
             glow_hi: [1.0, 0.96, 0.88],
@@ -641,11 +675,33 @@ pub fn glow_hi_tint(sun_alt_deg: f64) -> Rgb {
 /// clouds are lit by the sky, so a cloudy night stays dark and a cloudy noon stays light gray.
 pub const CLOUD_LIFT_GAIN: f32 = 2.5;
 
-/// Warm gray of a fully overcast sky, linear RGB: the pale horizon anchor pulled toward a light
-/// warm gray, so an overcast noon reads as natural gray instead of flat white or blue.
+/// Warm gray of a fully overcast sky, linear RGB: a near-neutral gray at the luminance of the
+/// pale horizon anchor, with only a hint of red, so an overcast noon reads as natural warm gray
+/// instead of flat white, blue or the saturated peach of the clear horizon. The old formula mixed
+/// 30% of the horizon into a gray; with the lowpoly peach that stayed as saturated as the clear
+/// sky and defeated the veil.
 pub fn cloud_tint(anchors: &LightLook) -> Rgb {
     let pale = srgb_to_linear(anchors.sky_horizon);
-    lerp3(pale, [0.435, 0.404, 0.352], 0.70)
+    if !warm_horizon(anchors) {
+        // Older themes keep the previous gray mix, so the realistic preset is unchanged.
+        return lerp3(pale, [0.435, 0.404, 0.352], 0.70);
+    }
+    let gray = 0.2126 * pale[0] + 0.7152 * pale[1] + 0.0722 * pale[2];
+    [(gray * 1.005).min(1.0), gray, (gray * 0.992).min(1.0)]
+}
+
+/// Minimum saturation of the horizon anchor that selects the warm lowpoly family: the lowpoly
+/// peach is ~0.43, the realistic near-white ~0.12.
+const WARM_HORIZON_MIN_SAT: f32 = 0.2;
+
+/// True when the horizon anchor is a saturated warm peach (the lowpoly family) instead of the
+/// pale, almost neutral horizon of the older themes. The item 124 table and overcast fixes only
+/// apply to that family; `realistic.json` keeps the previous look.
+fn warm_horizon(anchors: &LightLook) -> bool {
+    let pale = srgb_to_linear(anchors.sky_horizon);
+    let max = pale[0].max(pale[1]).max(pale[2]);
+    let min = pale[0].min(pale[1]).min(pale[2]);
+    max > 0.0 && (max - min) / max > WARM_HORIZON_MIN_SAT
 }
 
 /// Fraction of the theme's shadow tint mixed into the ambient fill.
@@ -1223,6 +1279,29 @@ mod tests {
             prev = energy;
             alt += 0.5;
         }
+    }
+
+    #[test]
+    fn realistic_preset_keeps_the_previous_sky_table_and_cloud_gray() {
+        let realistic = crate::style::parse(
+            include_str!("../../../../godot/styles/realistic.json"),
+            "realistic",
+        )
+        .expect("realistic.json parses")
+        .light;
+        let day = srgb_to_linear(realistic.sky_day);
+        let pale = srgb_to_linear(realistic.sky_horizon);
+        let table = moment_table(&realistic);
+        // The item 124 fixes are for the warm lowpoly horizon; the old themes keep the old rows.
+        assert_eq!(table[4].mid, lerp3(day, pale, 0.24));
+        assert_eq!(table[4].horizon, lerp3(pale, day, 0.08));
+        assert_eq!(table[5].horizon, lerp3(pale, [1.0, 0.96, 0.90], 0.17));
+        assert_eq!(
+            cloud_tint(&realistic),
+            lerp3(pale, [0.435, 0.404, 0.352], 0.70)
+        );
+        assert!(!warm_horizon(&realistic));
+        assert!(warm_horizon(&crate::style::light_look()));
     }
 
     #[test]

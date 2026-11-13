@@ -53,7 +53,7 @@ full lighting setup.
 | `sky_horizon` | `#RRGGBB` | `#F6D5C0` | Sky color at the horizon: pale peach. |
 | `shadow_tint` | `#RRGGBB` | `#6B5A78` | Color mixed into the shadows (lilac, never gray or black). |
 | `fill` | `#RRGGBB` or absent | absent (off) | Cold fill mixed into the shaded faces (`#7C8CD9` in lowpoly). Absent: no fill, the look of the older themes. |
-| `atmosphere` | bool | `false` | `true`: warm haze in the `Environment` fog, soft glow and soft SSAO. `false`: off, as before. |
+| `atmosphere` | bool | `false` | `true`: warm haze in the `Environment` fog, soft glow, soft SSAO and a little extra daylight ambient fill (the low sun stays above the no-black floor). `false`: off, as before. |
 
 ### `ui`
 
