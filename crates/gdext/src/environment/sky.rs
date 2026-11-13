@@ -704,6 +704,31 @@ fn warm_horizon(anchors: &LightLook) -> bool {
     max > 0.0 && (max - min) / max > WARM_HORIZON_MIN_SAT
 }
 
+/// Warm haze of the item 124 lowpoly atmosphere (#E8B49C: its sRGB channels are used directly as
+/// the shader color, as item 124 set them) and its share of the depth fog color.
+pub const ATMOSPHERE_HAZE_RGB: Rgb = [0.910, 0.706, 0.612];
+pub const ATMOSPHERE_HAZE_MIX: f32 = 0.45;
+
+/// Luminance of a linear RGB color (Rec. 709 weights), the same the shader uses.
+fn luma(c: Rgb) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+/// Color of the weather fog at full density — and of the sky it washes — linear RGB: the overcast
+/// gray of the cloud veil (`cloud_tint`) at the horizon's brightness, warmed toward the atmosphere
+/// haze when the theme has it. Scaling by the horizon's own brightness keeps a foggy night as dark
+/// as the overcast sky it hides behind instead of letting the warm haze glow.
+pub fn haze_color(look: &SkyLook, atmosphere: bool) -> Rgb {
+    let lift = (luma(look.horizon) * CLOUD_LIFT_GAIN).clamp(0.0, 1.0);
+    let gray = look.cloud_tint.map(|v| (v * lift).min(1.0));
+    if atmosphere {
+        let warm = ATMOSPHERE_HAZE_RGB.map(|v| v * lift);
+        lerp3(gray, warm, ATMOSPHERE_HAZE_MIX)
+    } else {
+        gray
+    }
+}
+
 /// Fraction of the theme's shadow tint mixed into the ambient fill.
 const AMBIENT_SHADOW_MIX: f32 = 0.40;
 /// Warm gray target of the golden-hour ambient fill, sRGB.
@@ -1340,6 +1365,34 @@ mod tests {
             saturation(horizon) < 0.08,
             "full overcast horizon is not gray: {horizon:?}"
         );
+    }
+
+    #[test]
+    fn weather_haze_is_a_warm_gray_and_keeps_the_night_dark() {
+        let noon = sky_look(60.0, 1.0, &no_moon(), 0.0, 0.7);
+        let day = haze_color(&noon, false);
+        let warm = haze_color(&noon, true);
+        // A foggy noon is a mid gray: not the daylight sky itself, and near-neutral without the
+        // atmosphere.
+        assert!((0.3..0.9).contains(&luma(day)), "haze luma {}", luma(day));
+        assert!(saturation(day) <= 0.05, "plain haze is not gray: {day:?}");
+        // The lowpoly atmosphere keeps its warm identity: the fog is a warm gray, not a blue one.
+        assert!(
+            warm[0] > warm[2] + 0.05,
+            "atmosphere haze is not warm: {warm:?}"
+        );
+        assert!(
+            saturation(warm) <= 0.25,
+            "atmosphere haze too saturated: {warm:?}"
+        );
+        // A foggy night is as dark as the overcast sky it hides behind: the warm haze is scaled by
+        // the horizon's own brightness instead of glowing.
+        let night = sky_look(-30.0, 0.0, &no_moon(), 0.0, 0.7);
+        let dark = haze_color(&night, true);
+        assert!(luma(dark) < 0.3 * luma(warm), "night haze glows: {dark:?}");
+        // And the fog follows the sky brightness through the day.
+        let dusk = haze_color(&sky_look(0.0, 0.4, &no_moon(), 1.0, 0.7), true);
+        assert!(luma(dusk) < luma(warm), "dusk haze {dusk:?}");
     }
 
     #[test]
