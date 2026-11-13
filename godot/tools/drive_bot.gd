@@ -514,6 +514,66 @@ func _report_stop(car: VehicleBody3D, state: Dictionary, number: int, t_s: float
 	print("drive bot: STOP %d at t=%.2f s, x=%.2f y=%.2f z=%.2f, speed %.2f m/s, route point %d of %d" % [number, t_s, pos.x, -pos.z, pos.y, car.linear_velocity.length(), index, route.size() - 1])
 	print("drive bot:   wheels: %s" % ", ".join(wheels))
 	print("drive bot:   bodies: %s" % (", ".join(bodies) if not bodies.is_empty() else "none"))
+	_report_ground_under_wheels(car)
+
+
+## Probe for a wheel in the air (item 113): the ground under each wheel as the ray sees it, the
+## Roads (ribbon) and Terrain heights straight below the wheel center, and a 9 x 9 lattice of the
+## Roads and Terrain heights around each air wheel (0.25 m steps). Rays do not change the physics.
+func _report_ground_under_wheels(car: VehicleBody3D) -> void:
+	var space := car.get_world_3d().direct_space_state
+	for child in car.get_children():
+		var wheel := child as VehicleWheel3D
+		if wheel == null:
+			continue
+		var reach: float = wheel.wheel_rest_length + wheel.wheel_radius
+		print("drive bot:   %s: centre y=%.3f, rest %.3f m + radius %.3f m = reach %.3f m, in contact %s" % [wheel.name, wheel.global_position.y, wheel.wheel_rest_length, wheel.wheel_radius, reach, str(wheel.is_in_contact())])
+		var column := _ground_hits(space, car, wheel.global_position)
+		print("drive bot:     column under the centre: %s" % column)
+		if wheel.is_in_contact():
+			continue
+		for kind in ["Roads", "Terrain"]:
+			print("drive bot:     %s lattice (rows = z, cols = x, y in m, NAN = no hit), x %.2f..%.2f:" % [kind, wheel.global_position.x - 1.0, wheel.global_position.x + 1.0])
+			for dz in range(-4, 5):
+				var row := ""
+				for dx in range(-4, 5):
+					var p := wheel.global_position + Vector3(dx * 0.25, 0.0, dz * 0.25)
+					var h := _ground_height_of(space, car, p, kind)
+					row += "%8.3f" % h
+				print("drive bot:       dz %+.2f: %s" % [dz * 0.25, row])
+
+
+## Every ground hit (Terrain or Roads) of a downward ray at `p` (+-3 m), as "kind y", nearest first.
+func _ground_hits(space: PhysicsDirectSpaceState3D, car: VehicleBody3D, p: Vector3) -> String:
+	var parts: PackedStringArray = []
+	var from := Vector3(p.x, p.y + 3.0, p.z)
+	var to := Vector3(p.x, p.y - 3.0, p.z)
+	var exclude: Array[RID] = [car.get_rid()]
+	for i in 16:
+		var hit := space.intersect_ray(PhysicsRayQueryParameters3D.create(from, to, 0xFFFFFFFF, exclude))
+		if hit.is_empty():
+			break
+		var path := str((hit["collider"] as Node).get_path())
+		var kind := "Roads" if "/Roads" in path else ("Terrain" if "/Terrain" in path else "other")
+		parts.append("%s %.3f" % [kind, hit["position"].y])
+		exclude.append(hit["rid"])
+	return "none" if parts.is_empty() else ", ".join(parts)
+
+
+## Height of the first hit of `kind` ("Roads" or "Terrain") of a downward ray at `p`, NAN when none.
+func _ground_height_of(space: PhysicsDirectSpaceState3D, car: VehicleBody3D, p: Vector3, kind: String) -> float:
+	var from := Vector3(p.x, p.y + 3.0, p.z)
+	var to := Vector3(p.x, p.y - 3.0, p.z)
+	var exclude: Array[RID] = [car.get_rid()]
+	for i in 16:
+		var hit := space.intersect_ray(PhysicsRayQueryParameters3D.create(from, to, 0xFFFFFFFF, exclude))
+		if hit.is_empty():
+			return NAN
+		var path := str((hit["collider"] as Node).get_path())
+		if kind in path:
+			return float(hit["position"].y)
+		exclude.append(hit["rid"])
+	return NAN
 
 
 ## Bounce of a series: stdev of its residual from a centered moving mean of `half` ticks on each side.
