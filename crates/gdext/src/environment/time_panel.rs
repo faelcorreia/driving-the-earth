@@ -38,6 +38,8 @@ const CONTENT_WIDTH_PX: f32 = PANEL_WIDTH_PX - 2.0 * PANEL_PADDING_PX as f32;
 const VALUE_WIDTH_PX: f32 = 48.0;
 /// Inner padding of a themed button, in pixels (layout, not a theme field).
 const BUTTON_PADDING_PX: f32 = 4.0;
+/// Thickness of the focus ring, in pixels: at least this, even when the theme border is thinner.
+const FOCUS_RING_PX: i32 = 3;
 
 /// Um campo de data ou hora: botões de menos e de mais e o valor no meio.
 struct Stepper {
@@ -93,8 +95,8 @@ impl TimePanel {
         let mut date_row = HBoxContainer::new_alloc();
         let mut time_row = HBoxContainer::new_alloc();
         let mut steppers = Vec::new();
-        for field in Field::ALL {
-            let (stepper, group) = Self::stepper(field, lang);
+        for (index, field) in Field::ALL.into_iter().enumerate() {
+            let (stepper, group) = Self::stepper(field, index, lang);
             match field {
                 Field::Hour => {
                     time_row.add_child(&group);
@@ -148,6 +150,19 @@ impl TimePanel {
         margin.add_child(&column);
         panel.add_child(&margin);
         root.add_child(&panel);
+
+        // Esquerda e direita andam só entre o menos e o mais do mesmo campo, e param nas bordas
+        // (Tab é que passa para o próximo campo). Sem isso a seta caía no botão de baixo, "Aplicar".
+        // Um caminho para o próprio botão ("." ) faz a seta ficar onde está.
+        for (index, stepper) in steppers.iter_mut().enumerate() {
+            let plus_path = NodePath::from(format!("../Plus{index}").as_str());
+            let minus_path = NodePath::from(format!("../Minus{index}").as_str());
+            let stay = NodePath::from(".");
+            stepper.minus.set_focus_neighbor(Side::LEFT, &stay);
+            stepper.minus.set_focus_neighbor(Side::RIGHT, &plus_path);
+            stepper.plus.set_focus_neighbor(Side::LEFT, &minus_path);
+            stepper.plus.set_focus_neighbor(Side::RIGHT, &stay);
+        }
 
         // Os sinais chamam os `#[func]` do relógio, com o mesmo nome (ver `environment/clock.rs`).
         let on = |method: &str| Callable::from_object_method(clock, method);
@@ -205,6 +220,13 @@ impl TimePanel {
         self.open
     }
 
+    /// Seletor de velocidade com o menu aberto: Esc então fecha só o menu.
+    pub fn popup_open(&self) -> bool {
+        self.speed
+            .get_popup()
+            .is_some_and(|popup| popup.is_visible())
+    }
+
     /// Mostra ou esconde. Ao abrir, o foco vai para o primeiro campo; ao fechar, solta o foco
     /// para o teclado voltar ao carro.
     pub fn set_open(&mut self, open: bool) {
@@ -215,9 +237,14 @@ impl TimePanel {
                 first.minus.grab_focus();
             }
         } else {
-            for stepper in self.steppers.iter_mut() {
-                stepper.minus.release_focus();
-                stepper.plus.release_focus();
+            // Any control of the panel may hold the focus (a stepper, the speed selector or a
+            // shortcut), so release whichever one it is, not only the steppers.
+            if let Some(viewport) = self.root.get_viewport() {
+                if let Some(owner) = viewport.gui_get_focus_owner() {
+                    if self.root.is_ancestor_of(&owner.clone().upcast::<Node>()) {
+                        owner.clone().release_focus();
+                    }
+                }
             }
         }
     }
@@ -338,7 +365,7 @@ impl TimePanel {
     }
 
     /// Um campo: rótulo em cima, e embaixo "−  valor  +". Devolve também o grupo para a linha.
-    fn stepper(field: Field, lang: Lang) -> (Stepper, Gd<VBoxContainer>) {
+    fn stepper(field: Field, index: usize, lang: Lang) -> (Stepper, Gd<VBoxContainer>) {
         let name = text(field.key(), lang);
         let mut group = VBoxContainer::new_alloc();
         group.set_h_size_flags(SizeFlags::EXPAND_FILL);
@@ -346,6 +373,7 @@ impl TimePanel {
 
         let mut row = HBoxContainer::new_alloc();
         let mut minus = Button::new_alloc();
+        minus.set_name(&format!("Minus{index}"));
         minus.set_text("-");
         minus.set_tooltip_text(&fmt("time.decrease", lang, &[("field", &name)]));
         let mut value = Self::label("");
@@ -353,6 +381,7 @@ impl TimePanel {
         value.set_h_size_flags(SizeFlags::EXPAND_FILL);
         value.set_custom_minimum_size(Vector2::new(VALUE_WIDTH_PX, 0.0));
         let mut plus = Button::new_alloc();
+        plus.set_name(&format!("Plus{index}"));
         plus.set_text("+");
         plus.set_tooltip_text(&fmt("time.increase", lang, &[("field", &name)]));
         row.add_child(&minus);
@@ -415,14 +444,16 @@ fn ui_box(
     boxed
 }
 
-/// Theme of the time panel: ink text, panel surfaces, accent focus and a distinct disabled state.
+/// Theme of the time panel: ink text, panel surfaces, accent hover and an ink focus ring (the
+/// accent is too faint on the panel for a focus indicator, so the ring uses the text color), and
+/// a distinct disabled state.
 fn ui_theme(ui: &style::UiLook) -> Gd<Theme> {
     let panel = rgb(ui.panel);
     let ink = rgb(ui.ink);
     let accent = rgb(ui.accent);
     let border = rgb(ui.border);
     let width = ui.border_width;
-    let focus_width = width.max(2);
+    let focus_width = width.max(FOCUS_RING_PX);
     let mut theme = Theme::new_gd();
     theme.set_color("font_color", "Label", ink);
 
@@ -471,7 +502,7 @@ fn ui_theme(ui: &style::UiLook) -> Gd<Theme> {
             &ui_box(
                 ui,
                 with_alpha(panel, 0.0),
-                accent,
+                ink,
                 focus_width,
                 BUTTON_PADDING_PX,
             ),
@@ -528,4 +559,44 @@ fn fmt(key: &str, lang: Lang, values: &[(&str, &str)]) -> String {
         out = out.replace(&format!("{{{name}}}"), value);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::style::{builtin, Rgb, Style};
+
+    /// WCAG relative luminance of one sRGB channel.
+    fn linear(channel: f32) -> f32 {
+        let channel = channel.clamp(0.0, 1.0);
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// WCAG contrast ratio between two sRGB colors (1.0..=21.0).
+    fn contrast(a: Rgb, b: Rgb) -> f32 {
+        let luminance =
+            |c: Rgb| 0.2126 * linear(c[0]) + 0.7152 * linear(c[1]) + 0.0722 * linear(c[2]);
+        let (la, lb) = (luminance(a), luminance(b));
+        let (high, low) = (la.max(lb), la.min(lb));
+        (high + 0.05) / (low + 0.05)
+    }
+
+    #[test]
+    fn focus_ring_stays_readable_on_the_panel() {
+        for (id, ui) in [
+            ("lowpoly", Style::default().ui),
+            ("realistic", builtin("realistic").ui),
+        ] {
+            // The focus ring is the ink color (see `ui_theme`): WCAG 1.4.11 asks 3:1 for the
+            // boundary of a focused control. The accent does not reach it on the panel.
+            let ring = contrast(ui.ink, ui.panel);
+            assert!(
+                ring >= 3.0,
+                "{id}: focus ring on panel is {ring:.2}:1, below 3:1"
+            );
+        }
+    }
 }

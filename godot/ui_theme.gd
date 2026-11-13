@@ -27,7 +27,8 @@ func _build_theme() -> Theme:
 	var border := Style.color("ui", "border")
 	var width := int(Style.number("ui", "border_width", 0.0))
 	var radius := int(Style.number("ui", "corner_radius", 0.0))
-	var focus_width := maxi(width, 2)
+	# Focus ring in ink, not accent: the accent is too faint on the panel for a focus indicator.
+	var focus_width := maxi(width, 3)
 	var theme := Theme.new()
 
 	theme.set_color("font_color", "Label", ink)
@@ -47,7 +48,7 @@ func _build_theme() -> Theme:
 		theme.set_stylebox("normal", kind, _box(panel, border, width, radius))
 		theme.set_stylebox("hover", kind, _box(_alpha(accent, 0.16), accent, width, radius))
 		theme.set_stylebox("pressed", kind, _box(_alpha(accent, 0.28), accent, width, radius))
-		theme.set_stylebox("focus", kind, _box(_alpha(panel, 0.0), accent, focus_width, radius))
+		theme.set_stylebox("focus", kind, _box(_alpha(panel, 0.0), ink, focus_width, radius))
 		theme.set_stylebox("disabled", kind, _box(_alpha(panel, 0.55), _alpha(border, 0.45), width, radius))
 
 	for kind in ["Panel", "PanelContainer"]:

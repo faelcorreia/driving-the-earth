@@ -86,8 +86,8 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("time.moon.waning_crescent", "waning crescent", "minguante"),
     (
         "time.hint",
-        "Up/Down: change  |  Left/Right: move  |  T or Esc closes",
-        "Cima/baixo: mudar  |  esquerda/direita: mover  |  T ou Esc fecha",
+        "Tab: next field  |  Up, Down: change  |  Left, Right: minus, plus  |  T or Esc closes",
+        "Tab: próximo campo  |  cima, baixo: mudar  |  esquerda, direita: menos, mais  |  T ou Esc fecha",
     ),
     (
         "home.hint",
