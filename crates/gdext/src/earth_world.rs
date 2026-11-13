@@ -1027,11 +1027,13 @@ impl EarthWorld {
 
     /// Loads the map in use into the world's `Gps` node (item 112). The node reads the map in a
     /// thread of its own, so the frame does not wait for it. Without the node there is no guide.
+    /// Any destination of the previous map is dropped (its local meters belong to another map).
     fn start_gps(&self, cache_root: &str, id: &str) {
         let Some(mut gps) = self.base().get_node_or_null("Gps") else {
             godot_warn!("no Gps node under the world: no route guide");
             return;
         };
+        gps.call("clear", &[]);
         gps.call(
             "load_map",
             &[
@@ -1058,9 +1060,12 @@ impl EarthWorld {
         }
     }
 
-    /// The first other map of `cache` (by folder name, complete maps only) that holds (`lat`, `lon`)
-    /// and has a road near that point: its id, index and spawn pose. Folders that are not maps are
-    /// skipped without a message.
+    /// The other complete map of `cache` that holds (`lat`, `lon`) and has a road near that point:
+    /// its id, index and spawn pose. Folders that are not maps are skipped without a message.
+    ///
+    /// When two baked maps overlap, the smallest one wins (then the id, for determinism): a small
+    /// map around the chosen place is more specific than a large map that happens to reach it. It
+    /// also keeps the road search cheap: the big map is only opened when the small one has no road.
     fn find_other_map(
         &self,
         cache: &Path,
@@ -1075,6 +1080,9 @@ impl EarthWorld {
             .filter(|id| *id != self.active_id)
             .collect();
         ids.sort();
+        // Reading the metadata and listing the tiles is cheap: find the maps that hold the point
+        // before reading any road.
+        let mut holding: Vec<(f64, String, MapIndex, [f64; 2])> = Vec::new();
         for id in ids {
             let Ok(index) = open_map(cache, &id) else {
                 continue;
@@ -1085,6 +1093,10 @@ impl EarthWorld {
             }) else {
                 continue;
             };
+            holding.push((index.meta.radius_m, id, index, local));
+        }
+        holding.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, id, index, local) in holding {
             match find_spawn_near(&index, local, self.view_radius_m as f64) {
                 Ok(Some(pose)) => return Some((id, index, pose)),
                 Ok(None) => continue,
@@ -1126,6 +1138,8 @@ impl EarthWorld {
         };
         let index = Arc::new(index);
         let grid = MapGrid::from_meta(&index.meta);
+        let previous = self.active_id.clone();
+        let started = Instant::now();
         self.clear_streams();
         write_last_map(&id);
         self.active_cache = Some(cache.clone());
@@ -1165,22 +1179,27 @@ impl EarthWorld {
                 self.load_now(&index, (tx, ty));
             }
         }
-        godot_print!("map switched to '{id}' ({} tiles)", index.coords().len());
+        godot_print!(
+            "map switched from '{previous}' to '{id}' ({} tiles) in {:.0} ms",
+            index.coords().len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
         true
     }
 
     /// Drops everything streamed from the map in use: its tile nodes, terrain LOD, distant lights,
     /// pending geometry and loader (the loader thread ends with its request sender). The car, the
-    /// environment and the real lamp lights stay.
+    /// environment and the real lamp lights stay. The nodes are freed now, not queued: the switch
+    /// happens with the game paused, and the new map may reuse the same tile names and coordinates.
     fn clear_streams(&mut self) {
-        for (_, mut node) in self.loaded.drain() {
-            node.queue_free();
+        for (_, node) in self.loaded.drain() {
+            node.free();
         }
-        if let Some(mut node) = self.lod_node.take() {
-            node.queue_free();
+        if let Some(node) = self.lod_node.take() {
+            node.free();
         }
         if let Some(far) = self.far.take() {
-            far.node().queue_free();
+            far.node().free();
         }
         self.lod = None;
         self.far_loader = None;

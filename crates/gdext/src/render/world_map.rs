@@ -1,9 +1,10 @@
 //! World map (F17b, F17c), scene `godot/home_picker.tscn` and the M map in the game. A full-screen
 //! control: the mouse wheel zooms, dragging moves, a click sets the marker, and Confirm saves it
-//! to `user://home.json`. In the game it starts hidden: M opens it (the game pauses, the mouse is
-//! free, the view centers on the car at about 2 m per pixel), and M or Esc closes it. The data is
-//! the embedded world asset (`res://assets/worldmap/world.bin`), read once; only the pieces on
-//! screen are drawn, and coastline points closer than a pixel are dropped. The logic is in the
+//! to `user://home.json` and takes the car there (item 106 switches to another baked map when the
+//! place is outside the loaded one). In the game it starts hidden: M opens it (the game pauses, the
+//! mouse is free, the view centers on the car at about 2 m per pixel), and M or Esc closes it. The
+//! data is the embedded world asset (`res://assets/worldmap/world.bin`), read once; only the pieces
+//! on screen are drawn, and coastline points closer than a pixel are dropped. The logic is in the
 //! `worldmap` crate.
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -687,6 +688,21 @@ impl WorldMapView {
             self.redraw();
             return;
         };
+        self.confirm_place(home.lat, home.lon);
+    }
+
+    /// Confirms (`lat`, `lon`) as the chosen place: saves it as the home, puts the car on the road
+    /// there (switching to another baked map when the place is outside the loaded one), and closes
+    /// the map when the car moved. The same path as clicking a place and pressing Confirm; a method
+    /// of its own so a headless check can confirm a place without a mouse.
+    #[func]
+    fn confirm_place(&mut self, lat: f64, lon: f64) {
+        let Ok(home) = Home::new(lat, lon) else {
+            self.status = self.t("home.pick_first");
+            self.redraw();
+            return;
+        };
+        self.home = Some(home);
         if save_home(home).is_err() {
             self.status = self.t("home.save_error");
             self.redraw();
