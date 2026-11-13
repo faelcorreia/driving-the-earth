@@ -793,6 +793,22 @@ impl INode for EnvironmentClock {
     /// mudam o valor (teclado e d-pad), em vez de mover o foco. O analógico não passa, para o
     /// passo não disparar a cada tremor do stick.
     fn input(&mut self, event: Gd<InputEvent>) {
+        // Esc closes the open time panel here, not in `unhandled_input`: the car takes Esc there
+        // (mouse capture) and marks it handled, so it would never reach the panel. With the speed
+        // menu open, Esc is left to the menu, which closes itself.
+        if event.is_action_pressed("ui_cancel") {
+            let close = self
+                .panel
+                .as_ref()
+                .is_some_and(|p| p.is_open() && !p.popup_open());
+            if close {
+                self.toggle_time_panel();
+                if let Some(mut viewport) = self.base().get_viewport() {
+                    viewport.set_input_as_handled();
+                }
+            }
+            return;
+        }
         let delta = if event.is_action("ui_up") {
             1
         } else if event.is_action("ui_down") {
@@ -839,12 +855,8 @@ impl INode for EnvironmentClock {
         } else if event.is_action_pressed("env_speed_toggle") {
             let next = if self.speed > 0.0 { 0.0 } else { FAST_SPEED };
             self.change_speed(next);
-        } else if event.is_action_pressed("env_time_panel")
-            || (event.is_action_pressed("ui_cancel")
-                && self.panel.as_ref().is_some_and(|p| p.is_open()))
-        {
+        } else if event.is_action_pressed("env_time_panel") {
             self.toggle_time_panel();
-            // Esc must not also reach the car, which toggles the mouse capture on it.
             if let Some(mut viewport) = self.base().get_viewport() {
                 viewport.set_input_as_handled();
             }
