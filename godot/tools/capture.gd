@@ -18,12 +18,17 @@ extends SceneTree
 ## --warmup 1 (default, 0 disables): with a night --start, step back to a daytime hour and run the
 ## clock up to --start again, so the street lamps (and the building windows after them) turn on at
 ## the real dusk instead of at the instant the clock is placed.
+## --pitch 85 (degrees, 0 to 89, ausente = sem foto): foto de cima, a --pitch graus de elevação,
+## no azimute do primeiro --az. Com 85 o centro do quadro cai perto do zênite (a faixa do topo
+## das fotos de --az vai só até ~25-37 graus). Cada foto imprime a saturação HSV, o valor HSV e a
+## luminância (Rec. 709 sobre os valores sRGB do PNG) médios da caixa central do quadro.
 ##
 ## Para cada horário: o relógio anda em tempo acelerado até o horário e para (speed 0). Então
 ## salva PNGs:
 ##   <HHMM>_spawn180.png: câmera de seguimento do carro (rumo do spawn).
 ##   <HHMM>_az<AZ>.png: só a câmera, parada no carro, olhando o azimute AZ (serra).
 ##   <HHMM>_moon.png: só a câmera, olhando para a direção do nó Moon (se --moon 1).
+##   <HHMM>_pitch<P>.png: só a câmera, a P graus de elevação no primeiro azimute (se --pitch P).
 ## O horário real do quadro é registrado pelo próprio script (game_s acumula delta x speed).
 
 const SIZE := Vector2i(1280, 720)
@@ -61,6 +66,7 @@ func _parse_args() -> Dictionary:
 		"point": "spawn",
 		"cloud_cover": "",
 		"warmup": "1",
+		"pitch": "",
 	}
 	var args := OS.get_cmdline_user_args()
 	var i := 0
@@ -173,13 +179,39 @@ func _today_brt() -> String:
 	return "%04d-%02d-%02d" % [d["year"], d["month"], d["day"]]
 
 
-func _snap(path: String) -> void:
+## Saves the frame as a PNG and returns it, so the caller can measure it.
+func _snap(path: String) -> Image:
 	await RenderingServer.frame_post_draw
-	var err := root.get_texture().get_image().save_png(path)
+	var img := root.get_texture().get_image()
+	var err := img.save_png(path)
 	if err != OK:
 		push_error("capture: cannot save %s (error %d)" % [path, err])
 	else:
 		print("capture: saved ", path)
+	return img
+
+
+## Mean HSV saturation, HSV value and Rec. 709 luminance (of the sRGB values in the PNG) over the
+## central third of the frame in each direction, the box a --pitch shot is measured on.
+func _center_stats(img: Image) -> Dictionary:
+	var w := img.get_width()
+	var h := img.get_height()
+	var x0 := w / 3
+	var x1 := w - w / 3
+	var y0 := h / 3
+	var y1 := h - h / 3
+	var n := 0
+	var sat := 0.0
+	var val := 0.0
+	var luma := 0.0
+	for y in range(y0, y1):
+		for x in range(x0, x1):
+			var c := img.get_pixel(x, y)
+			sat += c.s
+			val += c.v
+			luma += 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+			n += 1
+	return {"sat": sat / n, "val": val / n, "luma": luma / n}
 
 
 func run() -> void:
@@ -295,6 +327,22 @@ func run() -> void:
 			print("capture: shooting az %s" % az)
 			await _snap(out_dir.path_join("%s_az%s.png" % [tag, az]))
 			print("capture: az %s done" % az)
+
+		# (b1) foto de cima a --pitch graus, no primeiro azimute: mede o zênite do quadro.
+		if opts["pitch"] != "":
+			var pitch := clampf(opts["pitch"].to_float(), 0.0, 89.0)
+			var h0 := deg_to_rad(azimuths[0].to_float())
+			var fwd := Vector3(sin(h0), 0.0, -cos(h0))
+			var el := deg_to_rad(pitch)
+			var look_dir := fwd * cos(el) + Vector3.UP * sin(el)
+			car_cam.global_position = eye
+			car_cam.look_at(eye + look_dir * 100.0, Vector3.UP)
+			for i in 5:
+				await process_frame
+			var pname := "%s_pitch%s.png" % [tag, opts["pitch"]]
+			var img := await _snap(out_dir.path_join(pname))
+			var st := _center_stats(img)
+			print("capture: zenith %s pitch %.1f deg, sat %.3f, val %.3f, luma %.3f (center third)" % [hm, pitch, st["sat"], st["val"], st["luma"]])
 
 		# (b2) diagnóstico: de cima, a TOP_HEIGHT_M, sobre o carro, sobre a luz do poste mais
 		# próxima e a meio caminho entre duas luzes acesas vizinhas.
