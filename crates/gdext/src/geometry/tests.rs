@@ -551,7 +551,8 @@ fn mesh_hash(mesh: &MeshData) -> u64 {
 
 /// Regression: the terrain and road positions, normals and indices of the reference tile
 /// (`cache/casa` tile 0,0) are byte-identical to the ones before the color channel. Only the
-/// terrain colors are new (from the ground cover); the roads have none.
+/// terrain colors are new (from the ground cover); the roads have none. The road hash also pins
+/// the junction weld: roads meeting at a node share one height there (item 34).
 #[test]
 fn reference_tile_geometry_is_unchanged() {
     let path =
@@ -573,7 +574,7 @@ fn reference_tile_geometry_is_unchanged() {
 }
 
 const REFERENCE_TERRAIN_HASH: u64 = 0x3277fb90883f3355;
-const REFERENCE_ROADS_HASH: u64 = 0x194505d14a164e0e;
+const REFERENCE_ROADS_HASH: u64 = 0xf3ec4bbc192c2b47;
 
 /// A tile with no roads has the 10 m grid, bilinear, at every fine vertex (2,5 m).
 #[test]
@@ -1103,6 +1104,597 @@ fn ribbon_metrics() {
             at[1],
             way.1
         );
+    }
+}
+
+/// Height of the ribbon triangle at `(x, y)` with a vertex nearest to `near` (`None` outside every
+/// triangle). A ribbon can pass over itself or over another road; picking the nearest vertex keeps
+/// the reading at the crossing instead of at a distant part of the same strip, and at a shared
+/// node it picks the triangle that has the node vertex (distance zero).
+fn ribbon_height_near(mesh: &MeshData, x: f64, y: f64, near: [f64; 2]) -> Option<f64> {
+    let mut best: Option<(f64, f64)> = None;
+    for tri in mesh.indices.chunks(3) {
+        let p: Vec<[f64; 3]> = tri
+            .iter()
+            .map(|&i| {
+                let v = mesh.vertices[i as usize];
+                [v[0] as f64, v[1] as f64, -(v[2] as f64)]
+            })
+            .collect();
+        let det =
+            (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
+        if det.abs() < 1e-12 {
+            continue;
+        }
+        let l1 = ((x - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (y - p[0][2])) / det;
+        let l2 = ((p[1][0] - p[0][0]) * (y - p[0][2]) - (x - p[0][0]) * (p[1][2] - p[0][2])) / det;
+        let l0 = 1.0 - l1 - l2;
+        let eps = -1e-9;
+        if l0 < eps || l1 < eps || l2 < eps {
+            continue;
+        }
+        let h = l0 * p[0][1] + l1 * p[1][1] + l2 * p[2][1];
+        let d = p
+            .iter()
+            .map(|v| (v[0] - near[0]).hypot(v[2] - near[1]))
+            .fold(f64::INFINITY, f64::min);
+        if best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, h));
+        }
+    }
+    best.map(|(_, h)| h)
+}
+
+/// Two roads that meet at a node on a slope: one climbs along the slope (it needs the
+/// anti-poke-through lift), the other runs along the contour (it needs none). Drawn apart, the
+/// climbing ribbon steps above the contour one by that lift; the junction weld gives both the
+/// same height at the node.
+#[test]
+fn junction_ribbons_meet_at_one_height_on_a_slope() {
+    let road = |points: Vec<[f64; 2]>| Polyline {
+        oneway: None,
+        lanes: None,
+        maxspeed: None,
+        roundabout: false,
+        name: String::new(),
+        highway: "residential".into(),
+        points,
+        z: Vec::new(),
+        zl: Vec::new(),
+        zr: Vec::new(),
+        lit: None,
+    };
+    // 20% grade along x (0.5 m per 2.5 m station, well past `ROAD_STEP_FREE_M`).
+    let t = tile(
+        0,
+        0,
+        grid(26, |u, _| 100.0 + 0.2 * (u * 250.0) as f32),
+        vec![
+            // Climbs with the slope, through the shared node.
+            road(vec![[80.0, 125.0], [125.0, 125.0], [170.0, 125.0]]),
+            // Runs along the contour, through the same node.
+            road(vec![[125.0, 80.0], [125.0, 125.0], [125.0, 170.0]]),
+        ],
+    );
+    let at = [125.0, 125.0];
+    let ground = |x: f64, y: f64| sample_height(&t, 250.0, x, y);
+    let height =
+        |mesh: &MeshData| ribbon_height_near(mesh, at[0], at[1], at).expect("ribbon at node");
+
+    // Apart: the climbing ribbon sits above the contour one by its anti-poke-through lift.
+    let apart = (
+        height(&ribbon_of_road(&t, 250.0, &ground, &[], 0, &[])),
+        height(&ribbon_of_road(&t, 250.0, &ground, &[], 1, &[])),
+    );
+    let apart_step = (apart.0 - apart.1).abs();
+    assert!(
+        apart_step > 0.02,
+        "fixture must show the step before the junction weld (got {:.3} m)",
+        apart_step
+    );
+
+    // At the junction the two ribbons meet at one height (only the 2 mm order lift remains).
+    let together = (
+        height(&ribbon_of_road(&t, 250.0, &ground, &[], 0, &[1])),
+        height(&ribbon_of_road(&t, 250.0, &ground, &[], 1, &[0])),
+    );
+    let step = (together.0 - together.1).abs();
+    assert!(
+        step <= 0.02,
+        "junction step {:.3} m > 0.02 m at the shared node",
+        step
+    );
+}
+
+/// Where the segments `a0 -> a1` and `b0 -> b1` cross in 2D (map meters), or `None` when they are
+/// parallel or the crossing lies off either segment. Ends do not count: two ways that touch at a
+/// node are a junction, found as a shared node, not as a crossing here.
+fn segment_crossing(a0: [f64; 2], a1: [f64; 2], b0: [f64; 2], b1: [f64; 2]) -> Option<[f64; 2]> {
+    let (rx, ry) = (a1[0] - a0[0], a1[1] - a0[1]);
+    let (sx, sy) = (b1[0] - b0[0], b1[1] - b0[1]);
+    let den = rx * sy - ry * sx;
+    if den.abs() < 1e-9 {
+        return None;
+    }
+    let (qx, qy) = (b0[0] - a0[0], b0[1] - a0[1]);
+    let t = (qx * sy - qy * sx) / den;
+    let u = (qx * ry - qy * rx) / den;
+    const END_MARGIN: f64 = 0.02;
+    let inside = |v: f64| v > END_MARGIN && v < 1.0 - END_MARGIN;
+    (inside(t) && inside(u)).then(|| [a0[0] + rx * t, a0[1] + ry * t])
+}
+
+/// Ways a car can drive on. Footways, paths, steps and the other pedestrian ways make no crossing
+/// that a wheel feels, so they are left out of the junction measurement.
+fn drivable_way(highway: &str) -> bool {
+    !matches!(
+        highway,
+        "footway"
+            | "path"
+            | "pedestrian"
+            | "cycleway"
+            | "steps"
+            | "corridor"
+            | "bridleway"
+            | "platform"
+            | "construction"
+            | "proposed"
+            | "raceway"
+            | "bus_stop"
+            | "elevator"
+    )
+}
+
+/// Bounding box of a polyline as `[x0, y0, x1, y1]`.
+fn points_bbox(points: &[[f64; 2]]) -> [f64; 4] {
+    let mut b = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for p in points {
+        b[0] = b[0].min(p[0]);
+        b[1] = b[1].min(p[1]);
+        b[2] = b[2].max(p[0]);
+        b[3] = b[3].max(p[1]);
+    }
+    b
+}
+
+fn boxes_overlap(a: [f64; 4], b: [f64; 4]) -> bool {
+    a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]
+}
+
+/// One place where two drivable ribbons meet or cross, with the grade of both ways there.
+struct RibbonCrossing {
+    at: [f64; 2],
+    tile: (i32, i32),
+    /// Road index in the tile and a label (`highway 'name'`) of each way.
+    ways: [(usize, String); 2],
+    /// Direction of each way at the crossing (unit, map meters).
+    dirs: [[f64; 2]; 2],
+    /// True when the bake pins a node shared by both ways: their profiles already meet there.
+    shared: bool,
+    /// Grade of each way at the crossing, in percent.
+    grades: [f64; 2],
+}
+
+/// Grade in percent of the ground around `at` along `dir`, over `half` meters each way.
+fn grade_percent(
+    height: &dyn Fn(f64, f64) -> Option<f64>,
+    at: [f64; 2],
+    dir: [f64; 2],
+    half: f64,
+) -> f64 {
+    let at_d = |s: f64| [at[0] + dir[0] * s, at[1] + dir[1] * s];
+    let (Some(a), Some(b)) = (
+        height(at_d(-half)[0], at_d(-half)[1]),
+        height(at_d(half)[0], at_d(half)[1]),
+    ) else {
+        return 0.0;
+    };
+    ((b - a) / (2.0 * half) * 100.0).abs()
+}
+
+/// Junction step on the real baked map `casa-10km` (measurement, not a pass/fail test): every
+/// place where two drivable ribbons meet at a shared node or cross without one, with the grade of
+/// both ways there and the height step between the two drawn ribbons. Prints the crossings with a
+/// grade above 10% sorted by step, and the worst step of the map either way.
+/// Run: `cargo test --release -p driving_the_earth_ext junction_step -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn junction_step_on_slopes() {
+    use std::collections::{HashMap, HashSet};
+
+    /// Grade above which a crossing counts as "on a slope".
+    const GRADE_MIN: f64 = 10.0;
+    /// Half-length of the stretch over which the grade at a crossing is read, in meters.
+    const GRADE_HALF_M: f64 = 5.0;
+    /// Two road points within this distance are the same node. Matches `field::NODE_KEY_M`: a
+    /// looser key would count near-misses the bake never reconciles.
+    const NODE_SAME_M: f64 = 0.1;
+    /// Radius around the crossing point over which the worst step is read, in meters.
+    const STEP_RADIUS_M: f64 = 3.0;
+
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../cache"));
+    let index = crate::world::open_map(root, "casa-10km").expect("baked map 'casa-10km'");
+    let tm = index.meta.tile_size_m;
+    let map_grid = tilebake::dem::MapGrid::from_meta(&index.meta);
+
+    // Pass 1: the crossings of each tile. Shared nodes come from the node keys of the ways (the
+    // bake pins one height for them); geometric crossings are segment intersections away from any
+    // node. The whole map is scanned once: a crossing near a tile border shows up in both tiles,
+    // and the 1 m key keeps the first.
+    let mut found: Vec<RibbonCrossing> = Vec::new();
+    let mut seen: HashSet<(i64, i64)> = HashSet::new();
+    let mut pairs = 0usize;
+    for &(tx, ty) in index.coords() {
+        let tile = index.read_tile_at(tx, ty).expect("read tile");
+        // Road index in `tile.roads` (the ribbons index the full list; `lift` uses it too).
+        let roads: Vec<(usize, &Polyline)> = tile
+            .roads
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| drivable_way(&r.highway) && r.points.len() >= 2)
+            .collect();
+        // Grade at a crossing, read from this tile's baked grid (its edge plane matches the
+        // neighbor's, so a crossing near a border reads the same).
+        let ground_h = |x: f64, y: f64| Some(sample_height(&tile, tm, x, y) as f64);
+        let grades = |at: [f64; 2], dirs: [[f64; 2]; 2]| {
+            [
+                grade_percent(&ground_h, at, dirs[0], GRADE_HALF_M),
+                grade_percent(&ground_h, at, dirs[1], GRADE_HALF_M),
+            ]
+        };
+        // Shared nodes: the ways with a point on each key, and the direction each leaves it.
+        let mut nodes: HashMap<(i64, i64), Vec<(usize, usize, [f64; 2])>> = HashMap::new();
+        for (i, (_, road)) in roads.iter().enumerate() {
+            let n = road.points.len();
+            for k in 0..n {
+                let key = (
+                    (road.points[k][0] / NODE_SAME_M).round() as i64,
+                    (road.points[k][1] / NODE_SAME_M).round() as i64,
+                );
+                // Direction of the way at the node: from the previous point (or the next, at an end).
+                let q = if k > 0 {
+                    road.points[k - 1]
+                } else {
+                    road.points[k + 1]
+                };
+                let d = [road.points[k][0] - q[0], road.points[k][1] - q[1]];
+                let len = d[0].hypot(d[1]);
+                let dir = if len > 1e-9 {
+                    [d[0] / len, d[1] / len]
+                } else {
+                    [1.0, 0.0]
+                };
+                nodes.entry(key).or_default().push((i, k, dir));
+            }
+        }
+        for entries in nodes.values() {
+            for a in 0..entries.len() {
+                for b in a + 1..entries.len() {
+                    let ((i, k, dir_a), (j, _, dir_b)) = (entries[a], entries[b]);
+                    if i == j {
+                        continue;
+                    }
+                    let at = roads[i].1.points[k];
+                    let key = ((at[0] / 1.0).round() as i64, (at[1] / 1.0).round() as i64);
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    found.push(RibbonCrossing {
+                        at,
+                        tile: (tx, ty),
+                        ways: [
+                            (
+                                roads[i].0,
+                                format!("{} '{}'", roads[i].1.highway, roads[i].1.name),
+                            ),
+                            (
+                                roads[j].0,
+                                format!("{} '{}'", roads[j].1.highway, roads[j].1.name),
+                            ),
+                        ],
+                        dirs: [dir_a, dir_b],
+                        shared: true,
+                        grades: grades(at, [dir_a, dir_b]),
+                    });
+                }
+            }
+        }
+        // Geometric crossings: segments that cut each other away from every node.
+        let boxes: Vec<[f64; 4]> = roads.iter().map(|r| points_bbox(&r.1.points)).collect();
+        for i in 0..roads.len() {
+            for j in i + 1..roads.len() {
+                if !boxes_overlap(boxes[i], boxes[j]) {
+                    continue;
+                }
+                pairs += 1;
+                for wa in roads[i].1.points.windows(2) {
+                    for wb in roads[j].1.points.windows(2) {
+                        let Some(at) = segment_crossing(wa[0], wa[1], wb[0], wb[1]) else {
+                            continue;
+                        };
+                        let key = ((at[0] / 1.0).round() as i64, (at[1] / 1.0).round() as i64);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        let dir = |w: &[[f64; 2]]| {
+                            let d = [w[1][0] - w[0][0], w[1][1] - w[0][1]];
+                            let len = d[0].hypot(d[1]);
+                            [d[0] / len, d[1] / len]
+                        };
+                        found.push(RibbonCrossing {
+                            at,
+                            tile: (tx, ty),
+                            ways: [
+                                (
+                                    roads[i].0,
+                                    format!("{} '{}'", roads[i].1.highway, roads[i].1.name),
+                                ),
+                                (
+                                    roads[j].0,
+                                    format!("{} '{}'", roads[j].1.highway, roads[j].1.name),
+                                ),
+                            ],
+                            dirs: [dir(wa), dir(wb)],
+                            shared: false,
+                            grades: grades(at, [dir(wa), dir(wb)]),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let grade_of = |c: &RibbonCrossing| c.grades[0].max(c.grades[1]);
+
+    // Pass 2: the drawn step at the crossings on a slope, one ribbon at a time on the same field.
+    let step_of = |c: &RibbonCrossing| -> Option<(f64, f64, f64)> {
+        let map = index.neighborhood(c.tile.0, c.tile.1).ok()?;
+        let tile = map
+            .tiles
+            .iter()
+            .find(|t| (t.x, t.y) == c.tile)
+            .expect("center tile");
+        let around: Vec<&Tile> = map.tiles.iter().filter(|t| (t.x, t.y) != c.tile).collect();
+        let ground = |x: f64, y: f64| {
+            map.height_at(x, y)
+                .unwrap_or_else(|| sample_height(tile, tm, x, y))
+        };
+        let lifts: Vec<f64> = (0..2)
+            .map(|s| {
+                let idx = c.ways[s].0;
+                (ROAD_LIFT_M + (idx % 8) as f32 * ROAD_ORDER_LIFT_M) as f64
+            })
+            .collect();
+        // Every other road with a point on the same node key, as the game reconciles them.
+        let node_key = |p: [f64; 2]| ((p[0] / 0.1).round() as i64, (p[1] / 0.1).round() as i64);
+        let at_key = node_key(c.at);
+        let partners_near = |idx: usize| -> Vec<usize> {
+            tile.roads
+                .iter()
+                .enumerate()
+                .filter(|&(j, road)| j != idx && road.points.iter().any(|p| node_key(*p) == at_key))
+                .map(|(j, _)| j)
+                .collect()
+        };
+        let meshes: Vec<MeshData> = (0..2)
+            .map(|s| {
+                let idx = c.ways[s].0;
+                ribbon_of_road(tile, tm, &ground, &around, idx, &partners_near(idx))
+            })
+            .collect();
+        let at = c.at;
+        let (Some(ha), Some(hb)) = (
+            ribbon_height_near(&meshes[0], at[0], at[1], at),
+            ribbon_height_near(&meshes[1], at[0], at[1], at),
+        ) else {
+            return None;
+        };
+        // Gap at the crossing point, and the worst gap in a small window around it (a wheel
+        // crosses the band, not a point).
+        let point = (ha - hb).abs();
+        let mut worst = point;
+        let n = (STEP_RADIUS_M / 0.75) as i32;
+        for i in -n..=n {
+            for j in -n..=n {
+                let (x, y) = (at[0] + i as f64 * 0.75, at[1] + j as f64 * 0.75);
+                if (x - at[0]).hypot(y - at[1]) > STEP_RADIUS_M {
+                    continue;
+                }
+                if let (Some(pa), Some(pb)) = (
+                    ribbon_height_near(&meshes[0], x, y, at),
+                    ribbon_height_near(&meshes[1], x, y, at),
+                ) {
+                    worst = worst.max((pa - pb).abs());
+                }
+            }
+        }
+        let lift_signed = (lifts[0] - lifts[1]).abs();
+        Some((point, worst, worst - lift_signed))
+    };
+
+    // (step at the crossing, worst step within the window, terrain-only worst, grade, crossing).
+    let mut on_slope: Vec<(f64, f64, f64, f64, &RibbonCrossing)> = Vec::new();
+    let mut no_mesh = 0usize;
+    for c in &found {
+        if grade_of(c) <= GRADE_MIN {
+            continue;
+        }
+        match step_of(c) {
+            Some((point, worst, terrain_step)) => {
+                on_slope.push((point, worst, terrain_step, grade_of(c), c));
+            }
+            None => no_mesh += 1,
+        }
+    }
+    on_slope.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let shared = found.iter().filter(|c| c.shared).count();
+
+    println!(
+        "casa-10km: {} crossings of two drivable ribbons ({} at a shared node, {} geometric), {} road pairs near each other",
+        found.len(),
+        shared,
+        found.len() - shared,
+        pairs
+    );
+    println!(
+        "grade > {GRADE_MIN:.0}%: {} crossings ({} without a ribbon on the point), {} at a shared node",
+        on_slope.len(),
+        no_mesh,
+        on_slope.iter().filter(|c| c.4.shared).count()
+    );
+    let steps: Vec<f64> = on_slope.iter().map(|c| c.0).collect();
+    if !steps.is_empty() {
+        let max = steps.iter().cloned().fold(0.0, f64::max);
+        let over_2cm = steps.iter().filter(|s| **s > 0.02).count();
+        let mut sorted = steps.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "step at the crossing on a slope: max {:.2} cm, {} crossings over 2 cm, median {:.2} cm, p90 {:.2} cm",
+            max * 100.0,
+            over_2cm,
+            sorted[sorted.len() / 2] * 100.0,
+            sorted[(sorted.len() - 1) * 9 / 10] * 100.0
+        );
+        let worsts: Vec<f64> = on_slope.iter().map(|c| c.1).collect();
+        println!(
+            "worst step within {STEP_RADIUS_M:.0} m of the crossing: max {:.2} cm, {} over 2 cm",
+            worsts.iter().cloned().fold(0.0, f64::max) * 100.0,
+            worsts.iter().filter(|s| **s > 0.02).count()
+        );
+        // Histogram of the step at the crossing, shared nodes and geometric crossings apart.
+        let bins = [0.0, 0.01, 0.02, 0.05, 0.10, 0.20, 0.50];
+        for (label, want_shared) in [("node", true), ("cross", false)] {
+            let v: Vec<f64> = on_slope
+                .iter()
+                .filter(|c| c.4.shared == want_shared)
+                .map(|c| c.0)
+                .collect();
+            if v.is_empty() {
+                continue;
+            }
+            let buckets: Vec<usize> = (0..bins.len() - 1)
+                .map(|k| {
+                    v.iter()
+                        .filter(|s| **s >= bins[k] && **s < bins[k + 1])
+                        .count()
+                })
+                .collect();
+            let over = v.iter().filter(|s| **s >= bins[bins.len() - 1]).count();
+            println!(
+                "  {label} step bins (cm) {}: {} ; >=50: {}",
+                (0..bins.len() - 1)
+                    .map(|k| format!("[{:.0},{:.0})", bins[k] * 100.0, bins[k + 1] * 100.0))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                buckets
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                over
+            );
+        }
+    }
+    // Shared nodes still over the limit.
+    let outliers: Vec<&(f64, f64, f64, f64, &RibbonCrossing)> = on_slope
+        .iter()
+        .filter(|c| c.4.shared && c.0 > 0.02)
+        .collect();
+    if !outliers.is_empty() {
+        println!("shared nodes over 2 cm ({}):", outliers.len());
+        for &(step, _, _, grade, c) in outliers.iter().copied().take(20) {
+            let (lat, lon) = map_grid.latlon(c.at[0], c.at[1]);
+            let mut extra = String::new();
+            if let Ok(t) = index.read_tile_at(c.tile.0, c.tile.1) {
+                let nearest = |idx: usize| {
+                    t.roads[idx]
+                        .points
+                        .iter()
+                        .copied()
+                        .min_by(|p, q| {
+                            let dp = (p[0] - c.at[0]).hypot(p[1] - c.at[1]);
+                            let dq = (q[0] - c.at[0]).hypot(q[1] - c.at[1]);
+                            dp.partial_cmp(&dq).unwrap()
+                        })
+                        .unwrap_or(c.at)
+                };
+                let (pa, pb) = (nearest(c.ways[0].0), nearest(c.ways[1].0));
+                let sep = (pa[0] - pb[0]).hypot(pa[1] - pb[1]);
+                extra = format!(
+                    " | node gap {:.3} m, profile points {}/{}",
+                    sep,
+                    t.roads[c.ways[0].0].z.len(),
+                    t.roads[c.ways[1].0].z.len()
+                );
+            }
+            println!(
+                "  step {:.2} cm, grade {:.1}%, tile ({},{}), {:.5},{:.5}: {} / {}{}",
+                step * 100.0,
+                grade,
+                c.tile.0,
+                c.tile.1,
+                lat,
+                lon,
+                c.ways[0].1,
+                c.ways[1].1,
+                extra,
+            );
+        }
+    }
+    // Worst shared-node junctions, which is where a "junction" mesh applies.
+    println!("worst shared nodes (junction step):");
+    for (rank, (step, _, _, grade, c)) in
+        on_slope.iter().filter(|c| c.4.shared).take(10).enumerate()
+    {
+        let (lat, lon) = map_grid.latlon(c.at[0], c.at[1]);
+        println!(
+            " {:2}  {:6.2} cm  grade {:5.1}%  tile ({:3},{:3})  ({:9.1},{:9.1})  {:.5},{:.5}  {} / {}",
+            rank + 1,
+            step * 100.0,
+            grade,
+            c.tile.0,
+            c.tile.1,
+            c.at[0],
+            c.at[1],
+            lat,
+            lon,
+            c.ways[0].1,
+            c.ways[1].1,
+        );
+    }
+    println!(
+        "  #  step cm  win cm  terr cm  grade%  angle  kind   tile        x,y          lat,lon                 A / B"
+    );
+    for (rank, (step, worst, terrain_step, grade, c)) in on_slope.iter().enumerate().take(40) {
+        let (lat, lon) = map_grid.latlon(c.at[0], c.at[1]);
+        let dot = (c.dirs[0][0] * c.dirs[1][0] + c.dirs[0][1] * c.dirs[1][1]).abs();
+        let angle = dot.clamp(0.0, 1.0).acos().to_degrees();
+        println!(
+            " {:2}  {:7.2}  {:6.2}  {:7.2}  {:6.1}  {:5.0}  {:5}  ({:3},{:3})  ({:8.1},{:8.1})  {:.5},{:.5}  {} / {}",
+            rank + 1,
+            step * 100.0,
+            worst * 100.0,
+            terrain_step * 100.0,
+            grade,
+            angle,
+            if c.shared { "node" } else { "cross" },
+            c.tile.0,
+            c.tile.1,
+            c.at[0],
+            c.at[1],
+            lat,
+            lon,
+            c.ways[0].1,
+            c.ways[1].1,
+        );
+    }
+    if on_slope.len() > 40 {
+        println!("... {} more", on_slope.len() - 40);
     }
 }
 

@@ -21,106 +21,181 @@ const ROAD_STEP_LIFT: f32 = 0.4;
 const ROAD_STEP_LIFT_MAX_M: f32 = 0.4;
 const ROAD_STEP_CLIFF_M: f32 = 1.5;
 
-/// Adds one road as a continuous strip: three vertices per station (left edge, center,
-/// right edge), two quads between stations. Stations sit at the polyline nodes and every
-/// `ROAD_STATION_M` meters in between. Every vertex takes the height of the terrain field at
-/// its own position plus `lift`, so the ribbon lies on the same surface as the terrain mesh.
-/// At each node the two segment normals are joined (miter), so bends have no gaps or overlaps.
-pub(super) fn push_road(
-    mesh: &mut MeshData,
-    surface: &Surface,
-    ground: &dyn Fn(f64, f64) -> f32,
-    points: &[[f64; 2]],
-    half: f64,
-    lift: f32,
-) {
-    // Drop repeated points: they have no direction.
-    let mut pts: Vec<[f64; 2]> = Vec::with_capacity(points.len());
-    for &p in points {
-        match pts.last() {
-            Some(&q) if dist(p, q) <= 1e-9 => {}
-            _ => pts.push(p),
-        }
-    }
-    if pts.len() < 2 {
-        return;
-    }
-    let normals: Vec<[f64; 2]> = pts.windows(2).map(|w| unit_normal(w[0], w[1])).collect();
+/// One road as a continuous strip, built but not yet written to a mesh: three vertices per
+/// station (left edge, center, right edge), two quads between stations. Stations sit at the
+/// polyline nodes and every `ROAD_STATION_M` meters in between. Every vertex takes the height of
+/// the terrain field at its own position, plus the road's `lift` and the anti-poke-through lift
+/// (`extra`). At each node the two segment normals are joined (miter), so bends have no gaps.
+///
+/// Building the strip apart from the mesh lets the junction reconciliation give every road that
+/// meets at a shared node the same lift at that node (see `junction::reconcile_lift`), so the
+/// ribbons meet at one height there instead of one stepping over the other.
+pub(super) struct Ribbon {
+    /// Station centers, one per station, in the same order as `extra`.
+    centers: Vec<[f64; 2]>,
+    /// Left edge, center and right edge of every station, three per station.
+    xy: Vec<[f64; 2]>,
+    /// Sampled field height at each of `xy`, three per station.
+    heights: Vec<f32>,
+    /// Anti-poke-through lift per station (see `smooth_extra`).
+    extra: Vec<f32>,
+    /// Station indices of the polyline points: the only places the bake calls a node.
+    nodes: Vec<usize>,
+}
 
-    // Offset from the center to the left edge, one per station, and the station position.
-    let mut stations: Vec<([f64; 2], [f64; 2])> = Vec::new();
-    stations.push((pts[0], scale(normals[0], half)));
-    for k in 0..pts.len() - 1 {
-        let (p, q) = (pts[k], pts[k + 1]);
-        let pieces = (dist(p, q) / ROAD_STATION_M).ceil().max(1.0) as usize;
-        for s in 1..pieces {
-            let t = s as f64 / pieces as f64;
-            let at = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
-            stations.push((at, scale(normals[k], half)));
+impl Ribbon {
+    /// `None` when the road has fewer than two distinct points (nothing to draw).
+    pub(super) fn new(
+        surface: &Surface,
+        ground: &dyn Fn(f64, f64) -> f32,
+        points: &[[f64; 2]],
+        half: f64,
+    ) -> Option<Ribbon> {
+        // Drop repeated points: they have no direction.
+        let mut pts: Vec<[f64; 2]> = Vec::with_capacity(points.len());
+        for &p in points {
+            match pts.last() {
+                Some(&q) if dist(p, q) <= 1e-9 => {}
+                _ => pts.push(p),
+            }
         }
-        let offset = match normals.get(k + 1) {
-            Some(&next) => miter(normals[k], next, half),
-            None => scale(normals[k], half),
-        };
-        stations.push((q, offset));
-    }
+        if pts.len() < 2 {
+            return None;
+        }
+        let normals: Vec<[f64; 2]> = pts.windows(2).map(|w| unit_normal(w[0], w[1])).collect();
 
-    let base = mesh.vertices.len() as u32;
-    let mut xy: Vec<[f64; 2]> = Vec::with_capacity(stations.len() * 3);
-    let mut heights: Vec<f32> = Vec::with_capacity(stations.len() * 3);
-    for &(c, o) in &stations {
-        for [x, y] in [[c[0] + o[0], c[1] + o[1]], c, [c[0] - o[0], c[1] - o[1]]] {
-            xy.push([x, y]);
-            heights.push(surface.height(ground, x, y));
+        // Offset from the center to the left edge, one per station, and the station position.
+        // `nodes` remembers which stations are polyline points: the bake reconciles heights only
+        // at those, so the junction weld matches the same places.
+        let mut stations: Vec<([f64; 2], [f64; 2])> = Vec::new();
+        let mut nodes: Vec<usize> = Vec::new();
+        nodes.push(0);
+        stations.push((pts[0], scale(normals[0], half)));
+        for k in 0..pts.len() - 1 {
+            let (p, q) = (pts[k], pts[k + 1]);
+            let pieces = (dist(p, q) / ROAD_STATION_M).ceil().max(1.0) as usize;
+            for s in 1..pieces {
+                let t = s as f64 / pieces as f64;
+                let at = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+                stations.push((at, scale(normals[k], half)));
+            }
+            let offset = match normals.get(k + 1) {
+                Some(&next) => miter(normals[k], next, half),
+                None => scale(normals[k], half),
+            };
+            nodes.push(stations.len());
+            stations.push((q, offset));
         }
-    }
-    // The ribbon is flat between its stations and the terrain between its grid vertices, with
-    // different triangles; on a steep stretch they differ by a fraction of the height step
-    // between neighbors. The ribbon rises by that fraction so the terrain never shows through.
-    let n = stations.len();
-    let raw: Vec<f32> = (0..n)
-        .map(|s| {
-            let mut step = 0.0f32;
-            for c in 0..3 {
-                let h = heights[3 * s + c];
-                if s > 0 {
-                    step = step.max((h - heights[3 * (s - 1) + c]).abs());
-                }
-                if s + 1 < n {
-                    step = step.max((h - heights[3 * (s + 1) + c]).abs());
-                }
+
+        let mut centers = Vec::with_capacity(stations.len());
+        let mut xy: Vec<[f64; 2]> = Vec::with_capacity(stations.len() * 3);
+        let mut heights: Vec<f32> = Vec::with_capacity(stations.len() * 3);
+        for &(c, o) in &stations {
+            centers.push(c);
+            for [x, y] in [[c[0] + o[0], c[1] + o[1]], c, [c[0] - o[0], c[1] - o[1]]] {
+                xy.push([x, y]);
+                heights.push(surface.height(ground, x, y));
             }
-            step = step
-                .max((heights[3 * s] - heights[3 * s + 1]).abs())
-                .max((heights[3 * s + 1] - heights[3 * s + 2]).abs());
-            // A step beyond `ROAD_STEP_CLIFF_M` is a cliff (a tile border over a different terrain), not a slope.
-            if step > ROAD_STEP_CLIFF_M {
-                0.0
-            } else {
-                (ROAD_STEP_LIFT * (step - ROAD_STEP_FREE_M).max(0.0)).min(ROAD_STEP_LIFT_MAX_M)
-            }
+        }
+        // The ribbon is flat between its stations and the terrain between its grid vertices, with
+        // different triangles; on a steep stretch they differ by a fraction of the height step
+        // between neighbors. The ribbon rises by that fraction so the terrain never shows through.
+        let n = centers.len();
+        let raw: Vec<f32> = (0..n)
+            .map(|s| {
+                let mut step = 0.0f32;
+                for c in 0..3 {
+                    let h = heights[3 * s + c];
+                    if s > 0 {
+                        step = step.max((h - heights[3 * (s - 1) + c]).abs());
+                    }
+                    if s + 1 < n {
+                        step = step.max((h - heights[3 * (s + 1) + c]).abs());
+                    }
+                }
+                step = step
+                    .max((heights[3 * s] - heights[3 * s + 1]).abs())
+                    .max((heights[3 * s + 1] - heights[3 * s + 2]).abs());
+                // A step beyond `ROAD_STEP_CLIFF_M` is a cliff (a tile border over a different terrain), not a slope.
+                if step > ROAD_STEP_CLIFF_M {
+                    0.0
+                } else {
+                    (ROAD_STEP_LIFT * (step - ROAD_STEP_FREE_M).max(0.0)).min(ROAD_STEP_LIFT_MAX_M)
+                }
+            })
+            .collect();
+        let extra = smooth_extra(&raw);
+        Some(Ribbon {
+            centers,
+            xy,
+            heights,
+            extra,
+            nodes,
         })
-        .collect();
-    let extra = smooth_extra(&raw);
-    // Edge columns (c = 0 and 2) take the edge lift; the center column (c = 1) takes the full lift.
-    let edge_lift = lift - ROAD_LIFT_M + ROAD_EDGE_LIFT_M;
-    for s in 0..n {
-        for c in 0..3 {
-            let [x, y] = xy[3 * s + c];
-            let base_lift = if c == 1 { lift } else { edge_lift };
-            mesh.vertices
-                .push(world(x, y, heights[3 * s + c] + base_lift + extra[s]));
-            mesh.normals.push([0.0, 1.0, 0.0]);
+    }
+
+    /// Station centers, in the same order as `extra` and the strip vertices.
+    pub(super) fn centers(&self) -> &[[f64; 2]] {
+        &self.centers
+    }
+
+    /// Station indices of the polyline points (the places the bake treats as nodes).
+    pub(super) fn node_stations(&self) -> &[usize] {
+        &self.nodes
+    }
+
+    /// Anti-poke-through lift at station `s`, in meters.
+    pub(super) fn extra_at(&self, s: usize) -> f32 {
+        self.extra[s]
+    }
+
+    /// Field height of the center vertex at station `s`, before any lift: what a junction weld
+    /// compares to give the roads meeting there one height.
+    pub(super) fn center_height(&self, s: usize) -> f32 {
+        self.heights[3 * s + 1]
+    }
+
+    /// Raises the lift around `station` to `value`, easing down at `EXTRA_STEP_LIMIT_M` per
+    /// station. Only raises: no ribbon is pushed down toward the terrain. Used to give every
+    /// road meeting at a junction the same lift at the shared node.
+    pub(super) fn raise_at(&mut self, station: usize, value: f32) {
+        // Beyond this many stations the cone is already below any lift it could raise.
+        let span = (value / EXTRA_STEP_LIMIT_M).ceil() as usize + 1;
+        let lo = station.saturating_sub(span);
+        let hi = (station + span + 1).min(self.extra.len());
+        for s in lo..hi {
+            let d = (s as f32 - station as f32).abs() * EXTRA_STEP_LIMIT_M;
+            self.extra[s] = self.extra[s].max(value - d);
         }
     }
-    for s in 0..stations.len() - 1 {
-        // Vertex of station s on the left (3s), center (3s + 1) and right (3s + 2) edge.
-        let l0 = base + 3 * s as u32;
-        let l1 = l0 + 3;
-        push_up_facing(mesh, l0, l0 + 1, l1 + 1);
-        push_up_facing(mesh, l0, l1 + 1, l1);
-        push_up_facing(mesh, l0 + 1, l0 + 2, l1 + 2);
-        push_up_facing(mesh, l0 + 1, l1 + 2, l1 + 1);
+
+    /// Writes the strip, raising every vertex by the anti-poke-through lift and by `lift` (the
+    /// road's base lift). Edge columns take the edge lift, the center column the full lift.
+    pub(super) fn push(&self, mesh: &mut MeshData, lift: f32) {
+        let n = self.centers.len();
+        let base = mesh.vertices.len() as u32;
+        let edge_lift = lift - ROAD_LIFT_M + ROAD_EDGE_LIFT_M;
+        for s in 0..n {
+            for c in 0..3 {
+                let [x, y] = self.xy[3 * s + c];
+                let base_lift = if c == 1 { lift } else { edge_lift };
+                mesh.vertices.push(world(
+                    x,
+                    y,
+                    self.heights[3 * s + c] + base_lift + self.extra[s],
+                ));
+                mesh.normals.push([0.0, 1.0, 0.0]);
+            }
+        }
+        for s in 0..n - 1 {
+            // Vertex of station s on the left (3s), center (3s + 1) and right (3s + 2) edge.
+            let l0 = base + 3 * s as u32;
+            let l1 = l0 + 3;
+            push_up_facing(mesh, l0, l0 + 1, l1 + 1);
+            push_up_facing(mesh, l0, l1 + 1, l1);
+            push_up_facing(mesh, l0 + 1, l0 + 2, l1 + 2);
+            push_up_facing(mesh, l0 + 1, l1 + 2, l1 + 1);
+        }
     }
 }
 
