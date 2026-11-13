@@ -1,7 +1,8 @@
 # Scripts
 
-Standalone tools run from the repository root. All of them are Python 3 and use only the
-standard library, so no virtualenv or `pip install` is needed.
+Standalone tools run from the repository root. Most are Python 3 and use only the standard
+library, so no virtualenv or `pip install` is needed. The exception is `car_glb_lowpoly.py`, which
+runs inside Blender (see below).
 
 ## `check_road_float.py`
 
@@ -48,3 +49,22 @@ python3 scripts/build_worldmap.py
 
 Re-running with the same sources gives the same bytes. The binary layout is documented at the
 top of the script.
+
+## `car_glb_lowpoly.py`
+
+Turns a textured car GLB (the Tripo TR4 export) into the low-poly, texture-free car the game uses:
+one body and four wheels, each wheel centered on its own axle. It runs inside Blender 4.5, not
+with `python3`.
+
+```sh
+/path/to/blender -b -P scripts/car_glb_lowpoly.py -- \
+  --input tripo_convert_<id>.glb --output godot/assets/car/car_tr4.glb \
+  --ratio 0.2 --length 3.7 --track 1.4 --wheelbase 2.36 --wheel-radius 0.29 --preview <dir>
+```
+
+`--ratio` is the fraction of triangles kept per part, `--length` the car length in meters. The
+optional `--track`, `--wheelbase` and `--wheel-radius` (meters) match the wheel positions and the
+tire radius to the game's car node. `--preview DIR` writes two renders. The script prints the wheel
+fits, the triangle counts and the body width: check them when the source changes. The output is
+not versioned by the script; the game loads it from `godot/assets/car/car_tr4.glb` and falls back
+to the procedural car if it is missing.
