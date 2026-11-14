@@ -28,6 +28,55 @@ pub fn text(key: &str, lang: Lang) -> &str {
     }
 }
 
+/// Text key of a failed bake, from the failure `kind` and `message` the bake reports (`BakeJob`).
+/// The cause is read from the message, which `tilebake` and `overpass` build:
+/// - an Overpass answer 429, 502, 503 or 504 (busy, rate-limited or down) is `overpass`;
+/// - a transport error (DNS, connection, timeout: no network) is `network`;
+/// - a file error (no space, no permission, read-only) is `disk`;
+/// - anything else, and an invalid request, is the generic `home.bake_failed`.
+pub fn bake_failure_key(kind: &str, message: &str) -> &'static str {
+    if kind == "invalid_input" {
+        return "home.bake_failed";
+    }
+    let text = message.to_ascii_lowercase();
+    // Checked before the transport words: an Overpass answer also says "HTTP".
+    if ["http 429", "http 502", "http 503", "http 504"]
+        .iter()
+        .any(|code| text.contains(code))
+    {
+        return "home.bake_fail.overpass";
+    }
+    if text.contains("http ") {
+        return "home.bake_failed";
+    }
+    const NETWORK: [&str; 8] = [
+        "dns",
+        "connection",
+        "connect",
+        "timed out",
+        "timeout",
+        "unreachable",
+        "resolve",
+        "network",
+    ];
+    if NETWORK.iter().any(|word| text.contains(word)) {
+        return "home.bake_fail.network";
+    }
+    const DISK: [&str; 7] = [
+        "no space left",
+        "disk quota",
+        "permission denied",
+        "read-only file system",
+        "os error 28",
+        "os error 13",
+        "os error 30",
+    ];
+    if DISK.iter().any(|word| text.contains(word)) {
+        return "home.bake_fail.disk";
+    }
+    "home.bake_failed"
+}
+
 /// Text key of a bake stage (the stage keys `tilebake` reports). A stage the table does not know
 /// gets the generic line, so a new stage shows something instead of its raw key.
 pub fn bake_stage_key(stage: &str) -> &'static str {
@@ -142,6 +191,23 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Could not prepare this place: choose another one (M).",
         "Não foi possível preparar este lugar: escolha outro (M).",
     ),
+    (
+        "home.bake_fail.network",
+        "No internet connection: the first visit to a place needs it. Try again when you are online.",
+        "Sem conexão com a internet: a primeira visita a um lugar precisa dela. Tente de novo quando estiver online.",
+    ),
+    (
+        "home.bake_fail.overpass",
+        "The OpenStreetMap server is busy or down. Try again in a few minutes.",
+        "O servidor do OpenStreetMap está ocupado ou fora do ar. Tente de novo em alguns minutos.",
+    ),
+    (
+        "home.bake_fail.disk",
+        "Could not save the map: check the free disk space and the game folder's permissions.",
+        "Não foi possível salvar o mapa: confira o espaço livre em disco e as permissões da pasta do jogo.",
+    ),
+    ("bake.retry", "Try again", "Tentar de novo"),
+    ("bake.back", "Back", "Voltar"),
     (
         "home.bake_no_road",
         "No road found for the car at this place.",
@@ -290,6 +356,79 @@ mod tests {
             assert_ne!(text(key, Lang::PtBr), key, "{stage} has no pt-BR text");
         }
         assert_eq!(bake_stage_key("unknown"), "bake.stage.other");
+    }
+
+    #[test]
+    fn bake_failures_map_to_their_cause() {
+        // No network: transport errors of Overpass (prefixed) and of Copernicus (bare).
+        let dns = "Overpass request failed: Dns Failed: resolve dns name 'overpass.invalid:443'";
+        assert_eq!(bake_failure_key("other", dns), "home.bake_fail.network");
+        let connect = "Overpass request failed: Connection Failed: tcp connect error";
+        assert_eq!(bake_failure_key("other", connect), "home.bake_fail.network");
+        let timeout = "Overpass request failed: Connection timed out";
+        assert_eq!(bake_failure_key("other", timeout), "home.bake_fail.network");
+        assert_eq!(
+            bake_failure_key("other", "Dns Failed: no address"),
+            "home.bake_fail.network"
+        );
+
+        // Overpass busy, rate-limited or down, with the retries spent.
+        for code in [429, 502, 503, 504] {
+            let msg = format!("Overpass request failed: HTTP {code}");
+            assert_eq!(
+                bake_failure_key("other", &msg),
+                "home.bake_fail.overpass",
+                "{code}"
+            );
+        }
+        // Other HTTP answers are not an outage: the generic line.
+        assert_eq!(
+            bake_failure_key("other", "Overpass request failed: HTTP 400"),
+            "home.bake_failed"
+        );
+        assert_eq!(
+            bake_failure_key("other", "http status: 404"),
+            "home.bake_failed"
+        );
+
+        // Disk, from the OS messages.
+        assert_eq!(
+            bake_failure_key("other", "No space left on device (os error 28)"),
+            "home.bake_fail.disk"
+        );
+        assert_eq!(
+            bake_failure_key("other", "Permission denied (os error 13)"),
+            "home.bake_fail.disk"
+        );
+
+        // The rest, and an invalid request, keep the generic line.
+        assert_eq!(
+            bake_failure_key("other", "bake thread ended without a result"),
+            "home.bake_failed"
+        );
+        assert_eq!(
+            bake_failure_key("invalid_input", "Dns Failed"),
+            "home.bake_failed"
+        );
+        assert_eq!(
+            bake_failure_key("other", "unexpected layout"),
+            "home.bake_failed"
+        );
+    }
+
+    #[test]
+    fn failure_and_retry_keys_are_translated() {
+        for key in [
+            "home.bake_failed",
+            "home.bake_fail.network",
+            "home.bake_fail.overpass",
+            "home.bake_fail.disk",
+            "bake.retry",
+            "bake.back",
+        ] {
+            assert!(TABLE.iter().any(|(k, _, _)| *k == key), "{key}");
+            assert_ne!(text(key, Lang::PtBr), key, "{key}");
+        }
     }
 
     #[test]

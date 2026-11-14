@@ -6,6 +6,9 @@ use std::time::Duration;
 
 /// Overpass interpreter endpoint.
 pub const OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
+/// Environment variable that replaces the endpoint (checks use an unreachable host to simulate a
+/// machine without network). Unset or empty: `OVERPASS_URL`.
+pub const OVERPASS_URL_ENV: &str = "DTE_OVERPASS_URL";
 /// User-Agent of every network request of the project (Overpass, Nominatim, Copernicus): game
 /// name, workspace version and repository URL. `tilebake` uses this same value, since it depends
 /// on this crate.
@@ -20,6 +23,14 @@ pub const MIN_GAP: Duration = Duration::from_secs(1);
 pub const MAX_ATTEMPTS: u32 = 6;
 /// Wait before the first retry; doubled on each following retry.
 pub const BACKOFF_BASE: Duration = Duration::from_secs(5);
+
+/// The endpoint in use: `DTE_OVERPASS_URL` when set and not empty, else `OVERPASS_URL`.
+pub fn overpass_url() -> String {
+    std::env::var(OVERPASS_URL_ENV)
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| OVERPASS_URL.to_string())
+}
 
 fn other_err<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e.to_string())
@@ -42,7 +53,7 @@ pub struct UreqOverpass;
 
 impl OverpassClient for UreqOverpass {
     fn post(&self, query: &str) -> Result<String, HttpError> {
-        match ureq::post(OVERPASS_URL)
+        match ureq::post(&overpass_url())
             .set("User-Agent", USER_AGENT)
             .send_form(&[("data", query)])
         {
@@ -105,7 +116,7 @@ impl Downloader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::USER_AGENT;
+    use super::{overpass_url, OVERPASS_URL, OVERPASS_URL_ENV, USER_AGENT};
 
     #[test]
     fn user_agent_names_the_game_version_and_repository() {
@@ -117,5 +128,17 @@ mod tests {
             )
         );
         assert!(!USER_AGENT.contains("projeto pessoal"));
+    }
+
+    #[test]
+    fn endpoint_comes_from_the_environment_when_set() {
+        // Only this test touches the variable, so the other tests are not affected.
+        std::env::remove_var(OVERPASS_URL_ENV);
+        assert_eq!(overpass_url(), OVERPASS_URL);
+        std::env::set_var(OVERPASS_URL_ENV, "  ");
+        assert_eq!(overpass_url(), OVERPASS_URL);
+        std::env::set_var(OVERPASS_URL_ENV, "https://overpass.invalid/api/interpreter");
+        assert_eq!(overpass_url(), "https://overpass.invalid/api/interpreter");
+        std::env::remove_var(OVERPASS_URL_ENV);
     }
 }
