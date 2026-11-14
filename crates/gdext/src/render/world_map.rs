@@ -19,17 +19,18 @@ use godot::classes::input::MouseMode;
 use godot::classes::node::ProcessMode;
 use godot::classes::{
     Button, Control, FileAccess, IControl, Input, InputEvent, InputEventMouseButton,
-    InputEventMouseMotion, Node3D, Os, ProjectSettings, RenderingServer, StyleBox, StyleBoxFlat,
-    ThemeDb,
+    InputEventMouseMotion, Label, Node3D, Os, ProgressBar, ProjectSettings, RenderingServer,
+    StyleBox, StyleBoxFlat, ThemeDb,
 };
 use godot::global::{HorizontalAlignment, MouseButton};
 use godot::prelude::*;
 use tilebake::dem::MapGrid;
 
 use super::world_map_detail::{Loader, RETRY_AFTER};
+use crate::bake_job::{BakeJob, KIND_CANCELLED};
 use crate::home_store::{load as load_home, save as save_home};
 use crate::style;
-use crate::ui_text::{language, text, Lang};
+use crate::ui_text::{bake_stage_key, language, text, Lang};
 use worldmap::asset::{decode, WorldData};
 use worldmap::cities::{label_width_px, place, reserve, Placed};
 use worldmap::cull::{bbox_of, boxes_overlap, chunk_ranges};
@@ -58,6 +59,15 @@ const MIN_POINT_PX: f64 = 0.5;
 const MIN_FILL_PX: f64 = 3.0;
 /// Zoom (doublings above the whole world) when a saved home is shown.
 const HOME_ZOOM_STEPS: f64 = 4.0;
+/// Radius of the first bake of a place with no map, in meters (item 78). Item 81 completes the map
+/// to 10 km in the background.
+const FIRST_BAKE_RADIUS_M: f64 = 2000.0;
+/// Environment variable that replaces the first bake's radius, in meters (headless checks).
+const BAKE_RADIUS_ENV: &str = "DTE_BAKE_RADIUS_M";
+/// Progress box of a bake: width, height, and its distance from the bottom edge (pixels).
+const BAKE_BOX_W: f32 = 440.0;
+const BAKE_BOX_H: f32 = 96.0;
+const BAKE_BOX_BOTTOM: f32 = 150.0;
 const FONT_PX: f64 = 13.0;
 /// Tiles kept in memory before the ones off the view are dropped (read again from the disk cache).
 const MAX_DETAIL_TILES: usize = 400;
@@ -218,17 +228,28 @@ pub struct WorldMapView {
     /// Tiles drawn for the current view.
     shown: Vec<TileId>,
     bench: Option<Bench>,
-    /// The car and the node whose frame is the map's (the earth world), set by `start` in the game.
+    /// The car (none before the first map is placed) and the node whose frame is the map's (the
+    /// earth world), set by `start`. The origin is always set: it answers the car moves.
     car: Option<Gd<Node3D>>,
     origin: Option<Gd<Node3D>>,
     /// Grid of the map in use, shared with the earth world (it changes when the map is switched).
     grid: Option<Rc<Cell<Option<MapGrid>>>>,
+    /// Cache root the bakes write to (the same one the earth world reads).
+    bake_cache: GString,
     /// The map is open (M). Only then is it shown, processed and the game paused.
     open: bool,
     /// Mouse mode before the map opened, restored when it closes.
     mouse_before: Option<MouseMode>,
     /// Center on the car at the next frame with a view (set on open).
     focus_pending: bool,
+    /// Bake of a place with no map (item 78): the node, the progress box with its label, bar and
+    /// Cancel button, and the place being baked (None when no bake runs).
+    bake: Option<Gd<BakeJob>>,
+    bake_box: Option<Gd<Control>>,
+    bake_label: Option<Gd<Label>>,
+    bake_bar: Option<Gd<ProgressBar>>,
+    bake_cancel: Option<Gd<Button>>,
+    bake_target: Option<Home>,
 }
 
 #[godot_api]
@@ -260,9 +281,16 @@ impl IControl for WorldMapView {
             car: None,
             origin: None,
             grid: None,
+            bake_cache: GString::new(),
             open: false,
             mouse_before: None,
             focus_pending: false,
+            bake: None,
+            bake_box: None,
+            bake_label: None,
+            bake_bar: None,
+            bake_cancel: None,
+            bake_target: None,
         }
     }
 
@@ -322,41 +350,12 @@ impl IControl for WorldMapView {
         button.set_custom_minimum_size(Vector2::new(160.0, 40.0));
         button.set_size(Vector2::new(160.0, 40.0));
         button.set_z_index(3);
-        // The map lives under a CanvasLayer, so the root window theme does not reach this button.
-        let ink = rgb(ui.ink);
-        let accent = rgb(ui.accent);
-        let border = rgb(ui.border);
-        for (state, bg, line) in [
-            ("normal", rgb(ui.panel), border),
-            ("hover", with_alpha(accent, 0.16), accent),
-            ("pressed", with_alpha(accent, 0.28), accent),
-            ("focus", with_alpha(rgb(ui.panel), 0.0), accent),
-            (
-                "disabled",
-                with_alpha(rgb(ui.panel), 0.55),
-                with_alpha(border, 0.45),
-            ),
-        ] {
-            let border_width = if state == "focus" {
-                ui.border_width.max(2)
-            } else {
-                ui.border_width
-            };
-            button.add_theme_stylebox_override(state, &ui_box(&ui, bg, line, border_width, 4.0));
-        }
-        for state in [
-            "font_color",
-            "font_hover_color",
-            "font_focus_color",
-            "font_pressed_color",
-        ] {
-            button.add_theme_color_override(state, ink);
-        }
-        button.add_theme_color_override("font_disabled_color", with_alpha(ink, 0.55));
+        style_button(&mut button, &ui);
         self.base_mut().add_child(&button);
         let handler = self.to_gd().callable("on_confirm");
         button.connect("pressed", &handler);
         self.confirm = Some(button);
+        self.build_bake_box(&ui);
     }
 
     fn exit_tree(&mut self) {
@@ -397,6 +396,10 @@ impl IControl for WorldMapView {
         }
         if let Some(button) = self.confirm.as_mut() {
             button.set_position(Vector2::new(size.x - 176.0, size.y - 56.0));
+        }
+        if let Some(boxed) = self.bake_box.as_mut() {
+            let x = (size.x - BAKE_BOX_W) / 2.0;
+            boxed.set_position(Vector2::new(x, size.y - BAKE_BOX_BOTTOM));
         }
         self.redraw();
     }
@@ -477,17 +480,20 @@ impl IControl for WorldMapView {
 }
 
 impl WorldMapView {
-    /// Hands the map the car, the node whose frame is the map's, and the grid from that frame to
-    /// lat/lon. Call before the node enters the tree (the game's M map).
+    /// Hands the map the car (none while the game has no map yet), the node whose frame is the
+    /// map's, the grid from that frame to lat/lon, and the cache root the bakes write to. Called
+    /// again when the earth world opens a map, so the same view serves the whole session.
     pub(crate) fn start(
         &mut self,
-        car: Gd<Node3D>,
+        car: Option<Gd<Node3D>>,
         origin: Gd<Node3D>,
         grid: Rc<Cell<Option<MapGrid>>>,
+        cache_root: GString,
     ) {
-        self.car = Some(car);
+        self.car = car;
         self.origin = Some(origin);
         self.grid = Some(grid);
+        self.bake_cache = cache_root;
     }
 
     /// Opens or closes the map. Opening pauses the game, frees the mouse and centers on the car.
@@ -691,10 +697,70 @@ impl WorldMapView {
         self.confirm_place(home.lat, home.lon);
     }
 
-    /// Confirms (`lat`, `lon`) as the chosen place: saves it as the home, puts the car on the road
-    /// there (switching to another baked map when the place is outside the loaded one), and closes
-    /// the map when the car moved. The same path as clicking a place and pressing Confirm; a method
-    /// of its own so a headless check can confirm a place without a mouse.
+    /// Progress of the bake: its stage, the count, and the bar.
+    #[func]
+    fn on_bake_progress(&mut self, stage: GString, done: i64, total: i64) {
+        let line = format!(
+            "{} {done}/{total}",
+            self.t(bake_stage_key(&stage.to_string()))
+        );
+        if let Some(label) = self.bake_label.as_mut() {
+            label.set_text(&line);
+        }
+        if let Some(bar) = self.bake_bar.as_mut() {
+            bar.set_max(total.max(1) as f64);
+            bar.set_value(done.max(0) as f64);
+        }
+    }
+
+    /// The bake is complete: the car goes to the place on the new map (the view switches to it or
+    /// opens it), and the map closes when the car is there.
+    #[func]
+    fn on_bake_finished(&mut self, _map_id: GString) {
+        let Some(home) = self.bake_target.take() else {
+            return;
+        };
+        self.set_bake_ui(false);
+        match self.travel(home) {
+            Some(true) => {
+                self.status = self.fmt("home.saved", home);
+                self.set_open(false);
+            }
+            _ => self.status = self.t("home.bake_no_road"),
+        }
+        self.redraw();
+    }
+
+    /// The bake stopped: a cancel goes back to the selector with a short line, a failure with
+    /// its message (the item 80 refines the failures). The selector stays open either way.
+    #[func]
+    fn on_bake_failed(&mut self, kind: GString, _message: GString) {
+        self.bake_target = None;
+        self.set_bake_ui(false);
+        let key = if kind.to_string() == KIND_CANCELLED {
+            "home.bake_cancelled"
+        } else {
+            "home.bake_failed"
+        };
+        self.status = self.t(key);
+        self.redraw();
+    }
+
+    /// The Cancel button: asks the running bake to stop.
+    #[func]
+    fn on_bake_cancel(&mut self) {
+        if let Some(bake) = self.bake.clone() {
+            let mut node = bake.upcast::<Object>();
+            node.call("cancel", &[]);
+        }
+    }
+
+    /// Confirms (`lat`, `lon`) as the chosen place: saves it as the home, then enters the map of
+    /// that place. A place that already has a baked map (the loaded one or another) puts the car on
+    /// its road at once and the map closes. A place with no baked map starts its first bake (item
+    /// 78): the map stays open with the progress, and closes when the car is on the new map. The
+    /// same path as clicking a place and pressing Confirm; a method of its own so a headless check
+    /// can confirm a place without a mouse.
     #[func]
     fn confirm_place(&mut self, lat: f64, lon: f64) {
         let Ok(home) = Home::new(lat, lon) else {
@@ -702,6 +768,11 @@ impl WorldMapView {
             self.redraw();
             return;
         };
+        if self.bake_target.is_some() {
+            self.status = self.t("home.bake_busy");
+            self.redraw();
+            return;
+        }
         self.home = Some(home);
         if save_home(home).is_err() {
             self.status = self.t("home.save_error");
@@ -710,27 +781,26 @@ impl WorldMapView {
         }
         crate::environment::sky::set_home(home.lat, home.lon);
         let saved = self.fmt("home.saved", home);
-        match self.move_car(home) {
-            // No car (the map alone): only the save.
-            None => self.status = saved,
-            // The car is on the road of the chosen place: the map closes.
+        match self.travel(home) {
+            // The car is on the road of the chosen place (or on the map that opens): the map closes.
             Some(true) => {
                 self.status = saved;
                 self.set_open(false);
             }
-            // The place has no baked map yet: the car stays where it is.
-            Some(false) => self.status = format!("{saved} {}", self.t("home.outside_map")),
+            // No baked map holds a road there: bake the place.
+            Some(false) => self.start_bake(home),
+            // No earth world to ask (should not happen in the game): only the save.
+            None => self.status = saved,
         }
         self.redraw();
     }
 
-    /// Moves the car to the chosen place (F17c, item 106: or switches to another baked map that
-    /// holds it). `None` when there is no car; `Some(false)` when no baked map holds a road there,
-    /// so the car did not move.
-    fn move_car(&self, home: Home) -> Option<bool> {
-        let (Some(_), Some(origin)) = (self.car.as_ref(), self.origin.as_ref()) else {
-            return None;
-        };
+    /// Asks the earth world to put the car at the place: on its road in the loaded map, in another
+    /// baked map that holds it (item 106), or in the map it opens when the game had none (item 78).
+    /// `Some(false)` when no baked map holds a road there, so the place needs a bake; `None` when
+    /// there is no earth world to ask.
+    fn travel(&self, home: Home) -> Option<bool> {
+        let origin = self.origin.as_ref()?;
         let args = [home.lat.to_variant(), home.lon.to_variant()];
         let moved = origin
             .clone()
@@ -738,6 +808,94 @@ impl WorldMapView {
             .try_to::<bool>()
             .unwrap_or(false);
         Some(moved)
+    }
+
+    /// Starts the first bake of `home` in the background and shows its progress box with Cancel.
+    /// Confirm is hidden while the bake runs.
+    fn start_bake(&mut self, home: Home) {
+        let Some(bake) = self.bake.clone() else {
+            self.status = self.t("home.bake_failed");
+            return;
+        };
+        let mut node = bake.upcast::<Object>();
+        node.set(
+            &StringName::from("cache_root"),
+            &self.bake_cache.to_variant(),
+        );
+        let args = [
+            home.lat.to_variant(),
+            home.lon.to_variant(),
+            bake_radius_m().to_variant(),
+        ];
+        let started = node.call("start", &args).try_to::<bool>().unwrap_or(false);
+        if !started {
+            self.status = self.t("home.bake_busy");
+            return;
+        }
+        self.bake_target = Some(home);
+        self.set_bake_ui(true);
+        self.status = self.t("home.baking");
+    }
+
+    /// Shows the progress box while a bake runs, or hides it and brings Confirm back.
+    fn set_bake_ui(&mut self, baking: bool) {
+        if let Some(boxed) = self.bake_box.as_mut() {
+            boxed.set_visible(baking);
+        }
+        if let Some(confirm) = self.confirm.as_mut() {
+            confirm.set_visible(!baking);
+        }
+    }
+
+    /// Builds the progress box of a bake (hidden until one runs) and the bake node, whose signals
+    /// come to this view's handlers.
+    fn build_bake_box(&mut self, ui: &style::UiLook) {
+        let ink = rgb(ui.ink);
+        let bake = BakeJob::new_alloc();
+        let mut node = bake.clone().upcast::<Object>();
+        for (signal, method) in [
+            ("progress", "on_bake_progress"),
+            ("finished", "on_bake_finished"),
+            ("failed", "on_bake_failed"),
+        ] {
+            let handler = self.to_gd().callable(method);
+            node.connect(signal, &handler);
+        }
+        self.base_mut().add_child(&bake);
+
+        let mut boxed = Control::new_alloc();
+        boxed.set_size(Vector2::new(BAKE_BOX_W, BAKE_BOX_H));
+        boxed.set_mouse_filter(MouseFilter::IGNORE);
+        boxed.set_z_index(3);
+        let mut label = Label::new_alloc();
+        label.set_position(Vector2::new(0.0, 0.0));
+        label.set_size(Vector2::new(BAKE_BOX_W, 24.0));
+        label.set_mouse_filter(MouseFilter::IGNORE);
+        label.add_theme_color_override("font_color", ink);
+        let mut bar = ProgressBar::new_alloc();
+        bar.set_position(Vector2::new(0.0, 32.0));
+        bar.set_size(Vector2::new(BAKE_BOX_W, 18.0));
+        bar.set_max(1.0);
+        bar.set_mouse_filter(MouseFilter::IGNORE);
+        let mut cancel = Button::new_alloc();
+        cancel.set_text(&self.t("bake.cancel"));
+        cancel.set_position(Vector2::new(BAKE_BOX_W - 160.0, BAKE_BOX_H - 40.0));
+        cancel.set_custom_minimum_size(Vector2::new(160.0, 40.0));
+        cancel.set_size(Vector2::new(160.0, 40.0));
+        style_button(&mut cancel, ui);
+        let handler = self.to_gd().callable("on_bake_cancel");
+        cancel.connect("pressed", &handler);
+        boxed.add_child(&label);
+        boxed.add_child(&bar);
+        boxed.add_child(&cancel);
+        boxed.set_visible(false);
+        self.base_mut().add_child(&boxed);
+
+        self.bake = Some(bake);
+        self.bake_box = Some(boxed);
+        self.bake_label = Some(label);
+        self.bake_bar = Some(bar);
+        self.bake_cancel = Some(cancel);
     }
 
     /// Draws the overlay above the roads: names, cities, the home marker and the texts.
@@ -921,6 +1079,55 @@ fn with_alpha(c: Color, alpha: f32) -> Color {
 }
 
 /// Rounded box with the theme border and corner radius; `padding` is layout, not a theme field.
+/// Gives a button the look of the map's controls: panel, accent on hover and focus, ink text. The
+/// map lives under a CanvasLayer, so the root window theme does not reach its buttons.
+fn style_button(button: &mut Gd<Button>, ui: &style::UiLook) {
+    let ink = rgb(ui.ink);
+    let accent = rgb(ui.accent);
+    let border = rgb(ui.border);
+    for (state, bg, line) in [
+        ("normal", rgb(ui.panel), border),
+        ("hover", with_alpha(accent, 0.16), accent),
+        ("pressed", with_alpha(accent, 0.28), accent),
+        ("focus", with_alpha(rgb(ui.panel), 0.0), accent),
+        (
+            "disabled",
+            with_alpha(rgb(ui.panel), 0.55),
+            with_alpha(border, 0.45),
+        ),
+    ] {
+        let border_width = if state == "focus" {
+            ui.border_width.max(2)
+        } else {
+            ui.border_width
+        };
+        button.add_theme_stylebox_override(state, &ui_box(ui, bg, line, border_width, 4.0));
+    }
+    for state in [
+        "font_color",
+        "font_hover_color",
+        "font_focus_color",
+        "font_pressed_color",
+    ] {
+        button.add_theme_color_override(state, ink);
+    }
+    button.add_theme_color_override("font_disabled_color", with_alpha(ink, 0.55));
+}
+
+/// Radius of the first bake in meters: `FIRST_BAKE_RADIUS_M`, or `DTE_BAKE_RADIUS_M` when set.
+fn bake_radius_m() -> f64 {
+    bake_radius_from(std::env::var(BAKE_RADIUS_ENV).ok().as_deref())
+}
+
+/// The radius in meters from a text value; a missing, non-numeric or non-positive one gives the
+/// default.
+fn bake_radius_from(value: Option<&str>) -> f64 {
+    value
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .unwrap_or(FIRST_BAKE_RADIUS_M)
+}
+
 fn ui_box(
     ui: &style::UiLook,
     bg: Color,
@@ -1351,6 +1558,7 @@ fn draw_names(
 
 #[cfg(test)]
 mod tests {
+    use super::{bake_radius_from, FIRST_BAKE_RADIUS_M};
     use crate::style::{builtin, Rgb, Style};
 
     /// WCAG relative luminance of one sRGB channel.
@@ -1370,6 +1578,19 @@ mod tests {
         let (la, lb) = (luminance(a), luminance(b));
         let (high, low) = (la.max(lb), la.min(lb));
         (high + 0.05) / (low + 0.05)
+    }
+
+    #[test]
+    fn first_bake_radius_is_the_default_unless_a_positive_number_is_given() {
+        assert_eq!(bake_radius_from(None), FIRST_BAKE_RADIUS_M);
+        assert_eq!(bake_radius_from(Some("")), FIRST_BAKE_RADIUS_M);
+        assert_eq!(bake_radius_from(Some("many")), FIRST_BAKE_RADIUS_M);
+        assert_eq!(bake_radius_from(Some("0")), FIRST_BAKE_RADIUS_M);
+        assert_eq!(bake_radius_from(Some("-400")), FIRST_BAKE_RADIUS_M);
+        assert_eq!(bake_radius_from(Some("nan")), FIRST_BAKE_RADIUS_M);
+        assert_eq!(bake_radius_from(Some(" 400 ")), 400.0);
+        assert_eq!(bake_radius_from(Some("2000.5")), 2000.5);
+        assert_eq!(FIRST_BAKE_RADIUS_M, 2000.0);
     }
 
     #[test]

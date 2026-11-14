@@ -28,6 +28,20 @@ pub fn text(key: &str, lang: Lang) -> &str {
     }
 }
 
+/// Text key of a bake stage (the stage keys `tilebake` reports). A stage the table does not know
+/// gets the generic line, so a new stage shows something instead of its raw key.
+pub fn bake_stage_key(stage: &str) -> &'static str {
+    match stage {
+        tilebake::STAGE_OSM => "bake.stage.osm",
+        tilebake::STAGE_OSM_AREAS => "bake.stage.osm_areas",
+        tilebake::STAGE_DEM => "bake.stage.dem",
+        tilebake::STAGE_TILES => "bake.stage.tiles",
+        tilebake::STAGE_ROADS => "bake.stage.roads",
+        tilebake::STAGE_FAR_LIGHTS => "bake.stage.far_lights",
+        _ => "bake.stage.other",
+    }
+}
+
 /// Every key with its English and pt-BR text.
 const TABLE: &[(&str, &str, &str)] = &[
     (
@@ -109,10 +123,54 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Não foi possível salvar sua casa",
     ),
     (
-        "home.outside_map",
-        "This place has no map yet, so the car did not move.",
-        "Este lugar ainda não tem mapa, então o carro não saiu do lugar.",
+        "home.baking",
+        "This place has no map yet: preparing it. The first visit takes a while.",
+        "Este lugar ainda não tem mapa: preparando. A primeira visita leva um tempo.",
     ),
+    (
+        "home.bake_busy",
+        "This place is already being prepared.",
+        "Este lugar já está sendo preparado.",
+    ),
+    (
+        "home.bake_cancelled",
+        "Download cancelled: choose another place (M).",
+        "Download cancelado: escolha outro lugar (M).",
+    ),
+    (
+        "home.bake_failed",
+        "Could not prepare this place: choose another one (M).",
+        "Não foi possível preparar este lugar: escolha outro (M).",
+    ),
+    (
+        "home.bake_no_road",
+        "No road found for the car at this place.",
+        "Não encontrei uma via para o carro neste lugar.",
+    ),
+    ("bake.cancel", "Cancel", "Cancelar"),
+    (
+        "bake.stage.osm",
+        "Downloading streets and buildings",
+        "Baixando ruas e prédios",
+    ),
+    (
+        "bake.stage.osm_areas",
+        "Downloading parks and water",
+        "Baixando parques e água",
+    ),
+    ("bake.stage.dem", "Downloading the terrain", "Baixando o relevo"),
+    (
+        "bake.stage.tiles",
+        "Building the blocks",
+        "Montando os quarteirões",
+    ),
+    ("bake.stage.roads", "Building the roads", "Montando as vias"),
+    (
+        "bake.stage.far_lights",
+        "Building the distant lights",
+        "Montando as luzes distantes",
+    ),
+    ("bake.stage.other", "Preparing", "Preparando"),
     (
         "home.none_start",
         "No home saved yet: choose one on the map (M).",
@@ -213,6 +271,25 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), TABLE.len(), "duplicate key");
+    }
+
+    #[test]
+    fn every_bake_stage_has_a_translated_line() {
+        let stages = [
+            tilebake::STAGE_OSM,
+            tilebake::STAGE_OSM_AREAS,
+            tilebake::STAGE_DEM,
+            tilebake::STAGE_TILES,
+            tilebake::STAGE_ROADS,
+            tilebake::STAGE_FAR_LIGHTS,
+            "some_future_stage",
+        ];
+        for stage in stages {
+            let key = bake_stage_key(stage);
+            assert!(TABLE.iter().any(|(k, _, _)| *k == key), "{stage} -> {key}");
+            assert_ne!(text(key, Lang::PtBr), key, "{stage} has no pt-BR text");
+        }
+        assert_eq!(bake_stage_key("unknown"), "bake.stage.other");
     }
 
     #[test]
