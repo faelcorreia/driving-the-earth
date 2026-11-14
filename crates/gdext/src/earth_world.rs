@@ -264,6 +264,9 @@ pub struct EarthWorld {
     /// Grid of the map in use. Shared with the world map view, which reads it to place the car on
     /// its picture; a switch of map sets it again.
     map_grid: Rc<Cell<Option<MapGrid>>>,
+    /// The world map view (the selector), once added: the same node serves the whole session, so
+    /// a map opened after a bake reuses it.
+    map_view: Option<Gd<WorldMapView>>,
 
     /// Worst `process` call and worst tile instantiation since the last log line, seconds.
     worst_frame: f64,
@@ -292,8 +295,9 @@ impl EarthWorld {
 
     /// Puts the car at (`lat`, `lon`) (item 106). Inside the loaded map it is the same move as
     /// `move_car_to_latlon`. Outside it, the first other complete map of the cache that holds the
-    /// point and has a road there replaces the loaded map, and the car goes to that road. False when
-    /// no baked map holds a road at the point: the car stays where it was.
+    /// point and has a road there replaces the loaded map, and the car goes to that road. When the
+    /// game has no car yet (no map at the start), that map is opened from the start instead (item
+    /// 78). False when no baked map holds a road at the point: nothing changes then.
     #[func]
     fn travel_to_latlon(&mut self, lat: f64, lon: f64) -> bool {
         let (inside, road, result) = self.move_car_checked(lat, lon);
@@ -303,14 +307,24 @@ impl EarthWorld {
             );
             return result == "moved";
         }
-        let (Some(cache), Some(_)) = (self.active_cache.clone(), self.car.clone()) else {
-            godot_print!("confirm move: lat {lat:.6} lon {lon:.6} no map or car to switch from");
-            return false;
+        let cache = match self.active_cache.clone() {
+            Some(cache) => cache,
+            None => self.cache_path(),
         };
         let Some((id, index, pose)) = self.find_other_map(&cache, lat, lon) else {
             godot_print!("confirm move: lat {lat:.6} lon {lon:.6} inside_loaded_map false, no other baked map holds a road there");
             return false;
         };
+        if self.car.is_none() {
+            // Without a car the stages of the opening must be over: a reopen during them waits.
+            if self.stage != LoadingStage::Ready {
+                godot_print!("confirm move: lat {lat:.6} lon {lon:.6} the map is still opening");
+                return false;
+            }
+            godot_print!("confirm move: lat {lat:.6} lon {lon:.6} opening the baked map '{id}'");
+            self.begin_opening(&id);
+            return true;
+        }
         godot_print!("confirm move: lat {lat:.6} lon {lon:.6} switching the loaded map to '{id}'");
         self.switch_map(cache, id, index, pose)
     }
@@ -750,7 +764,10 @@ impl EarthWorld {
         if self.lamp_mats.is_none() {
             godot_warn!("lamp shaders not loaded: street lamps are not drawn");
         }
-        self.lamp_lights = Some(LampLights::new());
+        // Kept when the map is opened again after a bake (their nodes are not in the tree yet).
+        if self.lamp_lights.is_none() {
+            self.lamp_lights = Some(LampLights::new());
+        }
 
         // Spawn on the road nearest to the saved home when it is inside the loaded map. Without a
         // saved home, or with one outside the map, spawn on the road nearest to the map center
@@ -1362,24 +1379,50 @@ impl EarthWorld {
         self.built_cell.insert(t, geometry.mesh_cell_m);
     }
 
-    /// Adds the world map (M) on its own canvas layer. It starts hidden; the car and the map's
-    /// frame give it the car's place in lat/lon, when there is a loaded map. `open_with` opens it
-    /// at once with that message (the player has no home yet, or it is outside the map).
+    /// Adds the world map (M) on its own canvas layer, or hands the view that is there the car and
+    /// the grid of the map now in use. It starts hidden. `open_with` opens it at once with that
+    /// message (the player has no home yet, or it is outside the map).
     fn add_map_view(&mut self, open_with: Option<&str>) {
-        let has_index = self.index.is_some();
         let car = self.car.clone();
         let origin = self.to_gd().upcast::<Node3D>();
+        let grid = self.map_grid.clone();
+        let cache = self.cache_root.clone();
+        if let Some(mut map) = self.map_view.clone() {
+            map.bind_mut().start(car, origin, grid, cache);
+            if let Some(key) = open_with {
+                map.bind_mut().open_automatically(key);
+            }
+            return;
+        }
         let mut layer = CanvasLayer::new_alloc();
         layer.set_layer(MAP_CANVAS_LAYER);
         let mut map = WorldMapView::new_alloc();
-        if let (Some(car), true) = (car, has_index) {
-            map.bind_mut().start(car, origin, self.map_grid.clone());
-        }
+        map.bind_mut().start(car, origin, grid, cache);
         layer.add_child(&map);
         self.base_mut().add_child(&layer);
         if let Some(key) = open_with {
             map.bind_mut().open_automatically(key);
         }
+        self.map_view = Some(map);
+    }
+
+    /// Runs the opening stages again for the baked map `id`, from the start as at launch: the game
+    /// had no map, so there is no car and no stream yet. The loading card shows the stages.
+    fn begin_opening(&mut self, id: &str) {
+        self.map_id = GString::from(id);
+        self.first_frame_pending = false;
+        self.stage = LoadingStage::OpeningMap;
+        self.stage_started = Some(Instant::now());
+        self.show_loading();
+    }
+
+    /// The cache root in use, as a path on the file system.
+    fn cache_path(&self) -> PathBuf {
+        PathBuf::from(
+            ProjectSettings::singleton()
+                .globalize_path(&self.cache_root)
+                .to_string(),
+        )
     }
 
     /// Adds the `Environment` clock node. It drives the scene's WorldEnvironment and replaces
