@@ -30,7 +30,7 @@ use super::world_map_detail::{Loader, RETRY_AFTER};
 use crate::bake_job::{BakeJob, KIND_CANCELLED};
 use crate::home_store::{load as load_home, save as save_home};
 use crate::style;
-use crate::ui_text::{bake_stage_key, language, text, Lang};
+use crate::ui_text::{bake_failure_key, bake_stage_key, language, text, Lang};
 use worldmap::asset::{decode, WorldData};
 use worldmap::cities::{label_width_px, place, reserve, Placed};
 use worldmap::cull::{bbox_of, boxes_overlap, chunk_ranges};
@@ -65,6 +65,15 @@ const FIRST_BAKE_RADIUS_M: f64 = 2000.0;
 /// Environment variable that replaces the first bake's radius, in meters (headless checks).
 const BAKE_RADIUS_ENV: &str = "DTE_BAKE_RADIUS_M";
 /// Progress box of a bake: width, height, and its distance from the bottom edge (pixels).
+/// What the bake box shows: nothing (no bake), the progress with Cancel, or the buttons of a
+/// failed bake.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BakeView {
+    Idle,
+    Baking,
+    Failed,
+}
+
 const BAKE_BOX_W: f32 = 440.0;
 const BAKE_BOX_H: f32 = 96.0;
 const BAKE_BOX_BOTTOM: f32 = 150.0;
@@ -249,7 +258,12 @@ pub struct WorldMapView {
     bake_label: Option<Gd<Label>>,
     bake_bar: Option<Gd<ProgressBar>>,
     bake_cancel: Option<Gd<Button>>,
+    /// Buttons of a failed bake: try again (resumes from what is on disk) and back to the selector.
+    bake_retry: Option<Gd<Button>>,
+    bake_back: Option<Gd<Button>>,
     bake_target: Option<Home>,
+    /// Place of the last bake that failed (not cancelled): the retry bakes it again.
+    bake_failed: Option<Home>,
 }
 
 #[godot_api]
@@ -291,6 +305,9 @@ impl IControl for WorldMapView {
             bake_bar: None,
             bake_cancel: None,
             bake_target: None,
+            bake_retry: None,
+            bake_back: None,
+            bake_failed: None,
         }
     }
 
@@ -720,7 +737,7 @@ impl WorldMapView {
         let Some(home) = self.bake_target.take() else {
             return;
         };
-        self.set_bake_ui(false);
+        self.set_bake_ui(BakeView::Idle);
         match self.travel(home) {
             Some(true) => {
                 self.status = self.fmt("home.saved", home);
@@ -731,19 +748,57 @@ impl WorldMapView {
         self.redraw();
     }
 
-    /// The bake stopped: a cancel goes back to the selector with a short line, a failure with
-    /// its message (the item 80 refines the failures). The selector stays open either way.
+    /// The bake stopped. A cancel goes back to the selector with a short line. A failure shows
+    /// its cause in the status line (`bake_failure_key`) and two buttons: Try again bakes the same
+    /// place again (what is on disk is kept, so it resumes), Back returns to the selector. The
+    /// selector stays open in every case, so the screen is never empty.
     #[func]
-    fn on_bake_failed(&mut self, kind: GString, _message: GString) {
-        self.bake_target = None;
-        self.set_bake_ui(false);
-        let key = if kind.to_string() == KIND_CANCELLED {
-            "home.bake_cancelled"
+    fn on_bake_failed(&mut self, kind: GString, message: GString) {
+        let kind = kind.to_string();
+        let target = self.bake_target.take();
+        if kind == KIND_CANCELLED || target.is_none() {
+            self.bake_failed = None;
+            self.set_bake_ui(BakeView::Idle);
+            let key = if kind == KIND_CANCELLED {
+                "home.bake_cancelled"
+            } else {
+                "home.bake_failed"
+            };
+            self.status = self.t(key);
         } else {
-            "home.bake_failed"
-        };
-        self.status = self.t(key);
+            self.bake_failed = target;
+            self.set_bake_ui(BakeView::Failed);
+            self.status = self.t(bake_failure_key(&kind, &message.to_string()));
+        }
         self.redraw();
+    }
+
+    /// Try again: bakes the place of the failed bake again.
+    #[func]
+    fn on_bake_retry(&mut self) {
+        let Some(home) = self.bake_failed else {
+            return;
+        };
+        self.start_bake(home);
+        if self.bake_target.is_some() {
+            self.bake_failed = None;
+        }
+        self.redraw();
+    }
+
+    /// Back: leaves the failure and shows the selector again, ready for another place.
+    #[func]
+    fn on_bake_back(&mut self) {
+        self.bake_failed = None;
+        self.set_bake_ui(BakeView::Idle);
+        self.status = self.t("home.pick_first");
+        self.redraw();
+    }
+
+    /// The status line as shown (checks read it to see the message of a failure).
+    #[func]
+    fn status_text(&self) -> GString {
+        GString::from(self.status.as_str())
     }
 
     /// The Cancel button: asks the running bake to stop.
@@ -833,17 +888,35 @@ impl WorldMapView {
             return;
         }
         self.bake_target = Some(home);
-        self.set_bake_ui(true);
+        self.set_bake_ui(BakeView::Baking);
         self.status = self.t("home.baking");
     }
 
-    /// Shows the progress box while a bake runs, or hides it and brings Confirm back.
-    fn set_bake_ui(&mut self, baking: bool) {
+    /// Shows the box for the state of the bake: progress and Cancel while it runs, the try again
+    /// and back buttons after a failure, nothing when idle (Confirm is back then).
+    fn set_bake_ui(&mut self, view: BakeView) {
+        let baking = view == BakeView::Baking;
+        let failed = view == BakeView::Failed;
         if let Some(boxed) = self.bake_box.as_mut() {
-            boxed.set_visible(baking);
+            boxed.set_visible(view != BakeView::Idle);
+        }
+        if let Some(label) = self.bake_label.as_mut() {
+            label.set_visible(baking);
+        }
+        if let Some(bar) = self.bake_bar.as_mut() {
+            bar.set_visible(baking);
+        }
+        if let Some(cancel) = self.bake_cancel.as_mut() {
+            cancel.set_visible(baking);
+        }
+        if let Some(retry) = self.bake_retry.as_mut() {
+            retry.set_visible(failed);
+        }
+        if let Some(back) = self.bake_back.as_mut() {
+            back.set_visible(failed);
         }
         if let Some(confirm) = self.confirm.as_mut() {
-            confirm.set_visible(!baking);
+            confirm.set_visible(view == BakeView::Idle);
         }
     }
 
@@ -885,9 +958,30 @@ impl WorldMapView {
         style_button(&mut cancel, ui);
         let handler = self.to_gd().callable("on_bake_cancel");
         cancel.connect("pressed", &handler);
+        // Buttons of a failed bake, in the same place as Cancel (Back to its left).
+        let mut retry = Button::new_alloc();
+        retry.set_text(&self.t("bake.retry"));
+        retry.set_custom_minimum_size(Vector2::new(160.0, 40.0));
+        retry.set_size(Vector2::new(160.0, 40.0));
+        retry.set_position(Vector2::new(BAKE_BOX_W - 160.0, BAKE_BOX_H - 40.0));
+        style_button(&mut retry, ui);
+        let handler = self.to_gd().callable("on_bake_retry");
+        retry.connect("pressed", &handler);
+        let mut back = Button::new_alloc();
+        back.set_text(&self.t("bake.back"));
+        back.set_custom_minimum_size(Vector2::new(160.0, 40.0));
+        back.set_size(Vector2::new(160.0, 40.0));
+        back.set_position(Vector2::new(BAKE_BOX_W - 330.0, BAKE_BOX_H - 40.0));
+        style_button(&mut back, ui);
+        let handler = self.to_gd().callable("on_bake_back");
+        back.connect("pressed", &handler);
+        retry.set_visible(false);
+        back.set_visible(false);
         boxed.add_child(&label);
         boxed.add_child(&bar);
         boxed.add_child(&cancel);
+        boxed.add_child(&retry);
+        boxed.add_child(&back);
         boxed.set_visible(false);
         self.base_mut().add_child(&boxed);
 
@@ -896,6 +990,8 @@ impl WorldMapView {
         self.bake_label = Some(label);
         self.bake_bar = Some(bar);
         self.bake_cancel = Some(cancel);
+        self.bake_retry = Some(retry);
+        self.bake_back = Some(back);
     }
 
     /// Draws the overlay above the roads: names, cities, the home marker and the texts.
