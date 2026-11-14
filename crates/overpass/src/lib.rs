@@ -6,8 +6,14 @@ use std::time::Duration;
 
 /// Overpass interpreter endpoint.
 pub const OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
-/// User-Agent sent with every Overpass request.
-pub const USER_AGENT: &str = "driving-the-earth/0.1 (overpass; projeto pessoal)";
+/// User-Agent of every network request of the project (Overpass, Nominatim, Copernicus): game
+/// name, workspace version and repository URL. `tilebake` uses this same value, since it depends
+/// on this crate.
+pub const USER_AGENT: &str = concat!(
+    "driving-the-earth/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/faelcorreia/driving-the-earth)"
+);
 /// Minimum gap between the start of two Overpass requests (callers pace with it).
 pub const MIN_GAP: Duration = Duration::from_secs(1);
 /// Attempts per request (the first try included) on 429, 502, 503 or 504.
@@ -31,7 +37,7 @@ pub trait OverpassClient {
     fn post(&self, query: &str) -> Result<String, HttpError>;
 }
 
-/// Overpass over HTTP, with the same User-Agent as the other downloads.
+/// Overpass over HTTP, with the project User-Agent.
 pub struct UreqOverpass;
 
 impl OverpassClient for UreqOverpass {
@@ -94,5 +100,22 @@ impl Downloader<'_> {
             }
         }
         Err(other_err("Overpass: max_attempts is zero"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::USER_AGENT;
+
+    #[test]
+    fn user_agent_names_the_game_version_and_repository() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            USER_AGENT,
+            format!(
+                "driving-the-earth/{version} (+https://github.com/faelcorreia/driving-the-earth)"
+            )
+        );
+        assert!(!USER_AGENT.contains("projeto pessoal"));
     }
 }

@@ -14,7 +14,8 @@ use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 use tileformat::{HeightGrid, MapMeta};
 
-const USER_AGENT: &str = "driving-the-earth/0.1 (tilebake; projeto pessoal)";
+use overpass::USER_AGENT;
+
 const COPERNICUS_BASE: &str = "https://copernicus-dem-30m.s3.amazonaws.com";
 /// Step of the tile grid, in meters.
 pub const CELL_M: f64 = 10.0;
