@@ -89,9 +89,9 @@ func _ready() -> void:
 	var stats := lowpoly.apply(self, _cabin_profile, CABIN_HALF_WIDTH)
 	_headlamp_mats.append(stats["headlamp_material"] as StandardMaterial3D)
 	if "--car-stats" in OS.get_cmdline_user_args():
-		print("car: %d triangles (body %d, cabin %d, wheels %d, lamps %d); model %s; style '%s', flat shading %s, bevel %.3f m" % [
+		print("car: %d triangles (body %d, cabin %d, wheels %d, lamps %d); style '%s', flat shading %s, bevel %.3f m" % [
 			stats["triangles"], stats["body"], stats["cabin"], stats["wheels"], stats["lamps"],
-			str(stats["model"]), stats["style_id"], str(stats["flat"]), stats["bevel"],
+			stats["style_id"], str(stats["flat"]), stats["bevel"],
 		])
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_set_view(0)

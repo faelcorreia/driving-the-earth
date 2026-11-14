@@ -1,7 +1,5 @@
 extends RefCounted
 ## Procedural low-poly car (backlog 120): body, cabin, bumpers, glass, lamps and wheels.
-## The TR4 model (`MODEL_PATH`) replaces the body and the wheels when it loads; the cabin and the
-## glass are then baked into the body, and the lamps stay procedural.
 ##
 ## No GLB and no texture: every piece is a mesh built once at ready from a side profile extruded
 ## across X. The profile corners are rounded and the side edges are chamfered; `flat_shading`
@@ -49,18 +47,6 @@ const CABIN_BASE_SINK_M := 0.03
 
 ## Shader of the low-poly toon light (backlog 125), shared with the world materials.
 const TOON_SHADER := preload("res://shaders/toon_world.gdshader")
-
-## The TR4 car model (scripts/car_glb_lowpoly.py): body and four wheels, no texture, the baked
-## shading in the vertex colors. Missing or unloadable, the procedural car below is used.
-const MODEL_PATH := "res://assets/car/car_tr4.glb"
-const MODEL_BODY := "Body"
-## Wheel node name in car.tscn -> node name in the model.
-const MODEL_WHEELS := {
-	"FrontLeft": "Wheel_FL",
-	"FrontRight": "Wheel_FR",
-	"RearLeft": "Wheel_RL",
-	"RearRight": "Wheel_RR",
-}
 
 ## Theme values resolved once, so the mesh build reads the Style autoload only here.
 class Look:
@@ -135,45 +121,24 @@ class MeshBuilder:
 
 
 ## Builds every visible mesh on `car` and returns the triangle counts and the headlamp material.
-## With the TR4 model (`MODEL_PATH`) the body and the wheels come from it; the lamps stay procedural.
-## Without it, or if it does not load, the whole car is the procedural one.
 func apply(car: Node3D, cabin_profile: PackedVector2Array, cabin_half_width: float) -> Dictionary:
 	var look := _read_look()
-	var model := _load_model_meshes()
-	var use_model := not model.is_empty()
 
-	var body_mesh: Mesh = model.get(MODEL_BODY)
-	var cabin_mesh: Mesh = null
-	var glass_mesh: Mesh = null
-	var wheel_mesh: Mesh = null
-	var body_tris := 0
-	var cabin_tris := 0
-	var glass_tris := 0
-	var wheels_tris := 0
-	if use_model:
-		body_tris = _mesh_triangles(body_mesh)
-		for wheel_name in MODEL_WHEELS.values():
-			wheels_tris += _mesh_triangles(model[wheel_name])
-	else:
-		var body_builder := MeshBuilder.new(look.flat)
-		_build_body(body_builder, look)
-		body_mesh = body_builder.commit()
-		body_tris = body_builder.tri_count()
+	var body_builder := MeshBuilder.new(look.flat)
+	_build_body(body_builder, look)
+	var body_mesh := body_builder.commit()
 
-		var cabin_builder := MeshBuilder.new(look.flat)
-		_build_cabin(cabin_builder, look, cabin_profile, cabin_half_width)
-		cabin_mesh = cabin_builder.commit()
-		cabin_tris = cabin_builder.tri_count()
+	var cabin_builder := MeshBuilder.new(look.flat)
+	_build_cabin(cabin_builder, look, cabin_profile, cabin_half_width)
+	var cabin_mesh := cabin_builder.commit()
 
-		var glass_builder := MeshBuilder.new(false)
-		_build_glass(glass_builder, look, cabin_profile, cabin_half_width)
-		glass_mesh = glass_builder.commit()
-		glass_tris = glass_builder.tri_count()
+	var glass_builder := MeshBuilder.new(false)
+	_build_glass(glass_builder, look, cabin_profile, cabin_half_width)
+	var glass_mesh := glass_builder.commit()
 
-		var wheel_builder := MeshBuilder.new(look.flat)
-		_build_wheel(wheel_builder, look)
-		wheel_mesh = wheel_builder.commit()
-		wheels_tris = 4 * wheel_builder.tri_count()
+	var wheel_builder := MeshBuilder.new(look.flat)
+	_build_wheel(wheel_builder, look)
+	var wheel_mesh := wheel_builder.commit()
 
 	var tail_builder := MeshBuilder.new(false)
 	_build_tail_lamp(tail_builder)
@@ -183,32 +148,28 @@ func apply(car: Node3D, cabin_profile: PackedVector2Array, cabin_half_width: flo
 	_build_headlamps(headlamp_builder)
 	var headlamp_mesh := headlamp_builder.commit()
 
+	var body_mat := _body_material(look)
+	var wheel_mat := _wheel_material(look)
+	var glass_mat := _glass_material(look)
 	var headlamp_mat := _headlamp_material(look)
 
 	var body_node := car.get_node("BodyMesh") as MeshInstance3D
 	body_node.mesh = body_mesh
-	body_node.material_override = _model_body_material(look) if use_model else _body_material(look)
+	body_node.material_override = body_mat
 
 	var cabin_node := car.get_node("CabinMesh") as MeshInstance3D
 	cabin_node.mesh = cabin_mesh
-	cabin_node.material_override = _body_material(look)
+	cabin_node.material_override = body_mat
 
 	var glass_node := car.get_node("GlassMesh") as MeshInstance3D
 	glass_node.mesh = glass_mesh
-	glass_node.material_override = _glass_material(look)
+	glass_node.material_override = glass_mat
 
-	# The model's wheels are built around their own axle (X), so they sit on the wheel node with no
-	# rotation. The procedural wheel is built around +Y and turned onto X by its `Mesh` child.
 	for name in ["FrontLeft", "FrontRight", "RearLeft", "RearRight"]:
 		var wheel := car.get_node(name) as VehicleWheel3D
 		var mesh_node := wheel.get_node("Mesh") as MeshInstance3D
-		if use_model:
-			mesh_node.mesh = model[MODEL_WHEELS[name]]
-			mesh_node.transform = Transform3D.IDENTITY
-			mesh_node.material_override = _model_wheel_material(look)
-		else:
-			mesh_node.mesh = wheel_mesh
-			mesh_node.material_override = _wheel_material(look)
+		mesh_node.mesh = wheel_mesh
+		mesh_node.material_override = wheel_mat
 
 	# Tail materials (brake light) are owned by car.gd; only the panel mesh changes here.
 	for name in ["TailLeft", "TailRight"]:
@@ -218,47 +179,21 @@ func apply(car: Node3D, cabin_profile: PackedVector2Array, cabin_half_width: flo
 	headlamp_node.mesh = headlamp_mesh
 	headlamp_node.material_override = headlamp_mat
 
+	var wheels_tris := 4 * wheel_builder.tri_count()
 	var lamps_tris := 2 * tail_builder.tri_count() + headlamp_builder.tri_count()
+	var body_tris := body_builder.tri_count()
+	var cabin_tris := cabin_builder.tri_count()
 	return {
-		"triangles": body_tris + cabin_tris + glass_tris + wheels_tris + lamps_tris,
+		"triangles": body_tris + cabin_tris + glass_builder.tri_count() + wheels_tris + lamps_tris,
 		"body": body_tris,
 		"cabin": cabin_tris,
 		"wheels": wheels_tris,
 		"lamps": lamps_tris,
-		"model": use_model,
 		"headlamp_material": headlamp_mat,
 		"style_id": look.style_id,
 		"flat": look.flat,
 		"bevel": look.bevel,
 	}
-
-
-## The TR4 meshes (body and the four wheels), keyed by their GLB node names. Empty when the model
-## is missing or does not load: the caller then builds the procedural car.
-func _load_model_meshes() -> Dictionary:
-	if not ResourceLoader.exists(MODEL_PATH):
-		return {}
-	var packed := load(MODEL_PATH) as PackedScene
-	if packed == null:
-		return {}
-	var root := packed.instantiate()
-	var meshes := {}
-	for node_name in [MODEL_BODY] + MODEL_WHEELS.values():
-		var node := root.find_child(node_name, true, false) as MeshInstance3D
-		if node == null or node.mesh == null:
-			root.free()
-			return {}
-		meshes[node_name] = node.mesh
-	root.free()
-	return meshes
-
-
-func _mesh_triangles(mesh: Mesh) -> int:
-	var arrays := mesh.surface_get_arrays(0)
-	var indices = arrays[Mesh.ARRAY_INDEX]
-	if indices != null:
-		return (indices as PackedInt32Array).size() / 3
-	return (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() / 3
 
 
 ## Reads the active theme: finish knobs plus the car, lamp, road and sidewalk colors.
@@ -613,38 +548,11 @@ func _wheel_material(look: Look) -> Material:
 	return mat
 
 
-## Body of the model: the theme body color times the baked vertex color (glass and tires stay dark).
-func _model_body_material(look: Look) -> Material:
-	if look.toon:
-		return _toon_material(0.22, look.body)
-	var mat := StandardMaterial3D.new()
-	mat.vertex_color_use_as_albedo = true
-	mat.albedo_color = look.body
-	mat.roughness = 0.48
-	mat.metallic = 0.06
-	mat.metallic_specular = 0.4
-	return mat
-
-
-## Wheels of the model: the baked vertex color only (tire black, hub light).
-func _model_wheel_material(look: Look) -> Material:
-	if look.toon:
-		return _toon_material(0.10)
-	var mat := StandardMaterial3D.new()
-	mat.vertex_color_use_as_albedo = true
-	mat.roughness = 0.78
-	mat.metallic = 0.0
-	mat.metallic_specular = 0.25
-	return mat
-
-
-## Toon light with the vertex color of the mesh; `rim` is the strength on the sun side and `albedo`
-## the paint (white keeps the vertex color as it is).
-func _toon_material(rim: float, albedo := Color.WHITE) -> ShaderMaterial:
+## Toon light with the vertex color of the mesh; `rim` is the strength on the sun side.
+func _toon_material(rim: float) -> ShaderMaterial:
 	var mat := ShaderMaterial.new()
 	mat.shader = TOON_SHADER
 	mat.set_shader_parameter("use_vertex_color", true)
-	mat.set_shader_parameter("albedo", albedo)
 	mat.set_shader_parameter("rim_strength", rim)
 	return mat
 
