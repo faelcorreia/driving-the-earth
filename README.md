@@ -10,6 +10,33 @@ GmbH or the BeamNG.Earth authors; all credit for the idea goes to them.
 
 Status: early work in progress. Priorities: 1) performance, 2) realistic driving feel.
 
+## Download and play
+
+For Windows (64-bit), no developer tools needed:
+
+1. Open the [latest release](https://github.com/faelcorreia/driving-the-earth/releases/latest) and
+   download `driving-the-earth-<version>-windows.zip`.
+2. Extract the whole folder. The game needs the `.dll` next to `driving-the-earth.exe`, so do not
+   move the `.exe` on its own.
+3. Run `driving-the-earth.exe`. The release is not code-signed, so Windows SmartScreen shows
+   "Windows protected your PC". Click **More info**, then **Run anyway**.
+4. The first time, pick a place on the world map. The game then builds a small area (about 2 km)
+   around it. This needs an internet connection: map data comes from OpenStreetMap (Overpass API)
+   and elevation from Copernicus GLO-30. The built area is stored in the game's user data folder on
+   your computer.
+
+What to expect:
+
+- The download is small: the zip holds only the game and its extension library. Map data is not
+  included in it.
+- The first build of an area takes noticeably longer than starting the game. The time depends on
+  your connection and computer; no release timing has been measured yet.
+
+Map data and attribution:
+
+- Map data © OpenStreetMap contributors, ODbL: https://www.openstreetmap.org/copyright
+- Elevation: Copernicus GLO-30 DEM (© DLR/ESA, Copernicus license).
+
 ## Layout
 - `crates/tileformat`: tile data contract and units (everything in meters).
 - `crates/tilebake`: offline pipeline (OSM via Overpass, Copernicus GLO-30 DEM, regional terrain packages).

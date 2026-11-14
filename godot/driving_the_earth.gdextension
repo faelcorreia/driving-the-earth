@@ -6,5 +6,6 @@ reloadable = true
 [libraries]
 linux.debug.x86_64 = "res://../target/debug/libdriving_the_earth_ext.so"
 linux.release.x86_64 = "res://../target/release/libdriving_the_earth_ext.so"
+windows.debug.x86_64 = "res://../target/debug/driving_the_earth_ext.dll"
 windows.release.x86_64 = "res://../target/release/driving_the_earth_ext.dll"
 macos.release = "res://../target/release/libdriving_the_earth_ext.dylib"
