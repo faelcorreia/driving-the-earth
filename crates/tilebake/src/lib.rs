@@ -23,7 +23,8 @@ pub mod shp;
 pub mod tiles;
 pub mod utm;
 
-const USER_AGENT: &str = "driving-the-earth/0.1 (tilebake; projeto pessoal)";
+use overpass::USER_AGENT;
+
 const NOMINATIM_URL: &str = "https://nominatim.openstreetmap.org/search";
 /// Environment variable with the collection radius, in meters (read when `meta.json` is created).
 const RADIUS_ENV: &str = "TILEBAKE_RADIUS_M";
